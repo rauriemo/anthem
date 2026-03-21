@@ -45,8 +45,21 @@ These are the source of truth for what to build and how.
 
 ## Current Status
 
-**Phase**: Scaffold (not yet started)
-**Next step**: Create the full project scaffold as described in `docs/plans/implementation.md` section "Scaffold (do first)".
+**Phase**: Phase 1 — Foundation (in progress)
+**Scaffold**: Complete (all 11 steps done, `go build ./...` and `go vet ./...` pass clean)
+**Phase 1 progress**:
+- Step 1: WORKFLOW.md parser — **done**. Full implementation with YAML front matter parsing, `$ENV_VAR` expansion, Go template rendering with sprig function map, validation (required fields, valid tracker kinds, valid rule actions, rule-specific constraints, multiple errors accumulated). 30 table-driven tests all passing.
+- Step 2: VOICE.md parser — scaffold exists (`internal/voice/`), not yet Phase 1 implementation
+- Step 3: `~/.anthem/` bootstrapping — not started
+- Step 4: `anthem init` — not started
+- Step 5: GitHubTracker — scaffold stub exists, not implemented
+- Step 6: Claude Code driver — scaffold stub exists, not implemented
+- Step 7: Orchestrator loop — scaffold stub exists, not implemented
+- Step 8: EventBus — mock exists, real implementation not started
+- Step 9: CLI wiring — Cobra skeleton exists, not wired to orchestrator
+- Step 10: E2E test — not started
+
+**Next step**: Phase 1 step 2 — implement VOICE.md parser (read from `~/.anthem/VOICE.md`, section extraction, `[CORE]` tag detection, prepend to prompt with self-evolution instruction referencing workspace copy).
 
 Update this section as phases are completed.
 

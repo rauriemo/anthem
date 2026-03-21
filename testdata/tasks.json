@@ -1,0 +1,38 @@
+[
+  {
+    "ID": "1",
+    "Identifier": "GH-1",
+    "Title": "Fix login bug",
+    "Body": "The login page returns a 500 error when password contains special characters.",
+    "Labels": ["bug", "todo"],
+    "Status": "active",
+    "Priority": 1,
+    "CreatedAt": "2025-01-15T10:00:00Z",
+    "RepoURL": "https://github.com/test/repo",
+    "Metadata": {}
+  },
+  {
+    "ID": "2",
+    "Identifier": "GH-2",
+    "Title": "Add dark mode",
+    "Body": "Implement dark mode toggle in settings.",
+    "Labels": ["feature", "todo"],
+    "Status": "active",
+    "Priority": 2,
+    "CreatedAt": "2025-01-16T10:00:00Z",
+    "RepoURL": "https://github.com/test/repo",
+    "Metadata": {}
+  },
+  {
+    "ID": "3",
+    "Identifier": "GH-3",
+    "Title": "Completed task",
+    "Body": "This task is already done.",
+    "Labels": ["done"],
+    "Status": "completed",
+    "Priority": 3,
+    "CreatedAt": "2025-01-10T10:00:00Z",
+    "RepoURL": "https://github.com/test/repo",
+    "Metadata": {}
+  }
+]

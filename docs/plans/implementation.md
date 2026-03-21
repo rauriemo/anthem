@@ -172,7 +172,8 @@ Single task end-to-end: poll GitHub Issues, render `~/.anthem/VOICE.md` + self-e
 2. Example WORKFLOW.md + VOICE.md templates
 3. README, CONTRIBUTING.md
 4. CI/CD pipeline, cross-platform release binaries via GoReleaser (Windows/macOS/Linux)
-5. Demo video
+5. Code sign Windows release binaries in GitHub Actions (SignPath.io -- free for OSS, or Azure Trusted Signing) to avoid Windows Smart App Control blocking unsigned executables
+6. Demo video
 
 ### Future Enhancements (Post Phase 4)
 
@@ -198,6 +199,10 @@ Single task end-to-end: poll GitHub Issues, render `~/.anthem/VOICE.md` + self-e
 - **E2E tests**: Use `LocalJSONTracker` + mock `AgentRunner` to test the full orchestrator loop without external dependencies.
 - **Test fixtures**: `testdata/` directories with sample WORKFLOW.md, VOICE.md, and tasks.json files.
 - **CI**: GitHub Actions runs `go test ./...`, `go vet ./...`, `golangci-lint run` on every PR.
+
+## Developer Notes
+
+- **Windows Smart App Control**: `go run` compiles to a temp directory, which Windows Smart App Control may block as an unsigned executable. Use `go build -o anthem.exe ./cmd/anthem` and run the binary directly instead.
 
 ## Reference: OpenAI Symphony
 
