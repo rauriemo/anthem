@@ -1,0 +1,222 @@
+# Anthem
+
+An open-source agent orchestrator for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Anthem polls your GitHub issues, dispatches Claude Code agents to work on them, and manages the full lifecycle -- from claiming a task to closing the issue.
+
+## How It Works
+
+1. You create GitHub issues and label them (e.g. `todo`)
+2. Anthem polls your repo, picks up labeled issues, and renders a prompt from your `WORKFLOW.md` template
+3. Claude Code runs autonomously against each task
+4. When done, Anthem updates the labels and closes the issue
+
+```
+GitHub Issues ──poll──> Anthem Orchestrator ──dispatch──> Claude Code CLI
+     ^                        |                                |
+     |                        v                                v
+     └── label/close ── Issue Tracker <── result ── stream-json output
+```
+
+## Prerequisites
+
+- **Go 1.21+** -- [install](https://go.dev/dl/)
+- **Claude Code CLI** -- installed and authenticated (`claude --version` to verify)
+- **GitHub access** -- either `GITHUB_TOKEN` env var or [GitHub CLI](https://cli.github.com/) authenticated (`gh auth status`)
+
+## Quick Start
+
+### 1. Build
+
+```bash
+go build -o anthem ./cmd/anthem
+```
+
+On Windows, if Smart App Control blocks `go run`, use `go build` and run the binary directly:
+
+```powershell
+go build -o anthem.exe ./cmd/anthem
+.\anthem.exe
+```
+
+### 2. Initialize
+
+```bash
+./anthem init
+```
+
+This creates:
+- `./WORKFLOW.md` -- your project's orchestration config and prompt template
+- `~/.anthem/VOICE.md` -- your global agent personality (shared across all projects)
+
+### 3. Configure WORKFLOW.md
+
+Edit `WORKFLOW.md` and set your repo:
+
+```yaml
+---
+tracker:
+  kind: github
+  repo: "your-username/your-repo"
+  labels:
+    active: ["todo"]
+    terminal: ["done"]
+
+polling:
+  interval_ms: 10000
+
+agent:
+  command: "claude"
+  max_turns: 5
+  max_concurrent: 3
+  stall_timeout_ms: 300000
+---
+
+You are an expert software engineer working on {{.issue.title}}.
+
+Repository: {{.issue.repo_url}}
+
+## Task
+{{.issue.body}}
+
+## Rules
+- Create a branch named `anthem/{{.issue.identifier}}`
+- Make small, focused commits
+- When done, open a PR and comment a summary on the issue
+```
+
+The file has two parts separated by `---`:
+- **YAML front matter** -- tracker config, polling interval, agent settings, rules
+- **Go template body** -- the prompt sent to Claude Code, with access to `{{.issue.title}}`, `{{.issue.body}}`, `{{.issue.identifier}}`, `{{.issue.repo_url}}`, and `{{.issue.labels}}`
+
+The template engine supports [sprig functions](http://masterminds.github.io/sprig/) for advanced logic.
+
+### 4. Set Up GitHub Auth
+
+Anthem needs read/write access to your repo's issues. Choose one:
+
+```bash
+# Option A: environment variable (recommended for CI)
+export GITHUB_TOKEN="ghp_your_token_here"
+
+# Option B: GitHub CLI (recommended for local dev)
+gh auth login
+```
+
+The token needs `repo` scope for private repos, or `public_repo` for public repos.
+
+### 5. Create a Test Issue
+
+Go to your repo on GitHub and create an issue:
+- **Title**: anything, e.g. "Add a CONTRIBUTING.md file"
+- **Label**: add `todo` (or whatever you set in `labels.active`)
+
+### 6. Run Anthem
+
+```bash
+./anthem run --log-level debug
+```
+
+You'll see:
+```
+{"level":"INFO","msg":"starting anthem","tracker":"github"}
+{"level":"INFO","msg":"orchestrator started","interval_ms":10000,"max_concurrent":3}
+{"level":"INFO","msg":"dispatching task","task_id":"1","identifier":"GH-1","title":"Add a CONTRIBUTING.md file"}
+{"level":"INFO","msg":"task completed","task_id":"1","exit_code":0,"cost_usd":0.058,...}
+```
+
+Anthem will:
+1. Find the issue labeled `todo`
+2. Swap the label to `in-progress`
+3. Render the prompt and spawn Claude Code
+4. On completion, label it `done` and close the issue
+
+Press `Ctrl+C` to stop (graceful shutdown).
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `anthem init` | Create starter WORKFLOW.md + bootstrap ~/.anthem/VOICE.md |
+| `anthem run` | Start the orchestrator |
+| `anthem run -w path/to/WORKFLOW.md` | Use a specific workflow file |
+| `anthem run --log-level debug` | Verbose logging |
+| `anthem validate` | Check WORKFLOW.md syntax without starting |
+| `anthem version` | Print version |
+
+## Configuration Reference
+
+### Tracker
+
+```yaml
+tracker:
+  kind: github          # "github" or "local_json"
+  repo: "owner/repo"    # GitHub owner/repo
+  labels:
+    active: ["todo"]    # Issues with these labels are picked up
+    terminal: ["done"]  # Labels added when task completes
+```
+
+### Agent
+
+```yaml
+agent:
+  command: "claude"             # CLI command to invoke
+  max_turns: 5                  # Max conversation turns per task
+  max_concurrent: 3             # Global concurrency limit
+  max_concurrent_per_label:     # Per-label concurrency limits
+    planning: 1
+  stall_timeout_ms: 300000      # Kill agent if no output for 5 min
+  model: ""                     # Override model (optional)
+  allowed_tools: []             # Restrict available tools (optional)
+```
+
+### Rules
+
+```yaml
+rules:
+  - match:
+      labels: ["planning"]
+    action: require_approval     # Wait for approval_label before dispatch
+    approval_label: "approved"
+  - match:
+      labels: ["bug"]
+    action: auto_assign
+```
+
+### VOICE.md
+
+The global personality file at `~/.anthem/VOICE.md` is prepended to every prompt. It supports `[CORE]` sections that agents cannot modify:
+
+```markdown
+## Identity
+Name: Aria
+Role: Senior engineer
+
+## Boundaries [CORE]
+- Never force-push to main
+- Always create a branch for changes
+```
+
+See [VOICE.md.example](VOICE.md.example) for a full example.
+
+## Development
+
+```bash
+make build          # Build binary
+make test           # Run unit tests
+make vet            # Run go vet
+make lint           # Run golangci-lint
+make test-integration  # Run integration tests (requires GitHub API)
+```
+
+## Project Status
+
+**Phase 1 (current)**: Core orchestrator loop, GitHub tracker, Claude Code driver, CLI. End-to-end functional.
+
+Upcoming:
+- **Phase 2**: Rules engine, workspace manager, VOICE.md self-evolution, retry/backoff, config hot-reload
+- **Phase 3**: Web dashboard, cost tracking, WebSocket event stream
+- **Phase 4**: LocalJSON tracker, documentation, CI/CD releases, code signing
+
+## License
+
+MIT
