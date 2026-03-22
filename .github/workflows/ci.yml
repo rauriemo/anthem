@@ -29,4 +29,5 @@ jobs:
           go-version: stable
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.64.8
+          install-mode: goinstall
