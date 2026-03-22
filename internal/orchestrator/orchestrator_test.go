@@ -175,6 +175,71 @@ func TestOrchestratorSkipsApprovalRequired(t *testing.T) {
 	}
 }
 
+func TestTickSkippedWhenThrottled(t *testing.T) {
+	tests := []struct {
+		name           string
+		throttleUntil  time.Time
+		wantDispatched bool
+	}{
+		{
+			name:           "tick skipped when throttled",
+			throttleUntil:  time.Now().Add(10 * time.Minute),
+			wantDispatched: false,
+		},
+		{
+			name:           "tick runs after throttle expires",
+			throttleUntil:  time.Now().Add(-1 * time.Second),
+			wantDispatched: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tasks := []types.Task{
+				{ID: "1", Identifier: "GH-1", Title: "T1", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+			}
+			trk := tracker.NewMockTracker(tasks)
+			trk.ThrottleUntil = tt.throttleUntil
+
+			dispatched := false
+			runner := agent.NewMockRunner()
+			runner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+				dispatched = true
+				return &types.RunResult{ExitCode: 0, Duration: time.Millisecond}, nil
+			}
+
+			ws := workspace.NewMockWorkspaceManager()
+			events := NewMockEventBus()
+			logger := testLogger()
+
+			cfg := config.DefaultConfig()
+			cfg.Tracker.Kind = "github"
+			cfg.Tracker.Repo = "t/r"
+			cfg.Polling.IntervalMS = 1000
+
+			orch := New(Opts{
+				Config:       &cfg,
+				TemplateBody: "{{.issue.title}}",
+				Tracker:      trk,
+				Runner:       runner,
+				Workspace:    ws,
+				EventBus:     events,
+				Logger:       logger,
+			})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+
+			_ = orch.Run(ctx)
+			time.Sleep(100 * time.Millisecond)
+
+			if dispatched != tt.wantDispatched {
+				t.Errorf("dispatched = %v, want %v", dispatched, tt.wantDispatched)
+			}
+		})
+	}
+}
+
 func TestSortTasks(t *testing.T) {
 	now := time.Now()
 	tasks := []types.Task{

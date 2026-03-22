@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"time"
 
 	"github.com/rauriemo/anthem/internal/types"
 )
@@ -13,4 +14,5 @@ type IssueTracker interface {
 	AddComment(ctx context.Context, id string, body string) error
 	AddLabel(ctx context.Context, id string, label string) error
 	RemoveLabel(ctx context.Context, id string, label string) error
+	ShouldThrottle() (bool, time.Duration)
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/rauriemo/anthem/internal/types"
 )
@@ -127,4 +128,8 @@ func (l *LocalJSONTracker) RemoveLabel(_ context.Context, id string, label strin
 		}
 	}
 	return nil
+}
+
+func (l *LocalJSONTracker) ShouldThrottle() (bool, time.Duration) {
+	return false, 0
 }

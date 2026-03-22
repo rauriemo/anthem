@@ -15,29 +15,38 @@ func TestParseStreamEvent(t *testing.T) {
 	}{
 		{
 			name:     "result event",
-			input:    `{"type":"result","result":{"session_id":"sess-123","exitCode":0,"input_tokens":500,"output_tokens":200,"cost_usd":0.05,"num_turns":3,"duration_seconds":12.5}}`,
+			input:    `{"type":"result","subtype":"success","is_error":false,"duration_ms":3043,"num_turns":3,"result":"Hello.","session_id":"sess-123","total_cost_usd":0.05,"usage":{"input_tokens":500,"output_tokens":200,"cache_creation_input_tokens":100,"cache_read_input_tokens":50}}`,
 			wantType: "result",
 			checkFunc: func(t *testing.T, e *StreamEvent) {
-				if e.Result == nil {
-					t.Fatal("result should not be nil")
+				if e.SessionID != "sess-123" {
+					t.Errorf("session_id = %q", e.SessionID)
 				}
-				if e.Result.SessionID != "sess-123" {
-					t.Errorf("session_id = %q", e.Result.SessionID)
+				if e.IsError {
+					t.Error("expected is_error=false")
 				}
-				if e.Result.ExitCode != 0 {
-					t.Errorf("exit_code = %d", e.Result.ExitCode)
+				if e.TotalCost != 0.05 {
+					t.Errorf("total_cost_usd = %f", e.TotalCost)
 				}
-				if e.Result.TokensIn != 500 {
-					t.Errorf("tokens_in = %d", e.Result.TokensIn)
+				if e.NumTurns != 3 {
+					t.Errorf("num_turns = %d", e.NumTurns)
 				}
-				if e.Result.TokensOut != 200 {
-					t.Errorf("tokens_out = %d", e.Result.TokensOut)
+				if e.DurationMS != 3043 {
+					t.Errorf("duration_ms = %d", e.DurationMS)
 				}
-				if e.Result.CostUSD != 0.05 {
-					t.Errorf("cost_usd = %f", e.Result.CostUSD)
+				if e.Usage == nil {
+					t.Fatal("usage should not be nil")
 				}
-				if e.Result.TurnsUsed != 3 {
-					t.Errorf("num_turns = %d", e.Result.TurnsUsed)
+				if e.Usage.InputTokens != 500 {
+					t.Errorf("input_tokens = %d", e.Usage.InputTokens)
+				}
+				if e.Usage.OutputTokens != 200 {
+					t.Errorf("output_tokens = %d", e.Usage.OutputTokens)
+				}
+				if e.Usage.CacheCreationInputTokens != 100 {
+					t.Errorf("cache_creation_input_tokens = %d", e.Usage.CacheCreationInputTokens)
+				}
+				if e.Usage.CacheReadInputTokens != 50 {
+					t.Errorf("cache_read_input_tokens = %d", e.Usage.CacheReadInputTokens)
 				}
 			},
 		},

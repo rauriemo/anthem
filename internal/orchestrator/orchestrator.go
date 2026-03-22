@@ -96,6 +96,13 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 func (o *Orchestrator) tick(ctx context.Context) {
 	o.logger.Debug("tick start")
 
+	if throttler, ok := o.tracker.(interface{ ShouldThrottle() (bool, time.Duration) }); ok {
+		if throttled, remaining := throttler.ShouldThrottle(); throttled {
+			o.logger.Warn("skipping tick: rate limit throttled", "remaining", remaining)
+			return
+		}
+	}
+
 	// 1. Reconcile active runs
 	o.reconcile(ctx)
 

@@ -3,14 +3,16 @@ package tracker
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/rauriemo/anthem/internal/types"
 )
 
 type MockTracker struct {
-	mu       sync.Mutex
-	Tasks    []types.Task
-	Comments map[string][]string // task ID -> comments
+	mu            sync.Mutex
+	Tasks         []types.Task
+	Comments      map[string][]string // task ID -> comments
+	ThrottleUntil time.Time
 }
 
 func NewMockTracker(tasks []types.Task) *MockTracker {
@@ -90,4 +92,18 @@ func (m *MockTracker) RemoveLabel(_ context.Context, id string, label string) er
 		}
 	}
 	return nil
+}
+
+func (m *MockTracker) ShouldThrottle() (bool, time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.ThrottleUntil.IsZero() {
+		return false, 0
+	}
+	remaining := time.Until(m.ThrottleUntil)
+	if remaining <= 0 {
+		m.ThrottleUntil = time.Time{}
+		return false, 0
+	}
+	return true, remaining
 }

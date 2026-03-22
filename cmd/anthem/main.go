@@ -59,6 +59,10 @@ func runCmd() *cobra.Command {
 			level := parseLogLevel(logLevel)
 			logger := logging.NewLogger(os.Stdout, level)
 
+			if err := bootstrapAnthemDir(logger); err != nil {
+				return fmt.Errorf("bootstrapping ~/.anthem: %w", err)
+			}
+
 			cfg, body, err := config.LoadFile(workflowPath)
 			if err != nil {
 				return fmt.Errorf("loading workflow: %w", err)
@@ -218,6 +222,39 @@ func createTracker(ctx context.Context, cfg *config.Config, logger *slog.Logger)
 	default:
 		return nil, fmt.Errorf("unsupported tracker kind: %s", cfg.Tracker.Kind)
 	}
+}
+
+func bootstrapAnthemDir(logger *slog.Logger) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolving home directory: %w", err)
+	}
+	return bootstrapDir(filepath.Join(home, ".anthem"), logger)
+}
+
+func bootstrapDir(anthemDir string, logger *slog.Logger) error {
+	created := false
+	if _, err := os.Stat(anthemDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(anthemDir, 0755); err != nil {
+			return fmt.Errorf("creating %s: %w", anthemDir, err)
+		}
+		logger.Info("created anthem directory", "path", anthemDir)
+		created = true
+	}
+
+	voicePath := filepath.Join(anthemDir, "VOICE.md")
+	if _, err := os.Stat(voicePath); os.IsNotExist(err) {
+		if err := os.WriteFile(voicePath, []byte(defaultVoice), 0644); err != nil {
+			return fmt.Errorf("writing %s: %w", voicePath, err)
+		}
+		logger.Info("created default VOICE.md", "path", voicePath)
+		created = true
+	}
+
+	if !created {
+		logger.Debug("anthem directory already bootstrapped", "path", anthemDir)
+	}
+	return nil
 }
 
 func createFileIfNotExists(path, content string) error {

@@ -2,8 +2,10 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -14,14 +16,37 @@ import (
 	"github.com/rauriemo/anthem/internal/types"
 )
 
+// etagTransport injects If-None-Match headers for conditional requests.
+type etagTransport struct {
+	base   http.RoundTripper
+	etags  map[string]string // URL -> ETag
+}
+
+func (t *etagTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	key := req.URL.String()
+	if etag, ok := t.etags[key]; ok {
+		req.Header.Set("If-None-Match", etag)
+	}
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+	if etag := resp.Header.Get("ETag"); etag != "" {
+		t.etags[key] = etag
+	}
+	return resp, nil
+}
+
 // GitHubTracker implements tracker.IssueTracker using the GitHub API.
 type GitHubTracker struct {
-	client       *gh.Client
-	owner        string
-	repo         string
-	activeLabels []string
-	logger       *slog.Logger
-	etag         string
+	client        *gh.Client
+	owner         string
+	repo          string
+	activeLabels  []string
+	logger        *slog.Logger
+	etags         map[string]string // label -> ETag
+	lastTasks     []types.Task      // cached result from last successful ListActive
+	throttleUntil time.Time
 }
 
 type Options struct {
@@ -43,8 +68,14 @@ func New(ctx context.Context, opts Options) (*GitHubTracker, error) {
 // NewWithToken creates a GitHubTracker with an explicit token.
 func NewWithToken(ctx context.Context, token string, opts Options) *GitHubTracker {
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-	httpClient := oauth2.NewClient(ctx, ts)
-	client := gh.NewClient(httpClient)
+	oauthClient := oauth2.NewClient(ctx, ts)
+
+	et := &etagTransport{
+		base:  oauthClient.Transport,
+		etags: make(map[string]string),
+	}
+	oauthClient.Transport = et
+	client := gh.NewClient(oauthClient)
 
 	logger := opts.Logger
 	if logger == nil {
@@ -57,6 +88,34 @@ func NewWithToken(ctx context.Context, token string, opts Options) *GitHubTracke
 		repo:         opts.Repo,
 		activeLabels: opts.ActiveLabels,
 		logger:       logger,
+		etags:        make(map[string]string),
+	}
+}
+
+// newWithHTTPClient creates a GitHubTracker with a custom HTTP client (for testing).
+// It wraps the client's transport with etagTransport for conditional requests.
+func newWithHTTPClient(httpClient *http.Client, opts Options) *GitHubTracker {
+	et := &etagTransport{
+		base:  httpClient.Transport,
+		etags: make(map[string]string),
+	}
+	if et.base == nil {
+		et.base = http.DefaultTransport
+	}
+	httpClient.Transport = et
+	client := gh.NewClient(httpClient)
+
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &GitHubTracker{
+		client:       client,
+		owner:        opts.Owner,
+		repo:         opts.Repo,
+		activeLabels: opts.ActiveLabels,
+		logger:       logger,
+		etags:        make(map[string]string),
 	}
 }
 
@@ -71,6 +130,7 @@ func ParseRepo(fullRepo string) (owner, repo string, err error) {
 
 func (g *GitHubTracker) ListActive(ctx context.Context) ([]types.Task, error) {
 	var allIssues []*gh.Issue
+	allCached := true
 
 	for _, label := range g.activeLabels {
 		opts := &gh.IssueListByRepoOptions{
@@ -79,9 +139,15 @@ func (g *GitHubTracker) ListActive(ctx context.Context) ([]types.Task, error) {
 			ListOptions: gh.ListOptions{PerPage: 100},
 		}
 
+		cachedLabel := false
 		for {
 			issues, resp, err := g.client.Issues.ListByRepo(ctx, g.owner, g.repo, opts)
 			if err != nil {
+				if isNotModified(err) {
+					g.logger.Debug("github returned 304, using cached tasks", "label", label)
+					cachedLabel = true
+					break
+				}
 				return nil, fmt.Errorf("listing issues with label %q: %w", label, err)
 			}
 			g.checkRateLimit(resp)
@@ -98,6 +164,13 @@ func (g *GitHubTracker) ListActive(ctx context.Context) ([]types.Task, error) {
 			}
 			opts.Page = resp.NextPage
 		}
+		if !cachedLabel {
+			allCached = false
+		}
+	}
+
+	if allCached && g.lastTasks != nil {
+		return g.lastTasks, nil
 	}
 
 	seen := make(map[int64]bool)
@@ -109,7 +182,16 @@ func (g *GitHubTracker) ListActive(ctx context.Context) ([]types.Task, error) {
 		seen[issue.GetID()] = true
 		tasks = append(tasks, issueToTask(issue, g.owner, g.repo))
 	}
+	g.lastTasks = tasks
 	return tasks, nil
+}
+
+func isNotModified(err error) bool {
+	var errResp *gh.ErrorResponse
+	if errors.As(err, &errResp) {
+		return errResp.Response != nil && errResp.Response.StatusCode == http.StatusNotModified
+	}
+	return false
 }
 
 func (g *GitHubTracker) GetTask(ctx context.Context, id string) (*types.Task, error) {
@@ -201,12 +283,27 @@ func (g *GitHubTracker) checkRateLimit(resp *gh.Response) {
 	limit := resp.Rate.Limit
 	if limit > 0 && remaining < limit/10 {
 		reset := resp.Rate.Reset.Time
+		g.throttleUntil = reset
 		g.logger.Warn("github rate limit low",
 			"remaining", remaining,
 			"limit", limit,
 			"reset", reset.Format(time.RFC3339),
 		)
 	}
+}
+
+// ShouldThrottle returns true and the wait duration if the tracker is
+// currently throttled due to low API rate limit.
+func (g *GitHubTracker) ShouldThrottle() (bool, time.Duration) {
+	if g.throttleUntil.IsZero() {
+		return false, 0
+	}
+	remaining := time.Until(g.throttleUntil)
+	if remaining <= 0 {
+		g.throttleUntil = time.Time{}
+		return false, 0
+	}
+	return true, remaining
 }
 
 func issueToTask(issue *gh.Issue, owner, repo string) types.Task {
