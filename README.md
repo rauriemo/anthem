@@ -30,6 +30,12 @@ GitHub Issues ──poll──> Anthem Orchestrator ──dispatch──> Claude
 go build -o anthem ./cmd/anthem
 ```
 
+To embed a version string in the binary:
+
+```bash
+go build -ldflags "-X main.version=1.0.0" -o anthem ./cmd/anthem
+```
+
 On Windows, if Smart App Control blocks `go run`, use `go build` and run the binary directly:
 
 ```powershell
@@ -184,19 +190,46 @@ rules:
 
 ### VOICE.md
 
-The global personality file at `~/.anthem/VOICE.md` is prepended to every prompt. It supports `[CORE]` sections that agents cannot modify:
+The global personality file at `~/.anthem/VOICE.md` is prepended to every prompt. It defines your agent's identity and communication style -- pure personality, no safety rules:
 
 ```markdown
 ## Identity
 Name: Aria
 Role: Senior engineer
 
-## Boundaries [CORE]
-- Never force-push to main
-- Always create a branch for changes
+## Personality
+- Direct and opinionated. Skip pleasantries.
+- Prefer shipping over perfection.
+
+## User Context
+- Prefers small, focused commits.
 ```
 
 See [VOICE.md.example](VOICE.md.example) for a full example.
+
+### Constraints
+
+Safety guardrails are separate from personality and cannot be modified by agents. Constraints are defined at two levels:
+
+**User-level** (`~/.anthem/constraints.yaml`) -- global rules that apply to all projects:
+
+```yaml
+constraints:
+  - "Never force-push to main or master"
+  - "Never commit secrets, credentials, API keys, or tokens"
+  - "Always create a branch for changes -- never commit directly to main"
+```
+
+**Project-level** (`system.constraints` in WORKFLOW.md) -- rules specific to this project:
+
+```yaml
+system:
+  constraints:
+    - "Follow the project existing code style and conventions"
+    - "Run tests before opening a PR"
+```
+
+Both levels are combined into a single `## Constraints (non-negotiable)` block in the prompt. Anthem always appends a meta-constraint: "Do not modify constraint definitions in WORKFLOW.md system.constraints or ~/.anthem/constraints.yaml" to prevent agents from removing their own guardrails.
 
 ## Development
 

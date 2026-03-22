@@ -12,12 +12,14 @@ import (
 
 	"github.com/rauriemo/anthem/internal/agent/claude"
 	"github.com/rauriemo/anthem/internal/config"
+	"github.com/rauriemo/anthem/internal/constraints"
 	"github.com/rauriemo/anthem/internal/logging"
 	"github.com/rauriemo/anthem/internal/orchestrator"
 	"github.com/rauriemo/anthem/internal/tracker"
 	"github.com/rauriemo/anthem/internal/types"
 	ghtracker "github.com/rauriemo/anthem/internal/tracker/github"
 	localtracker "github.com/rauriemo/anthem/internal/tracker/local"
+	"github.com/rauriemo/anthem/internal/voice"
 	"github.com/rauriemo/anthem/internal/workspace"
 )
 
@@ -63,6 +65,33 @@ func runCmd() *cobra.Command {
 				return fmt.Errorf("bootstrapping ~/.anthem: %w", err)
 			}
 
+			// Load user-level constraints
+			var userConstraints []string
+			constraintsPath, err := constraints.DefaultPath()
+			if err != nil {
+				return fmt.Errorf("resolving constraints path: %w", err)
+			}
+			cc, err := constraints.LoadFile(constraintsPath)
+			if err != nil {
+				return fmt.Errorf("loading constraints: %w", err)
+			}
+			if cc.Loaded {
+				userConstraints = cc.Constraints
+			} else {
+				logger.Debug("no user constraints file found, continuing without")
+			}
+
+			// Load voice
+			var voiceContent string
+			home, _ := os.UserHomeDir()
+			voicePath := filepath.Join(home, ".anthem", "VOICE.md")
+			vc, err := voice.LoadFile(voicePath)
+			if err != nil {
+				logger.Warn("VOICE.md not found, continuing without personality", "path", voicePath)
+			} else {
+				voiceContent = vc.Raw
+			}
+
 			cfg, body, err := config.LoadFile(workflowPath)
 			if err != nil {
 				return fmt.Errorf("loading workflow: %w", err)
@@ -93,13 +122,15 @@ func runCmd() *cobra.Command {
 			events := orchestrator.NewEventBus(logger)
 
 			orch := orchestrator.New(orchestrator.Opts{
-				Config:       cfg,
-				TemplateBody: body,
-				Tracker:      trk,
-				Runner:       runner,
-				Workspace:    ws,
-				EventBus:     events,
-				Logger:       logger,
+				Config:          cfg,
+				TemplateBody:    body,
+				Tracker:         trk,
+				Runner:          runner,
+				Workspace:       ws,
+				EventBus:        events,
+				Logger:          logger,
+				VoiceContent:    voiceContent,
+				UserConstraints: userConstraints,
 			})
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
@@ -153,14 +184,14 @@ func validateCmd() *cobra.Command {
 func initCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "init",
-		Short: "Create starter WORKFLOW.md and bootstrap ~/.anthem/VOICE.md",
+		Short: "Create starter WORKFLOW.md and bootstrap ~/.anthem/",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			// Create WORKFLOW.md in current directory
 			if err := createFileIfNotExists("WORKFLOW.md", defaultWorkflow); err != nil {
 				return err
 			}
 
-			// Bootstrap ~/.anthem/ and VOICE.md
+			// Bootstrap ~/.anthem/, VOICE.md, and constraints.yaml
 			home, err := os.UserHomeDir()
 			if err != nil {
 				return fmt.Errorf("resolving home directory: %w", err)
@@ -175,9 +206,15 @@ func initCmd() *cobra.Command {
 				return err
 			}
 
+			constraintsPath := filepath.Join(anthemDir, "constraints.yaml")
+			if err := createFileIfNotExists(constraintsPath, defaultConstraints); err != nil {
+				return err
+			}
+
 			fmt.Println("Anthem initialized:")
 			fmt.Println("  ./WORKFLOW.md created")
 			fmt.Printf("  %s created\n", voicePath)
+			fmt.Printf("  %s created\n", constraintsPath)
 			return nil
 		},
 	}
@@ -248,6 +285,15 @@ func bootstrapDir(anthemDir string, logger *slog.Logger) error {
 			return fmt.Errorf("writing %s: %w", voicePath, err)
 		}
 		logger.Info("created default VOICE.md", "path", voicePath)
+		created = true
+	}
+
+	constraintsPath := filepath.Join(anthemDir, "constraints.yaml")
+	if _, err := os.Stat(constraintsPath); os.IsNotExist(err) {
+		if err := os.WriteFile(constraintsPath, []byte(defaultConstraints), 0644); err != nil {
+			return fmt.Errorf("writing %s: %w", constraintsPath, err)
+		}
+		logger.Info("created default constraints.yaml", "path", constraintsPath)
 		created = true
 	}
 

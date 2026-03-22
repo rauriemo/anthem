@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,6 +238,196 @@ func TestTickSkippedWhenThrottled(t *testing.T) {
 				t.Errorf("dispatched = %v, want %v", dispatched, tt.wantDispatched)
 			}
 		})
+	}
+}
+
+func TestConstraintsInPrompt(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Identifier: "GH-1", Title: "Fix bug", Body: "Fix it", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	var receivedPrompt string
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		receivedPrompt = opts.Prompt
+		return &types.RunResult{SessionID: "s1", ExitCode: 0, Duration: time.Millisecond}, nil
+	}
+
+	ws := workspace.NewMockWorkspaceManager()
+	events := NewMockEventBus()
+	logger := testLogger()
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 1000
+	cfg.System.Constraints = []string{"Run tests before merging"}
+
+	orch := New(Opts{
+		Config:          &cfg,
+		TemplateBody:    "Work on {{.issue.title}}",
+		Tracker:         trk,
+		Runner:          runner,
+		Workspace:       ws,
+		EventBus:        events,
+		Logger:          logger,
+		VoiceContent:    "# Voice\n\n## Identity\nName: TestBot",
+		UserConstraints: []string{"Never force-push to main"},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	_ = orch.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	if receivedPrompt == "" {
+		t.Fatal("expected prompt to be set")
+	}
+
+	// Voice should appear first
+	if !strings.HasPrefix(receivedPrompt, "# Voice") {
+		t.Error("prompt should start with voice content")
+	}
+
+	// Constraints header
+	if !strings.Contains(receivedPrompt, "## Constraints (non-negotiable)") {
+		t.Error("prompt should contain constraints header")
+	}
+
+	// User constraint
+	if !strings.Contains(receivedPrompt, "Never force-push to main") {
+		t.Error("prompt should contain user constraint")
+	}
+
+	// Project constraint
+	if !strings.Contains(receivedPrompt, "Run tests before merging") {
+		t.Error("prompt should contain project constraint")
+	}
+
+	// Meta-constraint
+	if !strings.Contains(receivedPrompt, "Do not modify constraint definitions") {
+		t.Error("prompt should contain meta-constraint")
+	}
+
+	// Task template at the end
+	if !strings.Contains(receivedPrompt, "Work on Fix bug") {
+		t.Error("prompt should contain rendered task template")
+	}
+}
+
+func TestBuildConstraints(t *testing.T) {
+	tests := []struct {
+		name               string
+		userConstraints    []string
+		projectConstraints []string
+		wantEmpty          bool
+		wantContains       []string
+	}{
+		{
+			name:      "both empty returns empty",
+			wantEmpty: true,
+		},
+		{
+			name:            "user constraints only",
+			userConstraints: []string{"No force push"},
+			wantContains:    []string{"No force push", "Constraints (non-negotiable)", "Do not modify constraint definitions"},
+		},
+		{
+			name:               "project constraints only",
+			projectConstraints: []string{"Run tests"},
+			wantContains:       []string{"Run tests", "Do not modify constraint definitions"},
+		},
+		{
+			name:               "both combined",
+			userConstraints:    []string{"User rule"},
+			projectConstraints: []string{"Project rule"},
+			wantContains:       []string{"User rule", "Project rule", "Do not modify constraint definitions"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildConstraints(tt.userConstraints, tt.projectConstraints)
+			if tt.wantEmpty {
+				if result != "" {
+					t.Errorf("expected empty, got %q", result)
+				}
+				return
+			}
+			for _, want := range tt.wantContains {
+				if !strings.Contains(result, want) {
+					t.Errorf("result should contain %q", want)
+				}
+			}
+		})
+	}
+}
+
+func TestPromptWithoutVoice(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Identifier: "GH-1", Title: "Add feature", Body: "Do it", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	var receivedPrompt string
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		receivedPrompt = opts.Prompt
+		return &types.RunResult{SessionID: "s1", ExitCode: 0, Duration: time.Millisecond}, nil
+	}
+
+	ws := workspace.NewMockWorkspaceManager()
+	events := NewMockEventBus()
+	logger := testLogger()
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 1000
+	cfg.System.Constraints = []string{"Always run linter"}
+
+	orch := New(Opts{
+		Config:          &cfg,
+		TemplateBody:    "Work on {{.issue.title}}",
+		Tracker:         trk,
+		Runner:          runner,
+		Workspace:       ws,
+		EventBus:        events,
+		Logger:          logger,
+		VoiceContent:    "",
+		UserConstraints: []string{"No force push"},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	_ = orch.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	if receivedPrompt == "" {
+		t.Fatal("expected prompt to be set")
+	}
+
+	if strings.HasPrefix(receivedPrompt, "# Voice") {
+		t.Error("prompt should not start with voice when VoiceContent is empty")
+	}
+
+	if !strings.HasPrefix(receivedPrompt, "## Constraints") {
+		t.Error("prompt should start with constraints when voice is empty")
+	}
+
+	if !strings.Contains(receivedPrompt, "No force push") {
+		t.Error("prompt should contain user constraint")
+	}
+
+	if !strings.Contains(receivedPrompt, "Always run linter") {
+		t.Error("prompt should contain project constraint")
+	}
+
+	if !strings.Contains(receivedPrompt, "Work on Add feature") {
+		t.Error("prompt should contain rendered task template")
 	}
 }
 

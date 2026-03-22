@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	gh "github.com/google/go-github/v68/github"
@@ -18,21 +19,27 @@ import (
 
 // etagTransport injects If-None-Match headers for conditional requests.
 type etagTransport struct {
-	base   http.RoundTripper
-	etags  map[string]string // URL -> ETag
+	base  http.RoundTripper
+	mu    sync.Mutex
+	etags map[string]string // URL -> ETag
 }
 
 func (t *etagTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	key := req.URL.String()
-	if etag, ok := t.etags[key]; ok {
+	t.mu.Lock()
+	etag := t.etags[key]
+	t.mu.Unlock()
+	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		return resp, err
 	}
-	if etag := resp.Header.Get("ETag"); etag != "" {
-		t.etags[key] = etag
+	if newEtag := resp.Header.Get("ETag"); newEtag != "" {
+		t.mu.Lock()
+		t.etags[key] = newEtag
+		t.mu.Unlock()
 	}
 	return resp, nil
 }
@@ -44,8 +51,7 @@ type GitHubTracker struct {
 	repo          string
 	activeLabels  []string
 	logger        *slog.Logger
-	etags         map[string]string // label -> ETag
-	lastTasks     []types.Task      // cached result from last successful ListActive
+	lastTasks     []types.Task // cached result from last successful ListActive
 	throttleUntil time.Time
 }
 
@@ -88,7 +94,6 @@ func NewWithToken(ctx context.Context, token string, opts Options) *GitHubTracke
 		repo:         opts.Repo,
 		activeLabels: opts.ActiveLabels,
 		logger:       logger,
-		etags:        make(map[string]string),
 	}
 }
 
@@ -115,7 +120,6 @@ func newWithHTTPClient(httpClient *http.Client, opts Options) *GitHubTracker {
 		repo:         opts.Repo,
 		activeLabels: opts.ActiveLabels,
 		logger:       logger,
-		etags:        make(map[string]string),
 	}
 }
 

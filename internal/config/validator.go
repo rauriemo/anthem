@@ -20,6 +20,10 @@ var validRuleActions = map[string]bool{
 
 // Validate checks that a Config has all required fields and valid values.
 func Validate(cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+
 	var errs []error
 
 	if cfg.Tracker.Kind == "" {

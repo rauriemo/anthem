@@ -36,8 +36,11 @@ rules:
 
 system:
   workflow_changes_require_approval: true
-  voice_changes_require_approval: false
-  voice_core_immutable: true
+  constraints:
+    - "Follow the project existing code style and conventions"
+    - "Run tests before opening a PR"
+    - "Keep commits small and focused on a single concern"
+    - "Do not modify files outside the project directory"
 
 server:
   port: 8080

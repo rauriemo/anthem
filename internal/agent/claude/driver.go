@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
 	"sync"
@@ -81,19 +82,16 @@ func (d *Driver) execute(ctx context.Context, workDir string, args []string, opt
 		return nil, fmt.Errorf("starting claude process: %w", err)
 	}
 
-	start := time.Now()
-	var result *types.RunResult
-	var parseErr error
-	var lastActivity time.Time
-
 	stallTimeout := time.Duration(opts.StallTimeoutMS) * time.Millisecond
 	if stallTimeout == 0 {
 		stallTimeout = 5 * time.Minute
 	}
 
+	start := time.Now()
+
 	// Monitor for stall in a separate goroutine
 	var mu sync.Mutex
-	lastActivity = time.Now()
+	lastActivity := time.Now()
 	done := make(chan struct{})
 	defer close(done)
 
@@ -120,13 +118,51 @@ func (d *Driver) execute(ctx context.Context, workDir string, args []string, opt
 		}
 	}()
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
+	onActivity := func() {
 		mu.Lock()
 		lastActivity = time.Now()
 		mu.Unlock()
+	}
+
+	result, scanErr := d.parseStdout(ctx, stdout, start, stallTimeout, onActivity, func() {
+		go func() {
+			time.Sleep(postResultTimeout)
+			_ = d.pm.Terminate(cmd)
+		}()
+	})
+
+	waitErr := cmd.Wait()
+
+	if result != nil {
+		result.Duration = time.Since(start)
+		return result, nil
+	}
+	if scanErr != nil {
+		return nil, fmt.Errorf("reading claude output: %w", scanErr)
+	}
+	if waitErr != nil {
+		return nil, fmt.Errorf("claude process exited: %w", waitErr)
+	}
+
+	return &types.RunResult{
+		ExitCode: -1,
+		Duration: time.Since(start),
+	}, nil
+}
+
+// parseStdout reads stream-json lines from r and extracts the result event.
+// onActivity is called on each line read. onResult is called when a result event is found.
+// Returns the parsed result (or nil) and any scanner error.
+func (d *Driver) parseStdout(ctx context.Context, r io.Reader, start time.Time, stallTimeout time.Duration, onActivity func(), onResult func()) (*types.RunResult, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+
+	var result *types.RunResult
+
+	for scanner.Scan() {
+		if onActivity != nil {
+			onActivity()
+		}
 
 		line := scanner.Bytes()
 		event, err := ParseStreamEvent(line)
@@ -165,31 +201,16 @@ func (d *Driver) execute(ctx context.Context, workDir string, args []string, opt
 				"tokens_in", tokensIn,
 				"tokens_out", tokensOut,
 			)
-			// Known bug: Claude Code may hang after final result event.
-			go func() {
-				time.Sleep(postResultTimeout)
-				_ = d.pm.Terminate(cmd)
-			}()
+			if onResult != nil {
+				onResult()
+			}
 		}
 	}
 
-	// Wait for process to exit
-	waitErr := cmd.Wait()
-
-	if result != nil {
-		result.Duration = time.Since(start)
-		return result, nil
+	if err := scanner.Err(); err != nil {
+		d.logger.Warn("error reading claude stdout", "error", err)
+		return result, err
 	}
 
-	if parseErr != nil {
-		return nil, fmt.Errorf("parsing claude output: %w", parseErr)
-	}
-	if waitErr != nil {
-		return nil, fmt.Errorf("claude process exited: %w", waitErr)
-	}
-
-	return &types.RunResult{
-		ExitCode: -1,
-		Duration: time.Since(start),
-	}, nil
+	return result, nil
 }

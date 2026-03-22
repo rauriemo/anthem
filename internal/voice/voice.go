@@ -9,7 +9,6 @@ import (
 type Section struct {
 	Name    string
 	Content string
-	IsCore  bool
 }
 
 type VoiceConfig struct {
@@ -33,40 +32,34 @@ func Parse(content string) (*VoiceConfig, error) {
 
 func extractSections(content string) []Section {
 	var sections []Section
-	var current *Section
+	var currentName string
+	var buf strings.Builder
+
+	finalize := func() {
+		if currentName != "" {
+			sections = append(sections, Section{
+				Name:    currentName,
+				Content: strings.TrimSpace(buf.String()),
+			})
+		}
+	}
 
 	for _, line := range strings.Split(content, "\n") {
 		if strings.HasPrefix(line, "## ") {
-			if current != nil {
-				current.Content = strings.TrimSpace(current.Content)
-				sections = append(sections, *current)
-			}
-			name := strings.TrimPrefix(line, "## ")
-			current = &Section{
-				Name:   name,
-				IsCore: isCoreSectionHeader(name),
-			}
+			finalize()
+			currentName = strings.TrimPrefix(line, "## ")
+			buf.Reset()
 			continue
 		}
-		if current != nil {
-			current.Content += line + "\n"
+		if currentName != "" {
+			buf.WriteString(line)
+			buf.WriteByte('\n')
 		}
 	}
-	if current != nil {
-		current.Content = strings.TrimSpace(current.Content)
-		sections = append(sections, *current)
-	}
+	finalize()
 	return sections
 }
 
-func isCoreSectionHeader(name string) bool {
-	return strings.Contains(name, "[CORE]")
-}
-
-// SelfEvolutionInstruction returns the instruction injected between
-// VOICE.md content and the task prompt. It references the workspace copy.
 func SelfEvolutionInstruction() string {
-	return `[The personality above is your voice file. You may update non-[CORE] sections of
-.anthem/VOICE.md in your workspace if you discover persistent patterns about the user's
-preferences or working style. Do not modify sections marked [CORE].]`
+	return `[The personality above is your voice file. You may update ~/.anthem/VOICE.md if you discover persistent patterns about the user preferences, communication style, or working habits.]`
 }

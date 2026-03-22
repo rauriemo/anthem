@@ -25,8 +25,6 @@ rules:
 
 system:
   workflow_changes_require_approval: true
-  voice_changes_require_approval: false
-  voice_core_immutable: true
 
 server:
   port: 9090

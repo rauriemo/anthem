@@ -9,31 +9,28 @@ import (
 
 func TestBootstrapDir(t *testing.T) {
 	tests := []struct {
-		name          string
-		setup         func(t *testing.T, dir string)
-		wantVoice     bool
-		wantNoChange  bool
+		name         string
+		setup        func(t *testing.T, dir string)
+		wantNoChange bool
 	}{
 		{
-			name:      "creates directory and VOICE.md when missing",
-			setup:     func(t *testing.T, dir string) {},
-			wantVoice: true,
+			name:  "creates directory and all files when missing",
+			setup: func(t *testing.T, dir string) {},
 		},
 		{
-			name: "skips when directory and VOICE.md already exist",
+			name: "skips when directory and files already exist",
 			setup: func(t *testing.T, dir string) {
 				os.MkdirAll(dir, 0755)
-				os.WriteFile(filepath.Join(dir, "VOICE.md"), []byte("existing"), 0644)
+				os.WriteFile(filepath.Join(dir, "VOICE.md"), []byte("existing voice"), 0644)
+				os.WriteFile(filepath.Join(dir, "constraints.yaml"), []byte("existing constraints"), 0644)
 			},
-			wantVoice:    true,
 			wantNoChange: true,
 		},
 		{
-			name: "creates VOICE.md when directory exists but file missing",
+			name: "creates files when directory exists but files missing",
 			setup: func(t *testing.T, dir string) {
 				os.MkdirAll(dir, 0755)
 			},
-			wantVoice: true,
 		},
 	}
 
@@ -45,9 +42,10 @@ func TestBootstrapDir(t *testing.T) {
 
 			tt.setup(t, anthemDir)
 
-			var existingContent []byte
+			var existingVoice, existingConstraints []byte
 			if tt.wantNoChange {
-				existingContent, _ = os.ReadFile(filepath.Join(anthemDir, "VOICE.md"))
+				existingVoice, _ = os.ReadFile(filepath.Join(anthemDir, "VOICE.md"))
+				existingConstraints, _ = os.ReadFile(filepath.Join(anthemDir, "constraints.yaml"))
 			}
 
 			err := bootstrapDir(anthemDir, logger)
@@ -55,7 +53,6 @@ func TestBootstrapDir(t *testing.T) {
 				t.Fatalf("bootstrapDir failed: %v", err)
 			}
 
-			// Check directory exists
 			info, err := os.Stat(anthemDir)
 			if err != nil {
 				t.Fatalf("anthem dir not created: %v", err)
@@ -64,19 +61,30 @@ func TestBootstrapDir(t *testing.T) {
 				t.Fatal("anthem path is not a directory")
 			}
 
-			// Check VOICE.md exists
-			voicePath := filepath.Join(anthemDir, "VOICE.md")
-			content, err := os.ReadFile(voicePath)
+			voiceContent, err := os.ReadFile(filepath.Join(anthemDir, "VOICE.md"))
 			if err != nil {
 				t.Fatalf("VOICE.md not created: %v", err)
 			}
 
+			constraintsContent, err := os.ReadFile(filepath.Join(anthemDir, "constraints.yaml"))
+			if err != nil {
+				t.Fatalf("constraints.yaml not created: %v", err)
+			}
+
 			if tt.wantNoChange {
-				if string(content) != string(existingContent) {
+				if string(voiceContent) != string(existingVoice) {
 					t.Error("existing VOICE.md was overwritten")
 				}
-			} else if len(content) == 0 {
-				t.Error("VOICE.md is empty")
+				if string(constraintsContent) != string(existingConstraints) {
+					t.Error("existing constraints.yaml was overwritten")
+				}
+			} else {
+				if len(voiceContent) == 0 {
+					t.Error("VOICE.md is empty")
+				}
+				if len(constraintsContent) == 0 {
+					t.Error("constraints.yaml is empty")
+				}
 			}
 		})
 	}

@@ -99,7 +99,8 @@ agent:
     planning: 1
 system:
   workflow_changes_require_approval: false
-  voice_core_immutable: true
+  constraints:
+    - "Run tests before merging"
 server:
   port: 9090
 ---
@@ -126,8 +127,8 @@ Task: {{.Title}}`,
 				if cfg.System.WorkflowChangesRequireApproval {
 					t.Error("system.workflow_changes_require_approval should be false")
 				}
-				if !cfg.System.VoiceCoreImmutable {
-					t.Error("system.voice_core_immutable should be true")
+				if len(cfg.System.Constraints) != 1 || cfg.System.Constraints[0] != "Run tests before merging" {
+					t.Errorf("system.constraints = %v", cfg.System.Constraints)
 				}
 				if cfg.Server.Port != 9090 {
 					t.Errorf("server.port = %d, want 9090", cfg.Server.Port)
@@ -157,12 +158,6 @@ body`,
 				}
 				if !cfg.System.WorkflowChangesRequireApproval {
 					t.Error("default system.workflow_changes_require_approval should be true")
-				}
-				if !cfg.System.VoiceCoreImmutable {
-					t.Error("default system.voice_core_immutable should be true")
-				}
-				if cfg.System.VoiceChangesRequireApproval {
-					t.Error("default system.voice_changes_require_approval should be false")
 				}
 			},
 		},

@@ -67,3 +67,17 @@ func (b *ChannelEventBus) Subscribe() <-chan types.Event {
 	b.mu.Unlock()
 	return ch
 }
+
+// Unsubscribe removes a previously subscribed channel. The channel is closed
+// after removal so readers can detect the unsubscribe.
+func (b *ChannelEventBus) Unsubscribe(ch <-chan types.Event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i, sub := range b.subscribers {
+		if sub.ch == ch {
+			close(sub.ch)
+			b.subscribers = append(b.subscribers[:i], b.subscribers[i+1:]...)
+			return
+		}
+	}
+}

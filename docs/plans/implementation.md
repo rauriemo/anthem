@@ -148,9 +148,11 @@ Single task end-to-end: poll GitHub Issues, render `~/.anthem/VOICE.md` + self-e
 
 ### Phase 2: Rules + Workspace + Self-Evolution
 
+**Pre-Phase 2 change**: `[CORE]` enforcement in VOICE.md has been replaced by a two-tier constraints system (`~/.anthem/constraints.yaml` + `system.constraints` in WORKFLOW.md). VOICE.md is now pure personality. The constraints are combined in the prompt pipeline with a hardcoded meta-constraint preventing agents from editing constraint definitions. See `internal/constraints/` and the orchestrator's `buildConstraints()` / `buildFullPrompt()` functions.
+
 1. Rules engine -- label matching, require_approval, require_plan, auto_assign, max_cost
 2. Workspace manager -- directory lifecycle, hooks with failure handling (retry before_run 3x, fail after_create, warn-only after_complete), path safety, concurrent file locking
-3. VOICE.md copy-diff-merge -- copy `~/.anthem/VOICE.md` into workspace before run, diff after run, apply [CORE] enforcement, section merge for concurrent edits
+3. VOICE.md self-evolution -- copy `~/.anthem/VOICE.md` into workspace before run, diff after run, section merge for concurrent edits (no [CORE] enforcement needed -- safety is in constraints)
 4. Voice changelog -- log changes to `~/.anthem/voice-changelog.md` + post diff as issue comment
 5. Workflow self-modification guardrail
 6. Retry/backoff, stall recovery

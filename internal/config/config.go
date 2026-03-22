@@ -68,9 +68,8 @@ type RuleMatch struct {
 }
 
 type SystemConfig struct {
-	WorkflowChangesRequireApproval bool `yaml:"workflow_changes_require_approval"`
-	VoiceChangesRequireApproval    bool `yaml:"voice_changes_require_approval"`
-	VoiceCoreImmutable             bool `yaml:"voice_core_immutable"`
+	WorkflowChangesRequireApproval bool     `yaml:"workflow_changes_require_approval"`
+	Constraints                    []string `yaml:"constraints"`
 }
 
 type ServerConfig struct {
@@ -90,8 +89,6 @@ func DefaultConfig() Config {
 		},
 		System: SystemConfig{
 			WorkflowChangesRequireApproval: true,
-			VoiceChangesRequireApproval:    false,
-			VoiceCoreImmutable:             true,
 		},
 		Server: ServerConfig{Port: 8080},
 	}

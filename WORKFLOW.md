@@ -31,8 +31,9 @@ rules:
 
 system:
   workflow_changes_require_approval: true
-  voice_changes_require_approval: false
-  voice_core_immutable: true
+  constraints:
+    - "Run all tests before merging"
+    - "Do not commit secrets or credentials"
 
 server:
   port: 8080

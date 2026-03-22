@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,14 +18,16 @@ import (
 )
 
 type Orchestrator struct {
-	cfg     *config.Config
-	body    string
-	tracker tracker.IssueTracker
-	runner  agent.AgentRunner
-	ws      workspace.WorkspaceManager
-	events  EventBus
-	rules   *rules.Engine
-	logger  *slog.Logger
+	cfg              *config.Config
+	body             string
+	tracker          tracker.IssueTracker
+	runner           agent.AgentRunner
+	ws               workspace.WorkspaceManager
+	events           EventBus
+	rules            *rules.Engine
+	logger           *slog.Logger
+	voiceContent     string
+	userConstraints  []string
 
 	mu       sync.Mutex
 	active   map[string]*ActiveRun // task ID -> active run
@@ -38,13 +41,15 @@ type ActiveRun struct {
 }
 
 type Opts struct {
-	Config       *config.Config
-	TemplateBody string
-	Tracker      tracker.IssueTracker
-	Runner       agent.AgentRunner
-	Workspace    workspace.WorkspaceManager
-	EventBus     EventBus
-	Logger       *slog.Logger
+	Config          *config.Config
+	TemplateBody    string
+	Tracker         tracker.IssueTracker
+	Runner          agent.AgentRunner
+	Workspace       workspace.WorkspaceManager
+	EventBus        EventBus
+	Logger          *slog.Logger
+	VoiceContent    string
+	UserConstraints []string
 }
 
 func New(opts Opts) *Orchestrator {
@@ -53,15 +58,17 @@ func New(opts Opts) *Orchestrator {
 		logger = slog.Default()
 	}
 	return &Orchestrator{
-		cfg:     opts.Config,
-		body:    opts.TemplateBody,
-		tracker: opts.Tracker,
-		runner:  opts.Runner,
-		ws:      opts.Workspace,
-		events:  opts.EventBus,
-		rules:   rules.NewEngine(opts.Config.Rules),
-		logger:  logger,
-		active:  make(map[string]*ActiveRun),
+		cfg:             opts.Config,
+		body:            opts.TemplateBody,
+		tracker:         opts.Tracker,
+		runner:          opts.Runner,
+		ws:              opts.Workspace,
+		events:          opts.EventBus,
+		rules:           rules.NewEngine(opts.Config.Rules),
+		logger:          logger,
+		voiceContent:    opts.VoiceContent,
+		userConstraints: opts.UserConstraints,
+		active:          make(map[string]*ActiveRun),
 	}
 }
 
@@ -228,12 +235,15 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task) {
 		return
 	}
 
+	// Build full prompt: voice + constraints + task template
+	fullPrompt := buildFullPrompt(o.voiceContent, o.userConstraints, o.cfg.System.Constraints, prompt)
+
 	// Run agent
 	o.publish(types.Event{Type: "agent.started", TaskID: task.ID})
 
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		WorkspacePath:  wsPath,
-		Prompt:         prompt,
+		Prompt:         fullPrompt,
 		MaxTurns:       o.cfg.Agent.MaxTurns,
 		AllowedTools:   o.cfg.Agent.AllowedTools,
 		Model:          o.cfg.Agent.Model,
@@ -375,4 +385,35 @@ func hasLabel(labels []string, label string) bool {
 		}
 	}
 	return false
+}
+
+const metaConstraint = "Do not modify constraint definitions in WORKFLOW.md system.constraints or ~/.anthem/constraints.yaml"
+
+func buildConstraints(userConstraints []string, projectConstraints []string) string {
+	if len(userConstraints) == 0 && len(projectConstraints) == 0 {
+		return ""
+	}
+
+	var lines []string
+	lines = append(lines, "## Constraints (non-negotiable)")
+	for _, c := range userConstraints {
+		lines = append(lines, "- "+c)
+	}
+	for _, c := range projectConstraints {
+		lines = append(lines, "- "+c)
+	}
+	lines = append(lines, "- "+metaConstraint)
+	return strings.Join(lines, "\n")
+}
+
+func buildFullPrompt(voiceContent string, userConstraints []string, projectConstraints []string, taskPrompt string) string {
+	var sections []string
+	if voiceContent != "" {
+		sections = append(sections, voiceContent)
+	}
+	if constraintBlock := buildConstraints(userConstraints, projectConstraints); constraintBlock != "" {
+		sections = append(sections, constraintBlock)
+	}
+	sections = append(sections, taskPrompt)
+	return strings.Join(sections, "\n\n")
 }

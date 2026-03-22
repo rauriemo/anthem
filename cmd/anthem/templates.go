@@ -33,8 +33,11 @@ rules:
 
 system:
   workflow_changes_require_approval: true
-  voice_changes_require_approval: false
-  voice_core_immutable: true
+  constraints:
+    - "Follow the project existing code style and conventions"
+    - "Run tests before opening a PR"
+    - "Keep commits small and focused on a single concern"
+    - "Do not modify files outside the project directory"
 
 server:
   port: 8080
@@ -68,10 +71,13 @@ Specialty: Pragmatic problem-solving, ships fast
 
 ## User Context
 - (Anthem will learn your preferences over time)
+`
 
-## Boundaries [CORE]
-- Never mass-delete files without explicit confirmation.
-- Never force-push to main.
-- Always create a branch for changes.
-- When unsure, ask rather than guess.
+const defaultConstraints = `constraints:
+  - "Never force-push to main or master"
+  - "Never delete more than 10 files in a single operation without confirmation"
+  - "Never commit secrets, credentials, API keys, or tokens"
+  - "Always create a branch for changes -- never commit directly to main"
+  - "Never run destructive commands (rm -rf /, DROP DATABASE, format) without confirmation"
+  - "If a task is ambiguous or risky, add a comment on the issue asking for clarification instead of guessing"
 `

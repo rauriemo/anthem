@@ -202,7 +202,6 @@ func TestShouldThrottle(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tracker := &GitHubTracker{
 				throttleUntil: tt.throttleUntil,
-				etags:         make(map[string]string),
 				logger:        testLogger(),
 			}
 
@@ -244,7 +243,6 @@ func TestCheckRateLimitSetsThrottle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tracker := &GitHubTracker{
-				etags:  make(map[string]string),
 				logger: testLogger(),
 			}
 

@@ -97,6 +97,15 @@ agent:
     planning: 1
   stall_timeout_ms: 300000
   max_retry_backoff_ms: 300000
+  permission_mode: "dontAsk"           # default safe mode; "bypassPermissions" for trusted
+  skip_permissions: false              # shorthand: true = bypassPermissions
+  allowed_tools:                       # tools auto-approved in dontAsk mode
+    - "Read"
+    - "Edit"
+    - "Grep"
+    - "Glob"
+    - "Bash(git *)"
+    - "Bash(go test *)"
 
 rules:
   - match:
@@ -109,8 +118,9 @@ rules:
 
 system:
   workflow_changes_require_approval: true   # default: true
-  voice_changes_require_approval: false     # default: false -- personality evolves freely
-  voice_core_immutable: true                # default: true -- [CORE] sections are always locked
+  constraints:
+    - "Follow the project existing code style and conventions"
+    - "Run tests before opening a PR"
 
 server:
   port: 8080
@@ -136,7 +146,9 @@ Anthem's differentiator: a self-evolving personality system inspired by OpenClaw
 
 **Location**: Global at `~/.anthem/VOICE.md`. The voice is the same across all projects -- it defines who the agent is and how it relates to the user, which doesn't change between repos. WORKFLOW.md is project-specific; VOICE.md is user-specific.
 
-**Bootstrapping**: On first run, if `~/.anthem/` doesn't exist, Anthem auto-creates it and writes a default `VOICE.md` template. If `~/.anthem/VOICE.md` is missing at runtime, Anthem logs a warning and runs without a personality (just the WORKFLOW.md prompt). The `anthem init` command can also create both `~/.anthem/VOICE.md` and a starter `./WORKFLOW.md`.
+**Pure personality**: VOICE.md contains only personality-related sections (Identity, Personality, User Context). Safety guardrails are handled by the separate constraints system (see below). This separation means agents can freely evolve personality without risk of removing safety rules.
+
+**Bootstrapping**: On first run, if `~/.anthem/` doesn't exist, Anthem auto-creates it and writes a default `VOICE.md` template. If `~/.anthem/VOICE.md` is missing at runtime, Anthem logs a warning and runs without a personality (just the constraints + WORKFLOW.md prompt). The `anthem init` command creates both `~/.anthem/VOICE.md`, `~/.anthem/constraints.yaml`, and a starter `./WORKFLOW.md`.
 
 **Example VOICE.md:**
 
@@ -160,27 +172,14 @@ Specialty: Pragmatic problem-solving, ships fast
 - Iterates fast and prefers small, focused commits.
 - Uses conventional commit format.
 - Often works late; keep responses concise.
-
-## Boundaries [CORE]
-- Never mass-delete files without explicit confirmation.
-- Never force-push to main.
-- Always create a branch for changes.
-- When unsure, ask rather than guess.
 ```
 
 **How it works:**
 
-- Anthem reads `~/.anthem/VOICE.md` and prepends it to the rendered `WORKFLOW.md` prompt before every agent session
-- Between the VOICE.md content and the task prompt, Anthem injects a self-evolution instruction:
-  ```
-  [The personality above is your voice file. You may update non-[CORE] sections of
-  .anthem/VOICE.md in your workspace if you discover persistent patterns about the user's
-  preferences or working style. Do not modify sections marked [CORE].]
-  ```
-  Note: the instruction references the **workspace copy** (`.anthem/VOICE.md`), not the global file (`~/.anthem/VOICE.md`). This ensures the agent's edits go through the copy-diff-merge pipeline.
+- Anthem reads `~/.anthem/VOICE.md` and prepends it to the prompt before every agent session
+- The prompt is assembled in order: (1) voice content, (2) constraints block, (3) rendered task template
 - The agent's issue comments, PR descriptions, and status updates all reflect the voice
-- `[CORE]` sections are immutable -- Anthem rejects any agent edit that touches them
-- Non-core sections (Personality, User Context) can self-evolve as the agent learns the user
+- All sections of VOICE.md can self-evolve as the agent learns the user (safety is in the constraints system)
 
 **Self-evolution mechanism (copy-diff-merge):**
 
@@ -189,7 +188,7 @@ Rather than letting agents write directly to `~/.anthem/VOICE.md` (which would c
 1. Before each agent run, Anthem copies `~/.anthem/VOICE.md` into the workspace as `.anthem/VOICE.md`
 2. The agent works on this local copy during its session
 3. After the run completes, Anthem diffs the workspace copy against the original
-4. If changed, Anthem applies the merge logic: [CORE] enforcement, section merge for concurrent edits, approval gate if configured
+4. If changed, Anthem applies the merge logic: section merge for concurrent edits, approval gate if configured
 5. The merged result is written back to `~/.anthem/VOICE.md`
 
 This mirrors the workflow self-modification guardrail and keeps concurrent file safety simple.
@@ -207,20 +206,38 @@ Every VOICE.md change is logged with the reason, addressing the weakness identif
 - Changes are logged to `~/.anthem/voice-changelog.md` with timestamps, the task that triggered the change, and the diff
 - If the change originated from a tracked task, the diff is also posted as an issue comment for visibility
 
-**Guardrails:**
+### 2b. Constraints (Safety Layer)
 
-The `system:` block in WORKFLOW.md front matter controls voice guardrails per-project:
+Safety guardrails are separated from personality into a two-tier constraints system:
 
+**User-level constraints** (`~/.anthem/constraints.yaml`):
 ```yaml
-system:
-  workflow_changes_require_approval: true   # default: true
-  voice_changes_require_approval: false     # default: false -- personality evolves freely
-  voice_core_immutable: true                # default: true -- [CORE] sections are always locked
+constraints:
+  - "Never force-push to main or master"
+  - "Never commit secrets, credentials, API keys, or tokens"
+  - "Always create a branch for changes -- never commit directly to main"
+  - "Never run destructive commands without confirmation"
 ```
 
-Default: personality evolves on its own (that's the point), but core boundaries are locked. Users wanting full control set `voice_changes_require_approval: true`.
+**Project-level constraints** (`system.constraints` in WORKFLOW.md):
+```yaml
+system:
+  workflow_changes_require_approval: true
+  constraints:
+    - "Follow the project existing code style and conventions"
+    - "Run tests before opening a PR"
+    - "Keep commits small and focused on a single concern"
+```
 
-The same diff-and-approve mechanism used for `WORKFLOW.md` applies: if approval is required, Anthem posts the proposed voice change as a comment for review.
+**How it works:**
+
+- Both constraint tiers are combined under a `## Constraints (non-negotiable)` header in the prompt
+- Anthem always appends a hardcoded **meta-constraint**: "Do not modify constraint definitions in WORKFLOW.md system.constraints or ~/.anthem/constraints.yaml" -- this prevents agents from removing their own guardrails
+- Constraints are placed between voice content and the task template in the prompt
+- Missing `constraints.yaml` is not an error -- Anthem continues with empty user constraints
+- The `anthem init` and auto-bootstrap both create a default `constraints.yaml`
+
+This design separates concerns: personality evolves freely, safety rules are immutable.
 
 ### 3. Config Loader + Validator
 
@@ -442,6 +459,86 @@ type ProcessManager interface {
 - `process_windows.go` (`//go:build windows`): Uses Job Objects to manage the Claude Code process tree. `Start` creates a Job Object and assigns the process. `Terminate`/`Kill` calls `TerminateJobObject` to kill the entire tree.
 - `process_unix.go` (`//go:build !windows`): Uses process groups. `Start` sets `SysProcAttr{Setpgid: true}`. `Terminate` sends `SIGTERM` to the group. `Kill` sends `SIGKILL` to the group.
 - The Claude Code driver takes a `ProcessManager` via constructor injection.
+
+### 8b. Agent Permission Model
+
+Anthem uses Claude Code's built-in permission system to control what executor agents can do, with a safe default and an opt-in trusted mode.
+
+**Two modes:**
+
+| Mode | Claude Code Flags | Behavior |
+|------|-------------------|----------|
+| **Safe (default)** | `--permission-mode dontAsk` + `--allowedTools` from config | Agent can only use explicitly whitelisted tools. Everything else is auto-denied without hanging. |
+| **Trusted** | `--dangerously-skip-permissions` | Full autonomy, no permission checks. Opt-in via `agent.skip_permissions: true` in WORKFLOW.md. |
+
+The safe default uses Claude Code's `dontAsk` mode, which auto-denies any tool not in the allow list. This is critical for headless execution -- denied tools return an error to Claude (no interactive prompt), so the agent never hangs waiting for input. Claude sees the denial and either tries an alternative approach or reports that it couldn't complete the step.
+
+**WORKFLOW.md configuration:**
+
+```yaml
+agent:
+  command: "claude"
+  permission_mode: "dontAsk"         # default; or "bypassPermissions" for trusted
+  skip_permissions: false             # shorthand: when true, overrides to bypassPermissions
+  allowed_tools:                      # tools auto-approved in dontAsk mode
+    - "Read"
+    - "Edit"
+    - "Grep"
+    - "Glob"
+    - "Bash(git *)"
+    - "Bash(go test *)"
+    - "Bash(go build *)"
+  denied_tools:                       # explicit deny (overrides allow)
+    - "Bash(git push --force *)"
+    - "Bash(rm -rf *)"
+```
+
+Tool rules follow Claude Code's permission rule syntax: `Bash(npm run *)` allows any command starting with `npm run`, `Edit(/src/**)` restricts edits to the src directory, `WebFetch(domain:github.com)` allows fetching from GitHub only. Deny rules always take precedence over allow rules.
+
+**Permission-blocked task flow:**
+
+When an agent hits a permission wall in safe mode, the orchestrator detects the blocked state and moves the task to a `needs-permission` status so a human can intervene:
+
+```mermaid
+stateDiagram-v2
+    todo: TODO
+    inProgress: IN_PROGRESS
+    needsPerm: NEEDS_PERMISSION
+    done: DONE
+
+    todo --> inProgress: Anthem claims task
+    inProgress --> done: Agent completes successfully
+    inProgress --> needsPerm: Agent reports permission denial
+    needsPerm --> todo: User approves, task re-queued
+    todo --> inProgress: Anthem resumes session
+```
+
+Detection: when Claude Code completes a run in `dontAsk` mode and the result indicates the task is incomplete due to denied tools, the orchestrator:
+
+1. Adds a `needs-permission` label to the issue
+2. Posts a comment explaining what was blocked (e.g., "Agent needed `Bash(npm install)` but it's not in allowed_tools")
+3. Saves the session ID for later resume
+4. Removes `in-progress` label -- the task waits for human action
+
+**Unblocking a permission-blocked task:**
+
+A user can unblock in three ways:
+
+1. **Update allowed_tools** in WORKFLOW.md to permanently whitelist the needed tool (e.g., add `Bash(npm install)`)
+2. **Switch to trusted mode** for a specific task by adding a label like `trusted` that the rules engine maps to `skip_permissions: true`
+3. **Manually complete** the blocked step and move the card back to `todo` for the agent to continue the remaining work
+
+When the task returns to `todo`, Anthem picks it up and uses `--resume <session_id>` to continue the Claude Code session where it left off, preserving all context from the previous run.
+
+**Layered defense:**
+
+The permission model works alongside (not instead of) the constraints system:
+
+- **Process-level**: Claude Code's `dontAsk` mode + `--allowedTools` enforces which tools the agent can use
+- **Prompt-level**: The constraints system injects non-negotiable rules into the prompt (e.g., "Never force-push to main")
+- **Workspace-level**: The workspace manager sets `cmd.Dir` to the task's isolated directory, scoping file access
+
+This layered approach means even if the agent tries to work around a prompt-level constraint, the process-level permission system blocks the actual tool invocation.
 
 ### 9. Retry and Backoff
 
