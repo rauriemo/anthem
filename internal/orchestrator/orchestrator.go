@@ -18,20 +18,19 @@ import (
 )
 
 type Orchestrator struct {
-	cfg              *config.Config
-	body             string
-	tracker          tracker.IssueTracker
-	runner           agent.AgentRunner
-	ws               workspace.WorkspaceManager
-	events           EventBus
-	rules            *rules.Engine
-	logger           *slog.Logger
-	voiceContent     string
-	userConstraints  []string
+	cfg             *config.Config
+	body            string
+	tracker         tracker.IssueTracker
+	runner          agent.AgentRunner
+	ws              workspace.WorkspaceManager
+	events          EventBus
+	rules           *rules.Engine
+	logger          *slog.Logger
+	voiceContent    string
+	userConstraints []string
 
-	mu       sync.Mutex
-	active   map[string]*ActiveRun // task ID -> active run
-	stopping bool
+	mu     sync.Mutex
+	active map[string]*ActiveRun
 }
 
 type ActiveRun struct {
@@ -72,7 +71,7 @@ func New(opts Opts) *Orchestrator {
 	}
 }
 
-// Run starts the orchestrator polling loop. Blocks until ctx is cancelled.
+// Run starts the orchestrator polling loop. Blocks until ctx is canceled.
 func (o *Orchestrator) Run(ctx context.Context) error {
 	o.logger.Info("orchestrator started",
 		"interval_ms", o.cfg.Polling.IntervalMS,

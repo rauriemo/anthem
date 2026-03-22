@@ -6,7 +6,7 @@ tracker:
   repo: "owner/repo"
   labels:
     active: ["todo", "in-progress"]
-    terminal: ["done", "cancelled"]
+    terminal: ["done", "canceled"]
 
 polling:
   interval_ms: 10000

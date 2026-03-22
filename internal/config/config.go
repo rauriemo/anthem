@@ -31,22 +31,22 @@ type WorkspaceConfig struct {
 }
 
 type HooksConfig struct {
-	AfterCreate string `yaml:"after_create"`
-	BeforeRun   string `yaml:"before_run"`
+	AfterCreate   string `yaml:"after_create"`
+	BeforeRun     string `yaml:"before_run"`
 	AfterComplete string `yaml:"after_complete"`
 }
 
 type AgentConfig struct {
-	Command              string            `yaml:"command"`
-	MaxTurns             int               `yaml:"max_turns"`
-	MaxConcurrent        int               `yaml:"max_concurrent"`
-	MaxConcurrentPerLabel map[string]int   `yaml:"max_concurrent_per_label"`
-	StallTimeoutMS       int               `yaml:"stall_timeout_ms"`
-	MaxRetryBackoffMS    int               `yaml:"max_retry_backoff_ms"`
-	AllowedTools         []string          `yaml:"allowed_tools"`
-	Model                string            `yaml:"model"`
-	MCPServers           []MCPServerConfig `yaml:"mcp_servers"`
-	Skills               []string          `yaml:"skills"`
+	Command               string            `yaml:"command"`
+	MaxTurns              int               `yaml:"max_turns"`
+	MaxConcurrent         int               `yaml:"max_concurrent"`
+	MaxConcurrentPerLabel map[string]int    `yaml:"max_concurrent_per_label"`
+	StallTimeoutMS        int               `yaml:"stall_timeout_ms"`
+	MaxRetryBackoffMS     int               `yaml:"max_retry_backoff_ms"`
+	AllowedTools          []string          `yaml:"allowed_tools"`
+	Model                 string            `yaml:"model"`
+	MCPServers            []MCPServerConfig `yaml:"mcp_servers"`
+	Skills                []string          `yaml:"skills"`
 }
 
 type MCPServerConfig struct {
@@ -56,10 +56,10 @@ type MCPServerConfig struct {
 }
 
 type RuleConfig struct {
-	Match  RuleMatch `yaml:"match"`
-	Action string    `yaml:"action"`
-	ApprovalLabel string `yaml:"approval_label,omitempty"`
-	MaxCost       float64 `yaml:"max_cost,omitempty"`
+	Match         RuleMatch `yaml:"match"`
+	Action        string    `yaml:"action"`
+	ApprovalLabel string    `yaml:"approval_label,omitempty"`
+	MaxCost       float64   `yaml:"max_cost,omitempty"`
 }
 
 type RuleMatch struct {
@@ -78,13 +78,13 @@ type ServerConfig struct {
 
 func DefaultConfig() Config {
 	return Config{
-		Polling: PollingConfig{IntervalMS: 10000},
+		Polling:   PollingConfig{IntervalMS: 10000},
 		Workspace: WorkspaceConfig{Root: "./workspaces"},
 		Agent: AgentConfig{
-			Command:       "claude",
-			MaxTurns:      5,
-			MaxConcurrent: 3,
-			StallTimeoutMS: 300000,
+			Command:           "claude",
+			MaxTurns:          5,
+			MaxConcurrent:     3,
+			StallTimeoutMS:    300000,
 			MaxRetryBackoffMS: 300000,
 		},
 		System: SystemConfig{

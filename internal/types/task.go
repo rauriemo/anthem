@@ -10,11 +10,11 @@ const (
 	StatusRunning   Status = "running"
 	StatusCompleted Status = "completed"
 	StatusFailed    Status = "failed"
-	StatusCancelled Status = "cancelled"
+	StatusCanceled  Status = "canceled"
 )
 
 func (s Status) IsTerminal() bool {
-	return s == StatusCompleted || s == StatusFailed || s == StatusCancelled
+	return s == StatusCompleted || s == StatusFailed || s == StatusCanceled
 }
 
 type Task struct {

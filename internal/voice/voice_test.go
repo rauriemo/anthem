@@ -73,7 +73,9 @@ func TestParseSectionContent(t *testing.T) {
 func TestLoadFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "VOICE.md")
-	os.WriteFile(path, []byte("## Identity\nBot"), 0644)
+	if err := os.WriteFile(path, []byte("## Identity\nBot"), 0644); err != nil {
+		t.Fatalf("failed to write test file: %v", err)
+	}
 
 	vc, err := LoadFile(path)
 	if err != nil {

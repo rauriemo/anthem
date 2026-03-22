@@ -37,10 +37,7 @@ func TestFileLockDifferentPaths(t *testing.T) {
 		done <- struct{}{}
 	}()
 
-	// b.txt should not be blocked by a.txt
-	select {
-	case <-done:
-	}
+	<-done
 	fl.Unlock("a.txt")
 }
 

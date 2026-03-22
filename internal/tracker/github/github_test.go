@@ -115,7 +115,7 @@ func TestListActiveETag(t *testing.T) {
 
 				w.Header().Set("ETag", `"test-etag"`)
 				issues := []map[string]any{issueJSON(1, "Test Issue", []string{"todo"})}
-				json.NewEncoder(w).Encode(issues)
+				_ = json.NewEncoder(w).Encode(issues)
 			}))
 			defer srv.Close()
 
@@ -161,14 +161,14 @@ func TestListActiveETagSentOnSecondCall(t *testing.T) {
 
 		w.Header().Set("ETag", `"abc123"`)
 		issues := []map[string]any{issueJSON(1, "Issue", []string{"todo"})}
-		json.NewEncoder(w).Encode(issues)
+		_ = json.NewEncoder(w).Encode(issues)
 	}))
 	defer srv.Close()
 
 	tracker := newTestTracker(t, srv.URL)
 	ctx := context.Background()
-	tracker.ListActive(ctx)
-	tracker.ListActive(ctx)
+	_, _ = tracker.ListActive(ctx)
+	_, _ = tracker.ListActive(ctx)
 
 	if receivedEtag != `"abc123"` {
 		t.Errorf("second call ETag = %q, want %q", receivedEtag, `"abc123"`)

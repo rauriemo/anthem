@@ -20,16 +20,24 @@ func TestBootstrapDir(t *testing.T) {
 		{
 			name: "skips when directory and files already exist",
 			setup: func(t *testing.T, dir string) {
-				os.MkdirAll(dir, 0755)
-				os.WriteFile(filepath.Join(dir, "VOICE.md"), []byte("existing voice"), 0644)
-				os.WriteFile(filepath.Join(dir, "constraints.yaml"), []byte("existing constraints"), 0644)
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					t.Fatalf("setup MkdirAll: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "VOICE.md"), []byte("existing voice"), 0644); err != nil {
+					t.Fatalf("setup WriteFile VOICE.md: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "constraints.yaml"), []byte("existing constraints"), 0644); err != nil {
+					t.Fatalf("setup WriteFile constraints.yaml: %v", err)
+				}
 			},
 			wantNoChange: true,
 		},
 		{
 			name: "creates files when directory exists but files missing",
 			setup: func(t *testing.T, dir string) {
-				os.MkdirAll(dir, 0755)
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					t.Fatalf("setup MkdirAll: %v", err)
+				}
 			},
 		},
 	}

@@ -16,9 +16,9 @@ import (
 	"github.com/rauriemo/anthem/internal/logging"
 	"github.com/rauriemo/anthem/internal/orchestrator"
 	"github.com/rauriemo/anthem/internal/tracker"
-	"github.com/rauriemo/anthem/internal/types"
 	ghtracker "github.com/rauriemo/anthem/internal/tracker/github"
 	localtracker "github.com/rauriemo/anthem/internal/tracker/local"
+	"github.com/rauriemo/anthem/internal/types"
 	"github.com/rauriemo/anthem/internal/voice"
 	"github.com/rauriemo/anthem/internal/workspace"
 )

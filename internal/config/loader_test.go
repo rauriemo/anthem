@@ -221,10 +221,10 @@ body`,
 
 func TestExpandEnvVars(t *testing.T) {
 	tests := []struct {
-		name   string
-		input  string
-		envs   map[string]string
-		want   string
+		name  string
+		input string
+		envs  map[string]string
+		want  string
 	}{
 		{
 			name:  "single var",

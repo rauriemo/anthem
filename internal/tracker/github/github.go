@@ -138,8 +138,8 @@ func (g *GitHubTracker) ListActive(ctx context.Context) ([]types.Task, error) {
 
 	for _, label := range g.activeLabels {
 		opts := &gh.IssueListByRepoOptions{
-			Labels: []string{label},
-			State:  "open",
+			Labels:      []string{label},
+			State:       "open",
 			ListOptions: gh.ListOptions{PerPage: 100},
 		}
 
