@@ -66,15 +66,17 @@ These are the source of truth for what to build and how.
 - Deleted empty stub files `dispatch.go` and `reconciler.go` from orchestrator (real logic in `orchestrator.go`).
 - CI lint fix: `golangci-lint` built from source for Go 1.26 compatibility.
 
-**Phase 2 implementation order** (see `docs/plans/implementation.md` for details):
-1. Rules engine completion — wire `auto_assign`, `max_cost`, `TitlePattern` regex matching
-2. Real workspace manager — replace mock, per-task dirs, hook lifecycle
-3. Retry and backoff — exponential backoff, stall recovery
-4. Graceful shutdown — WaitGroup drain, agent termination, claim release
-5. State persistence — `~/.anthem/state.json`, load/save, startup reconciliation
-6. Config hot-reload — fsnotify watcher
+**Phase 2 completed** (Go Daemon Reliability Layer):
+- Rules engine: TitlePattern regex matching with compiled cache, AutoAssign comment posting, MaxCost budget enforcement with `exceeded-budget` label and cost tracker integration.
+- Workspace manager: production implementation replacing mock, per-task directories, hook lifecycle (after_create fails immediately, before_run retries 3x, after_complete warn-only), cross-platform shell execution, CleanupTerminal for startup cleanup.
+- Retry and backoff: per-task RetryInfo, exponential backoff (10s * 2^(n-1) capped at max_retry_backoff_ms), 1s continuation delay, stall detection in reconcile (2x stall timeout).
+- Graceful shutdown: WaitGroup drain (10s timeout), claim release with fresh context, state save before exit.
+- State persistence: atomic write to `~/.anthem/state.json`, versioned schema, LoadAndReconcile on startup (restores retry queue skipping terminal tasks, restores cost sessions).
+- Config hot-reload: fsnotify watcher on directory (catches editor delete+create), 100ms debounce, validates before applying, configSnapshot pattern for dispatch goroutines.
+- New files: `internal/orchestrator/retry.go`, `internal/orchestrator/state_test.go`, `internal/config/watcher_test.go`.
+- New dependency: `github.com/fsnotify/fsnotify`.
 
-**Phase 3 preview**: Orchestrator agent (Claude session with VOICE.md), tool interface, voice self-evolution, task decomposition, dashboard.
+**Phase 3 (next)**: Orchestrator agent (Claude session with VOICE.md), tool interface, voice self-evolution, task decomposition, dashboard.
 
 Update this section as phases are completed.
 

@@ -693,16 +693,16 @@ anthem version                # Print version
 
 Single task end-to-end: poll GitHub Issues, render WORKFLOW.md prompt with constraints, spawn Claude Code, update issue on completion. Includes `--output-format stream-json` integration, session management, cost parsing, ETag caching, rate limit throttling, auto-bootstrap, and two-tier constraints system.
 
-### Phase 2: Go Daemon Reliability Layer (CURRENT)
+### Phase 2: Go Daemon Reliability Layer (COMPLETE)
 
-Complete the mechanical reliability layer of the Go daemon:
+All six steps implemented and tested:
 
-1. Rules engine completion -- wire `auto_assign`, `max_cost` enforcement, `TitlePattern` regex matching into orchestrator dispatch
-2. Real workspace manager -- replace mock with production implementation (per-task directories, hook lifecycle with failure handling, cleanup)
-3. Retry and backoff -- per-task retry tracking, exponential backoff, stall recovery
-4. Graceful shutdown -- WaitGroup drain of active dispatches, agent termination via ProcessManager, claim release (remove in-progress labels)
-5. State persistence -- save/load `~/.anthem/state.json` (active sessions, retry queue, token totals), startup reconciliation
-6. Config hot-reload -- fsnotify watcher on WORKFLOW.md, keep last valid config on parse failure
+1. Rules engine -- TitlePattern regex matching (compiled cache), AutoAssign, MaxCost budget enforcement with cost tracker
+2. Workspace manager -- production implementation (per-task dirs, hook lifecycle with retry/warn-only, CleanupTerminal)
+3. Retry and backoff -- per-task RetryInfo, exponential backoff capped at max_retry_backoff_ms, stall detection in reconcile
+4. Graceful shutdown -- WaitGroup drain (10s timeout), claim release with fresh context, state save
+5. State persistence -- atomic write to `~/.anthem/state.json`, LoadAndReconcile on startup (skips terminal tasks)
+6. Config hot-reload -- fsnotify watcher with debounce, validates before applying, configSnapshot pattern for goroutines
 
 ### Phase 3: Orchestrator Agent + Voice + Dashboard
 

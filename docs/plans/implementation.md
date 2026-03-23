@@ -30,7 +30,7 @@ anthem/
       config.go                      # Config struct matching WORKFLOW.md YAML schema
       loader.go                      # YAML front matter parser + Go template body
       validator.go                   # Required field validation
-      watcher.go                     # fsnotify hot-reload (stub for Phase 2)
+      watcher.go                     # fsnotify hot-reload, debounced directory watcher
     voice/
       voice.go                       # VOICE.md parser, section extraction
       merge.go                       # Section merge logic (used by orchestrator agent in Phase 3)
@@ -42,16 +42,19 @@ anthem/
       local/
         local.go                     # LocalJSONTracker adapter (tasks.json)
     orchestrator/
-      orchestrator.go                # Core loop: poll, sort, claim, dispatch, reconcile
-      state.go                       # State persistence (~/.anthem/state.json)
+      orchestrator.go                # Core loop: poll, sort, claim, dispatch, reconcile, shutdown
+      retry.go                       # RetryInfo, exponential backoff, retry eligibility
+      state.go                       # State persistence (~/.anthem/state.json), LoadAndReconcile
       events.go                      # EventBus interface + in-process implementation
     rules/
       engine.go                      # Rules engine: label matching, actions
       approval.go                    # require_approval, require_plan flows
+    constraints/
+      loader.go                      # User-level constraints loader (~/.anthem/constraints.yaml)
     workspace/
-      manager.go                     # Directory creation, hooks, cleanup
-      safety.go                      # Path safety invariants
-      lock.go                        # Concurrent file locking
+      manager.go                     # Directory creation, hooks, cleanup, CleanupTerminal
+      safety.go                      # Path safety invariants (ValidatePath)
+      lock.go                        # Concurrent file locking (FileLock)
     agent/
       agent.go                       # AgentRunner interface definition
       claude/
@@ -144,7 +147,7 @@ Single task end-to-end: poll GitHub Issues, render constraints + WORKFLOW.md pro
 9. Wire up CLI commands to orchestrator (`anthem run`, `anthem validate`)
 10. End-to-end test with mock tracker + mock agent runner
 
-### Phase 2: Go Daemon Reliability Layer (CURRENT)
+### Phase 2: Go Daemon Reliability Layer (COMPLETE)
 
 **Pre-Phase 2 changes completed**:
 - `[CORE]` enforcement in VOICE.md replaced by two-tier constraints system (`~/.anthem/constraints.yaml` + `system.constraints` in WORKFLOW.md). VOICE.md is now pure personality. See `internal/constraints/` and the orchestrator's `buildConstraints()` / `buildFullPrompt()` functions.
@@ -152,15 +155,16 @@ Single task end-to-end: poll GitHub Issues, render constraints + WORKFLOW.md pro
 - Agent permission model documented in architecture.md (section 8b).
 - Deleted `internal/voice/core.go` (vestigial `[CORE]` code).
 - Deleted `internal/orchestrator/dispatch.go` and `reconciler.go` (empty stubs -- real logic lives in `orchestrator.go`, matching Symphony's single-module pattern).
+- Fixed 304 ETag bug: `etagTransport` now only caches list endpoints, preventing noisy WARN logs during reconciliation.
 
-**Phase 2 implementation steps:**
+**Phase 2 implementation (all 6 steps complete):**
 
-1. Rules engine completion -- wire `auto_assign`, `max_cost` enforcement, `TitlePattern` regex matching into orchestrator dispatch. Defer `require_plan` to Phase 3 (orchestrator-agent intelligence decision).
-2. Real workspace manager -- replace `MockWorkspaceManager` in `cmd/anthem/main.go` with production implementation. Per-task directories under `workspace.root`, hook lifecycle with failure handling (retry `before_run` 3x, fail `after_create`, warn-only `after_complete`), `Cleanup`, startup cleanup of terminal task workspaces.
-3. Retry and backoff -- per-task retry tracking, exponential backoff `min(10s * 2^(attempt-1), max_retry_backoff_ms)`, stall recovery, continuation delay (1s).
-4. Graceful shutdown -- `sync.WaitGroup` drain of active dispatches (10s timeout), agent termination via `ProcessManager`, claim release (remove `in-progress` labels), save state before exit.
-5. State persistence -- implement `state.go` with `OrchestratorState` struct (active sessions, retry queue, token totals), JSON I/O to `~/.anthem/state.json`, load on startup, reconcile against tracker.
-6. Config hot-reload -- `fsnotify` watcher on WORKFLOW.md, re-parse + validate on change, keep last valid config on failure, wire into `cmd/anthem/main.go`.
+1. Rules engine -- TitlePattern regex matching with compiled cache in `Engine`, AutoAssign comment posting, MaxCost budget enforcement via `cost.Tracker` integration (adds `exceeded-budget` label on overspend). `require_plan` deferred to Phase 3.
+2. Workspace manager -- production `Manager` in `internal/workspace/manager.go` replacing `MockWorkspaceManager`. Per-task directories under `workspace.root`, hook lifecycle (retry `before_run` 3x, fail `after_create`, warn-only `after_complete`), `CleanupTerminal` for startup cleanup. Cross-platform shell execution via `runtime.GOOS`.
+3. Retry and backoff -- `RetryInfo` in `internal/orchestrator/retry.go`, exponential backoff `min(10s * 2^(attempt-1), max_retry_backoff_ms)`, `isRetryEligible` gate in tick loop, 1s continuation delay for retried tasks, stall detection in reconcile releasing claims beyond 2x stall timeout.
+4. Graceful shutdown -- `sync.WaitGroup` drain of dispatch goroutines (10s timeout), `releaseClaims` with fresh 5s context, `saveState` before exit. `Shutdown()` method for testability.
+5. State persistence -- `OrchestratorState` with versioned schema, atomic write (temp+rename) to `~/.anthem/state.json`, `LoadAndReconcile` on startup (restores retry queue skipping terminal tasks, restores cost sessions).
+6. Config hot-reload -- `fsnotify` watcher on directory (catches editor delete+create), 100ms debounce, validates before applying, `ReloadConfig` under mutex, `configSnapshot` pattern for dispatch goroutines.
 
 ### Phase 3: Orchestrator Agent + Voice + Dashboard
 
@@ -197,7 +201,7 @@ Current:
 - `gopkg.in/yaml.v3` -- YAML parsing for WORKFLOW.md front matter
 - `github.com/Masterminds/sprig/v3` -- Template function library (same as Helm) for WORKFLOW.md body rendering
 
-Phase 2 additions:
+Added in Phase 2:
 - `github.com/fsnotify/fsnotify` -- File watching for config hot-reload
 
 ## Testing Strategy
