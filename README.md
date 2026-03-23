@@ -18,7 +18,7 @@ GitHub Issues ──poll──> Anthem Orchestrator ──dispatch──> Claude
 
 ## Prerequisites
 
-- **Go 1.21+** -- [install](https://go.dev/dl/)
+- **Go 1.22+** -- [install](https://go.dev/dl/)
 - **Claude Code CLI** -- installed and authenticated (`claude --version` to verify)
 - **GitHub access** -- either `GITHUB_TOKEN` env var or [GitHub CLI](https://cli.github.com/) authenticated (`gh auth status`)
 
@@ -52,6 +52,7 @@ go build -o anthem.exe ./cmd/anthem
 This creates:
 - `./WORKFLOW.md` -- your project's orchestration config and prompt template
 - `~/.anthem/VOICE.md` -- your global agent personality (shared across all projects)
+- `~/.anthem/constraints.yaml` -- your global safety rules
 
 ### 3. Configure WORKFLOW.md
 
@@ -161,6 +162,18 @@ tracker:
     terminal: ["done"]  # Labels added when task completes
 ```
 
+### Workspace
+
+```yaml
+workspace:
+  root: "./workspaces"          # Per-task directories created here
+
+hooks:
+  after_create: "git clone {{issue.repo_url}} ."   # Runs once after workspace is created
+  before_run: "git pull origin main"                # Runs before each agent run (retries 3x)
+  after_complete: "make clean"                      # Runs after task completes (warn-only on failure)
+```
+
 ### Agent
 
 ```yaml
@@ -171,6 +184,7 @@ agent:
   max_concurrent_per_label:     # Per-label concurrency limits
     planning: 1
   stall_timeout_ms: 300000      # Kill agent if no output for 5 min
+  max_retry_backoff_ms: 300000  # Max backoff between retries (5 min)
   model: ""                     # Override model (optional)
   allowed_tools: []             # Restrict available tools (optional)
 ```
@@ -185,7 +199,16 @@ rules:
     approval_label: "approved"
   - match:
       labels: ["bug"]
+    action: auto_assign          # Post auto-assign comment
+    auto_assignee: "alice"
+  - match:
+      labels: ["expensive"]
+    action: max_cost             # Skip task if cumulative cost exceeds limit
+    max_cost: 5.00
+  - match:
+      title_pattern: "^fix:"    # Regex match on issue title
     action: auto_assign
+    auto_assignee: "bob"
 ```
 
 ### VOICE.md
@@ -243,12 +266,13 @@ make test-integration  # Run integration tests (requires GitHub API)
 
 ## Project Status
 
-**Phase 1 (current)**: Core orchestrator loop, GitHub tracker, Claude Code driver, CLI. End-to-end functional.
+**Phase 1** (complete): Core orchestrator loop, GitHub tracker, Claude Code driver, CLI, ETag caching, rate limiting, constraints system. End-to-end functional.
+
+**Phase 2** (complete): Rules engine (TitlePattern, AutoAssign, MaxCost), production workspace manager with hooks, retry with exponential backoff, graceful shutdown, state persistence to `~/.anthem/state.json`, config hot-reload via fsnotify.
 
 Upcoming:
-- **Phase 2**: Rules engine, workspace manager, VOICE.md self-evolution, retry/backoff, config hot-reload
-- **Phase 3**: Web dashboard, cost tracking, WebSocket event stream
-- **Phase 4**: LocalJSON tracker, documentation, CI/CD releases, code signing
+- **Phase 3**: Orchestrator agent (persistent Claude session with VOICE.md personality), tool interface, voice self-evolution, task decomposition, web dashboard, WebSocket event stream
+- **Phase 4**: Example templates, CONTRIBUTING.md, cross-platform release binaries via GoReleaser, code signing
 
 ## License
 
