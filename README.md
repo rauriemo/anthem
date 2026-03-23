@@ -215,8 +215,31 @@ agent:
   stall_timeout_ms: 300000      # Kill agent if no output for 5 min
   max_retry_backoff_ms: 300000  # Max backoff between retries (5 min cap)
   model: ""                     # Override Claude model (optional)
-  allowed_tools: []             # Restrict available tools (optional)
+  permission_mode: "dontAsk"    # "dontAsk" (safe default) or "bypassPermissions" (trusted)
+  skip_permissions: false       # Shorthand: true = bypassPermissions
+  allowed_tools:                # Tools auto-approved in dontAsk mode
+    - "Read"
+    - "Edit"
+    - "Grep"
+    - "Glob"
+    - "Bash(git *)"
+    - "Bash(go test *)"
+  denied_tools:                 # Explicit deny list (overrides allow)
+    - "Bash(git push --force *)"
 ```
+
+In `dontAsk` mode (the default), only tools listed in `allowed_tools` are auto-approved. Everything else is auto-denied without hanging -- the agent sees the denial and adapts. Set `skip_permissions: true` for full autonomy (no permission checks).
+
+### Orchestrator
+
+```yaml
+orchestrator:
+  enabled: true                 # Enable AI orchestrator agent (false = mechanical dispatch only)
+  max_context_tokens: 80000     # Token threshold before refreshing orchestrator session
+  stall_timeout_ms: 60000       # Stall timeout for orchestrator Claude session
+```
+
+When enabled, the orchestrator agent (a persistent Claude session) plans task dispatch in waves. When disabled or if the orchestrator fails, Anthem falls back to Phase 2 mechanical dispatch (dispatch every eligible task).
 
 ### Rules
 
@@ -284,6 +307,18 @@ Role: Senior engineer
 ```
 
 VOICE.md is used exclusively by the orchestrator agent (not executor agents) for task management decisions. The orchestrator learns your preferences over time and evolves its personality via the `update_voice` contract action -- changes are merged, written to disk, and logged to `~/.anthem/voice-changelog.md`. See [VOICE.md.example](VOICE.md.example) for a full example.
+
+### State Files
+
+Anthem stores runtime state in `~/.anthem/`:
+
+| File | Purpose |
+|------|---------|
+| `VOICE.md` | Orchestrator personality (created on init) |
+| `constraints.yaml` | User-level safety rules (created on init) |
+| `state.json` | Persisted retry queue and cost data (survives restarts) |
+| `audit.db` | SQLite audit log -- dispatches, wave transitions, orchestrator actions |
+| `voice-changelog.md` | Log of all VOICE.md changes with timestamps and reasons |
 
 ## Architecture
 
