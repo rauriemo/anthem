@@ -12,10 +12,16 @@ An open-source alternative to OpenAI Symphony, built in Go, designed for Claude 
 - **WORKFLOW.md location**: Per-project, typically `./WORKFLOW.md` in repo root
 - **Global state root**: `~/.anthem/` (VOICE.md, constraints.yaml, state.json, voice-changelog.md)
 - **GitHub auth**: `GITHUB_TOKEN` env var, fallback to `gh auth token` command. No custom credential storage.
-- **Dashboard**: Deferred to Phase 3 (tech choice TBD between HTMX and SPA)
-- **Voice changelog**: Yes -- changelog file at `~/.anthem/voice-changelog.md` + issue comments when voice evolves (Phase 3)
+- **Dashboard**: Deferred to Phase 3b (tech choice TBD between HTMX and SPA)
+- **Voice changelog**: Changelog file at `~/.anthem/voice-changelog.md`, wired in Phase 3a via the `update_voice` contract action
 - **Testing**: Interface-based mocks (no mocking framework), table-driven tests, `//go:build integration` tagged tests for external services, `testdata/` fixtures, CI from day 1
 - **Logging**: Use `log/slog` (stdlib) for structured logging
+- **Orchestrator-as-allocator (Phase 3a)**: The orchestrator agent is a stateless allocator -- it proposes actions, the Go daemon validates and executes them. The daemon is the authority. If the orchestrator fails, the daemon falls back to Phase 2 mechanical dispatch.
+- **Contract-first tool surface (Phase 3a)**: Orchestrator-daemon communication uses a stable contract of explicitly defined action types with schemas, risk levels, and idempotency guarantees. No read-actions -- the daemon pushes state via compact snapshots. Transport is JSON structured output now, MCP later.
+- **Three-layer state model (Phase 3a)**: (1) Event Log -- append-only SQLite audit log at `~/.anthem/audit.db`. (2) State Snapshot -- compact in-memory view pushed to orchestrator. (3) Knowledge Artifacts -- curated summaries in repo `docs/exec-plans/`. Operations log lives with the daemon; reasoning memory lives with the repo.
+- **SQLite audit log (Phase 3a)**: `modernc.org/sqlite` (pure Go, no CGo). Records dispatches, retries, cancellations, cost events, wave transitions, orchestrator actions, voice updates.
+- **Wave model (Phase 3a)**: Orchestrator plans tasks in waves. Wave boundary = current planned frontier exhausted (all tasks terminal or non-runnable). Daemon detects exhaustion, prompts orchestrator to replan.
+- **Task lifecycle state machine (Phase 3a)**: Formalized states: queued, planned, running, blocked, retryQueued, needsApproval, completed, failed, canceled, skipped. Explicit `Transition(from, to)` validation enforced by daemon. `StatusToLabel()` / `LabelToStatus()` mapping between internal states and tracker labels.
 
 ## Architecture Overview
 
@@ -328,6 +334,8 @@ Implementation is a simple fan-out channel -- no external message broker needed 
 
 **Critical**: `Publish` must be **non-blocking**. The orchestrator loop calls `Publish` on every tick -- if a slow dashboard subscriber causes `Publish` to block, it stalls polling and dispatch. Implementation uses buffered channels per subscriber. If a subscriber's buffer is full, drop the oldest event and log a warning. The orchestrator's core loop must never be gated on observability consumers.
 
+**Phase 3a changes to the orchestrator loop**: The `tick()` method is extended to optionally consult the orchestrator agent before dispatch. The flow becomes: reconcile -> fetch tasks -> build StateSnapshot -> check if snapshot changed (dirty-snapshot gating) -> if changed and orchestrator enabled, consult orchestrator -> validate returned actions against contract -> execute actions -> audit log. If the orchestrator is disabled, nil, or fails, the daemon falls back to Phase 2 mechanical dispatch (dispatch every eligible task). All dispatches (orchestrator-directed and fallback) are recorded in the audit log.
+
 ### 6. Rules Engine
 
 Evaluated per-task before dispatch:
@@ -431,6 +439,8 @@ Key implementation details:
 - `--allowedTools` auto-approves specified tools so the agent runs without interactive prompts
 - MCP servers configured in `WORKFLOW.md` are written to a temp JSON file and passed via Claude Code's MCP config mechanism
 - Stall detection: kills process if no stdout activity for `stall_timeout_ms`
+
+**Phase 3a driver fixes**: `Run()` currently hardcodes `--dangerously-skip-permissions` -- this is replaced with config-driven `PermissionMode` (default `dontAsk`) and `DeniedTools` support. `Continue()` gains `ContinueOpts` with workspace, stall timeout, allowed tools, and permission mode. `parseStdout` is fixed to populate `RunResult.Output` from the `result` stream event's response text (required for the orchestrator session manager to parse actions). The `AgentRunner` interface changes: `Continue(ctx, sessionID, prompt, opts ContinueOpts)`.
 
 **Cross-platform process management:**
 
@@ -704,17 +714,31 @@ All six steps implemented and tested:
 5. State persistence -- atomic write to `~/.anthem/state.json`, LoadAndReconcile on startup (skips terminal tasks)
 6. Config hot-reload -- fsnotify watcher with debounce, validates before applying, configSnapshot pattern for goroutines
 
-### Phase 3: Orchestrator Agent + Voice + Dashboard
+### Phase 3a: Contract + Audit + Orchestrator Core
 
-Layer the intelligence on top of the Go daemon:
+Build the intelligence layer using a contract-first, orchestrator-as-allocator architecture. The daemon remains the authority; the orchestrator proposes actions via a defined contract.
 
-1. Orchestrator agent -- persistent Claude session with VOICE.md personality, communicates with user via issue comments and status updates
-2. Tool interface -- Go daemon exposes tools for the orchestrator agent: `create_task`, `list_tasks`, `start_agent`, `post_comment`, `get_cost_summary`, etc.
-3. Voice self-evolution -- orchestrator agent learns user preferences, updates VOICE.md via copy-diff-merge, voice changelog
-4. `require_plan` rule -- orchestrator agent decides when plans need approval, manages the pause/resume flow
-5. Task decomposition -- user describes a feature, orchestrator agent breaks it into ordered/parallel subtasks
-6. Dashboard + status API + WebSocket streaming via EventBus
-7. Cost tracking with budget enforcement and dashboard display
+1. **Tool contract** (`internal/orchestrator/contract.go`) -- action types with schemas (dispatch, skip, comment, update_voice, request_approval, close_wave), risk classification, validation, idempotency. Schema-only actions for 3b: create_subtasks, promote_knowledge.
+2. **SQLite audit log** (`internal/audit/`) -- append-only event log at `~/.anthem/audit.db` via `modernc.org/sqlite`. AuditLogger interface: Record, Query, RecentByTask, SummaryForWave. Injected into Orchestrator, flushed on shutdown.
+3. **Task lifecycle state machine** -- formalized states (queued, planned, running, blocked, retryQueued, needsApproval, completed, failed, canceled, skipped) replacing loose string enum. `Transition(from, to)` validation enforced by daemon. StatusToLabel/LabelToStatus mapping. Reconcile applies external tracker changes directly (bypasses Transition).
+4. **Fix executor prompts** -- remove VOICE.md from executors (voice is orchestrator-only, executors get constraints + WORKFLOW)
+5. **Fix agent driver** -- permission handling in `Run()` and `Continue()`, add `ContinueOpts`, fix `RunResult.Output` population from stream events, add `PermissionMode`/`DeniedTools` to config
+6. **Orchestrator session manager** (`internal/orchestrator/orchagent.go`) -- OrchestratorAgent with Start/Consult/Refresh. Receives compact StateSnapshot, returns structured JSON actions. Action parser with repair loop. Token tracking for session refresh threshold.
+7. **Wire into tick loop** -- orchestrator consultation with dirty-snapshot gating (skip consult when state unchanged), wave tracking (frontier exhaustion detection), fallback to mechanical dispatch, schema-only action handling (ErrNotImplemented logged + skipped), main.go wiring with `orchestrator.enabled` config flag
+8. **Voice self-evolution** -- `update_voice` contract action triggers voice.Merge + changelog + audit event
+9. **Update documentation** -- mark 3a complete, refresh all context docs
+
+### Phase 3b: Dashboard + Advanced Features
+
+Harness multipliers built on Phase 3a's foundation:
+
+1. Garbage collection -- drift signals from audit log (repeated failures, doc staleness), generating maintenance tasks
+2. Knowledge promotion -- write execution summaries to `docs/exec-plans/completed/` as repo-resident reasoning memory
+3. Plans as first-class DAG artifacts with dependency edges
+4. Dashboard + status API + WebSocket streaming via EventBus
+5. `require_plan` rule -- orchestrator produces plan, pauses for human approval
+6. Drift detection -- scheduled queries against audit log
+7. Task decomposition -- user describes feature, orchestrator breaks into subtasks
 
 ### Phase 4: Polish + Community
 

@@ -10,8 +10,8 @@
 - **WORKFLOW.md location**: Per-project, typically `./WORKFLOW.md` in repo root
 - **Global state root**: `~/.anthem/` (VOICE.md, constraints.yaml, state.json, voice-changelog.md)
 - **GitHub auth**: `GITHUB_TOKEN` env var, fallback to `gh auth token` command. No custom credential storage.
-- **Dashboard**: Deferred to Phase 3 (tech choice TBD)
-- **Voice changelog**: Yes -- changelog file at `~/.anthem/voice-changelog.md` + issue comments when voice evolves (Phase 3)
+- **Dashboard**: Deferred to Phase 3b (tech choice TBD)
+- **Voice changelog**: Changelog at `~/.anthem/voice-changelog.md`, wired in Phase 3a via `update_voice` contract action
 - **Testing**: Interface-based mocks (no mocking framework), table-driven tests, `//go:build integration` tagged tests for external services, `testdata/` fixtures, CI from day 1
 - **Logging**: Use `log/slog` (Go stdlib) for structured logging
 - **Error handling**: Wrap errors with `fmt.Errorf("context: %w", err)`. Never swallow errors silently.
@@ -46,6 +46,14 @@ anthem/
       retry.go                       # RetryInfo, exponential backoff, retry eligibility
       state.go                       # State persistence (~/.anthem/state.json), LoadAndReconcile
       events.go                      # EventBus interface + in-process implementation
+      contract.go                    # Phase 3a: action types, schemas, risk classification, validation
+      contract_test.go               # Phase 3a: contract validation tests
+      orchagent.go                   # Phase 3a: OrchestratorAgent session manager (Start/Consult/Refresh)
+      orchagent_test.go              # Phase 3a: orchestrator session tests
+    audit/
+      audit.go                       # Phase 3a: AuditLogger interface + SQLite implementation
+      schema.go                      # Phase 3a: SQLite schema and migrations
+      audit_test.go                  # Phase 3a: audit log tests
     rules/
       engine.go                      # Rules engine: label matching, actions
       approval.go                    # require_approval, require_plan flows
@@ -64,8 +72,8 @@ anthem/
         process_windows.go           # //go:build windows -- Job Object implementation
         process_unix.go              # //go:build !windows -- Process group implementation
     dashboard/
-      server.go                      # HTTP server skeleton (Phase 3)
-      api.go                         # REST API route definitions (Phase 3)
+      server.go                      # HTTP server skeleton (Phase 3b)
+      api.go                         # REST API route definitions (Phase 3b)
     logging/
       logger.go                      # Structured JSON logger (slog wrapper)
     cost/
@@ -96,7 +104,7 @@ anthem/
 
 **`internal/agent/agent.go`** -- AgentRunner:
 - `Run(ctx, RunOpts) (*RunResult, error)`
-- `Continue(ctx, sessionID, prompt) (*RunResult, error)`
+- `Continue(ctx, sessionID, prompt, opts ContinueOpts) (*RunResult, error)` -- Phase 3a: signature changes to accept ContinueOpts (workspace, permissions, stall timeout, allowed tools)
 - `Kill(pid int) error`
 
 **`internal/agent/claude/process.go`** -- ProcessManager:
@@ -166,17 +174,29 @@ Single task end-to-end: poll GitHub Issues, render constraints + WORKFLOW.md pro
 5. State persistence -- `OrchestratorState` with versioned schema, atomic write (temp+rename) to `~/.anthem/state.json`, `LoadAndReconcile` on startup (restores retry queue skipping terminal tasks, restores cost sessions).
 6. Config hot-reload -- `fsnotify` watcher on directory (catches editor delete+create), 100ms debounce, validates before applying, `ReloadConfig` under mutex, `configSnapshot` pattern for dispatch goroutines.
 
-### Phase 3: Orchestrator Agent + Voice + Dashboard
+### Phase 3a: Contract + Audit + Orchestrator Core
 
-Layer intelligence on top of the Go daemon:
+Build the intelligence layer using orchestrator-as-allocator architecture. Daemon is the authority; orchestrator proposes via contract. Detailed plan: `.cursor/plans/phase_3a_revised_plan_b5db9c3f.plan.md`.
 
-1. Orchestrator agent -- persistent Claude session with VOICE.md personality, communicates with user via issue comments and status updates
-2. Tool interface -- Go daemon exposes tools for the orchestrator agent: `create_task`, `list_tasks`, `start_agent`, `post_comment`, `get_cost_summary`, etc.
-3. Voice self-evolution -- orchestrator agent learns user preferences, updates VOICE.md via section merge (`internal/voice/merge.go`), voice changelog (`internal/voice/changelog.go`)
-4. `require_plan` rule -- orchestrator agent decides when plans need approval, manages pause/resume flow
-5. Task decomposition -- user describes a feature, orchestrator agent breaks it into ordered/parallel subtasks
-6. Dashboard + status API + WebSocket streaming via EventBus
-7. Cost tracking with budget enforcement and dashboard display
+1. **Tool contract** (`internal/orchestrator/contract.go` + `contract_test.go`) -- action types with schemas (dispatch, skip, comment, update_voice, request_approval, close_wave), risk classification, validation, idempotency. Schema-only actions: create_subtasks, promote_knowledge (return ErrNotImplemented, wired in 3b).
+2. **SQLite audit log** (`internal/audit/audit.go`, `schema.go`, `audit_test.go`) -- append-only event log at `~/.anthem/audit.db` via `modernc.org/sqlite`. AuditLogger interface: Record, Query, RecentByTask, SummaryForWave, Close. Injected into Orchestrator. Shutdown flushes WAL.
+3. **Task lifecycle state machine** (`internal/types/task.go`) -- replace StatusActive/StatusPending with formalized states: queued, planned, running, blocked, retryQueued, needsApproval, completed, failed, canceled, skipped. `Transition(from, to)` validation. IsTerminal includes skipped. StatusToLabel/LabelToStatus mapping. Transition() validates daemon-initiated changes; reconcile() applies external tracker changes directly.
+4. **Fix executor prompts** (`internal/orchestrator/orchestrator.go`) -- remove VOICE.md from buildFullPrompt for executors. Voice is orchestrator-only.
+5. **Fix agent driver** (`internal/agent/claude/driver.go`, `agent.go`, `mock.go`, `types/task.go`, `config.go`) -- remove hardcoded --dangerously-skip-permissions from Run(). Add PermissionMode/DeniedTools to RunOpts. Add ContinueOpts to Continue(). Fix RunResult.Output population from result stream event. Add PermissionMode/SkipPermissions/DeniedTools to AgentConfig.
+6. **Orchestrator session manager** (`internal/orchestrator/orchagent.go` + `orchagent_test.go`) -- OrchestratorAgent: Start, Consult, Refresh. StateSnapshot builder. Action parser with repair loop. Token tracking for refresh threshold.
+7. **Wire into tick loop** (`internal/orchestrator/orchestrator.go`, `internal/config/config.go`, `cmd/anthem/main.go`) -- OrchestratorConfig (enabled, max_context_tokens, stall_timeout_ms). Dirty-snapshot gating. Wave tracking (frontier exhaustion). Fallback to mechanical dispatch (audited). Schema-only actions: ErrNotImplemented logged + skipped.
+8. **Voice self-evolution** -- update_voice action triggers voice.Merge + changelog + audit event.
+9. **Update documentation** -- mark 3a complete, refresh all context docs.
+
+### Phase 3b: Dashboard + Advanced Features
+
+1. Garbage collection from audit log (repeated failures, doc staleness, architecture violations)
+2. Knowledge promotion to `docs/exec-plans/completed/`
+3. Plans as DAG artifacts with dependency edges
+4. Dashboard + status API + WebSocket streaming via EventBus
+5. `require_plan` rule with pause/resume flow
+6. Drift detection from audit log queries
+7. Task decomposition (user describes feature, orchestrator breaks into subtasks)
 
 ### Phase 4: Polish + Community
 
@@ -203,6 +223,9 @@ Current:
 
 Added in Phase 2:
 - `github.com/fsnotify/fsnotify` -- File watching for config hot-reload
+
+Added in Phase 3a:
+- `modernc.org/sqlite` -- Pure Go SQLite for canonical audit log (no CGo, cross-platform)
 
 ## Testing Strategy
 

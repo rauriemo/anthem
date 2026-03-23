@@ -28,8 +28,8 @@ These are the source of truth for what to build and how.
 - **WORKFLOW.md location**: Per-project, typically `./WORKFLOW.md` in repo root
 - **Global state root**: `~/.anthem/` for all global state (VOICE.md, constraints.yaml, state.json, voice-changelog.md). Resolves via `os.UserHomeDir()` on all platforms.
 - **GitHub auth**: `GITHUB_TOKEN` env var as primary, fallback to `gh auth token` CLI command. No custom credential storage -- no tokens in `~/.anthem/`.
-- **Dashboard**: Deferred to Phase 3 (tech choice TBD between HTMX and SPA)
-- **Voice changelog**: Log all VOICE.md changes with reasons to `~/.anthem/voice-changelog.md` (Phase 3, when orchestrator agent is implemented)
+- **Dashboard**: Deferred to Phase 3b (tech choice TBD between HTMX and SPA)
+- **Voice changelog**: Log all VOICE.md changes with reasons to `~/.anthem/voice-changelog.md`. Wired in Phase 3a via the `update_voice` contract action.
 - **Testing**: Interface-based mocks (no mocking framework -- just simple structs satisfying interfaces), table-driven tests, `//go:build integration` tagged tests for external services, `testdata/` fixtures, CI from day 1
 - **Logging**: Use `log/slog` (Go stdlib) for structured logging
 - **Error handling**: Wrap errors with `fmt.Errorf("context: %w", err)`. Never swallow errors silently.
@@ -39,6 +39,12 @@ These are the source of truth for what to build and how.
 - **Template engine**: Use sprig (`github.com/Masterminds/sprig/v3`) function map for WORKFLOW.md body rendering -- provides `lower`, `upper`, `replace`, `default`, `join`, etc.
 - **EventBus**: `Publish` must be non-blocking. Buffered channels per subscriber, drop oldest on overflow. The orchestrator loop must never stall on slow observers.
 - **Orchestrator module pattern**: All dispatch, reconciliation, and state logic lives in a single `orchestrator.go` file (matching Symphony's single-module pattern). No separate dispatch.go or reconciler.go files.
+- **Orchestrator-as-allocator (Phase 3a)**: The orchestrator agent is a stateless allocator -- it proposes actions, the Go daemon validates and executes them. The daemon is the authority. If the orchestrator session fails, the daemon falls back to Phase 2 mechanical dispatch. No reliance on long-running context windows.
+- **Contract-first tool surface (Phase 3a)**: Orchestrator-daemon communication uses a stable contract of explicitly defined actions with schemas, risk levels, and idempotency guarantees. Transport is JSON structured output now, MCP later. No read-actions -- the daemon pushes state via compact snapshots.
+- **Three-layer state model (Phase 3a)**: (1) Event Log -- append-only SQLite audit log at `~/.anthem/audit.db`, operational events outside the repo. (2) State Snapshot -- compact in-memory view pushed to orchestrator each tick. (3) Knowledge Artifacts -- curated summaries in repo `docs/exec-plans/`. Operations log lives with the daemon; reasoning memory lives with the repo.
+- **SQLite audit log (Phase 3a)**: `modernc.org/sqlite` (pure Go, no CGo) for the canonical audit log. Records dispatches, retries, cancellations, cost events, wave transitions, orchestrator actions, and voice updates.
+- **Wave model (Phase 3a)**: Orchestrator plans tasks in waves. Wave boundary = "current planned frontier exhausted" (all tasks terminal or non-runnable). Daemon detects exhaustion and prompts orchestrator to replan.
+- **Task lifecycle state machine (Phase 3a)**: Formalized states replacing the loose string enum: queued, planned, running, blocked, retryQueued, needsApproval, completed, failed, canceled, skipped. Explicit `Transition(from, to)` validation enforced by the daemon. `StatusToLabel()` / `LabelToStatus()` mapping layer between internal states and tracker labels. `Transition()` validates daemon-initiated changes only; external tracker changes (user moves kanban card) are reconciled directly.
 
 ## Coding Standards
 
@@ -76,7 +82,9 @@ These are the source of truth for what to build and how.
 - New files: `internal/orchestrator/retry.go`, `internal/orchestrator/state_test.go`, `internal/config/watcher_test.go`.
 - New dependency: `github.com/fsnotify/fsnotify`.
 
-**Phase 3 (next)**: Orchestrator agent (Claude session with VOICE.md), tool interface, voice self-evolution, task decomposition, dashboard.
+**Phase 3a (in progress)**: Contract-first tool surface (action types, schemas, risk classification), SQLite audit log (`~/.anthem/audit.db`), formalized task lifecycle state machine, orchestrator agent as stateless allocator (Start/Consult/Refresh, wave model), driver permission fixes (`Run()` + `Continue()`), voice self-evolution wiring, dirty-snapshot gating. Detailed plan in `.cursor/plans/phase_3a_revised_plan_b5db9c3f.plan.md`.
+
+**Phase 3b (after 3a)**: Dashboard + status API + WebSocket, garbage collection from audit log, knowledge promotion to repo, DAG execution plans, drift detection, `require_plan` rule, task decomposition.
 
 Update this section as phases are completed.
 
