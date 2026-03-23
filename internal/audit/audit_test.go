@@ -10,7 +10,6 @@ import (
 
 func strPtr(s string) *string   { return &s }
 func f64Ptr(f float64) *float64 { return &f }
-func boolPtr(b bool) *bool      { return &b }
 
 func newTestLogger(t *testing.T) *SQLiteAuditLogger {
 	t.Helper()
