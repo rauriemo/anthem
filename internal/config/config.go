@@ -60,6 +60,7 @@ type RuleConfig struct {
 	Action        string    `yaml:"action"`
 	ApprovalLabel string    `yaml:"approval_label,omitempty"`
 	MaxCost       float64   `yaml:"max_cost,omitempty"`
+	AutoAssignee  string    `yaml:"auto_assignee,omitempty"`
 }
 
 type RuleMatch struct {

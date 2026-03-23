@@ -18,7 +18,6 @@ import (
 	"github.com/rauriemo/anthem/internal/tracker"
 	ghtracker "github.com/rauriemo/anthem/internal/tracker/github"
 	localtracker "github.com/rauriemo/anthem/internal/tracker/local"
-	"github.com/rauriemo/anthem/internal/types"
 	"github.com/rauriemo/anthem/internal/voice"
 	"github.com/rauriemo/anthem/internal/workspace"
 )
@@ -114,12 +113,14 @@ func runCmd() *cobra.Command {
 			pm := claude.NewPlatformProcessManager()
 			runner := claude.NewDriver(pm, logger)
 
-			ws := workspace.NewMockWorkspaceManager()
-			ws.PrepareFunc = func(_ context.Context, _ types.Task) (string, error) {
-				return ".", nil
-			}
+			ws := workspace.NewManager(cfg.Workspace.Root, cfg.Hooks, logger)
 
 			events := orchestrator.NewEventBus(logger)
+
+			statePath, err := orchestrator.DefaultStatePath()
+			if err != nil {
+				return fmt.Errorf("resolving state path: %w", err)
+			}
 
 			orch := orchestrator.New(orchestrator.Opts{
 				Config:          cfg,
@@ -131,7 +132,15 @@ func runCmd() *cobra.Command {
 				Logger:          logger,
 				VoiceContent:    voiceContent,
 				UserConstraints: userConstraints,
+				StatePath:       statePath,
 			})
+
+			// Start config hot-reload watcher
+			cfgWatcher := config.NewWatcher(workflowPath, orch.ReloadConfig, logger)
+			if err := cfgWatcher.Start(); err != nil {
+				logger.Warn("config watcher failed to start, hot-reload disabled", "error", err)
+			}
+			defer cfgWatcher.Stop()
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
 			defer stop()

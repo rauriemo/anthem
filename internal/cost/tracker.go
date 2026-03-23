@@ -48,3 +48,26 @@ func (t *Tracker) TaskCost(taskID string) float64 {
 	}
 	return total
 }
+
+// Sessions returns a copy of all recorded sessions for persistence.
+func (t *Tracker) Sessions() []SessionCost {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]SessionCost, 0, len(t.sessions))
+	for _, sc := range t.sessions {
+		out = append(out, *sc)
+	}
+	return out
+}
+
+// LoadSessions replaces the session map with the provided sessions.
+// Used for restoring state from persistence.
+func (t *Tracker) LoadSessions(sessions []SessionCost) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.sessions = make(map[string]*SessionCost, len(sessions))
+	for i := range sessions {
+		sc := sessions[i]
+		t.sessions[sc.SessionID] = &sc
+	}
+}
