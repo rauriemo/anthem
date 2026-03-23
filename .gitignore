@@ -8,6 +8,8 @@
 # Test artifacts
 claude_stderr.txt
 test.txt
+*.out
+coverage/
 
 # Claude Code local config
 .claude/
