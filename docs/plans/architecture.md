@@ -7,12 +7,13 @@ An open-source alternative to OpenAI Symphony, built in Go, designed for Claude 
 - **Language**: Go (latest stable)
 - **Module path**: `github.com/rauriemo/anthem`
 - **Cross-platform**: Windows-first, all three OS from day 1 (build tags for process management)
-- **VOICE.md location**: Global at `~/.anthem/VOICE.md` (shared across all projects, not per-project)
+- **Hybrid architecture**: Go daemon handles the mechanical reliability layer (polling, process management, workspace isolation, retry, state persistence). An AI orchestrator agent (Phase 3) sits on top for intelligence -- user communication, task decomposition, parallel planning. The Go daemon exposes a tool interface for the orchestrator agent to call.
+- **VOICE.md**: Global at `~/.anthem/VOICE.md`. Applies only to the orchestrator agent (Phase 3), not executor agents. Executors get project context from WORKFLOW.md, skills, and MCP tools -- harnesses, not personality. Voice gives the orchestrator personality for user communication and helps it learn the user's preferences for better task management.
 - **WORKFLOW.md location**: Per-project, typically `./WORKFLOW.md` in repo root
-- **Global state root**: `~/.anthem/` (VOICE.md, state.json, voice-changelog.md)
+- **Global state root**: `~/.anthem/` (VOICE.md, constraints.yaml, state.json, voice-changelog.md)
 - **GitHub auth**: `GITHUB_TOKEN` env var, fallback to `gh auth token` command. No custom credential storage.
 - **Dashboard**: Deferred to Phase 3 (tech choice TBD between HTMX and SPA)
-- **Voice changelog**: Yes -- changelog file at `~/.anthem/voice-changelog.md` + issue comments when voice evolves
+- **Voice changelog**: Yes -- changelog file at `~/.anthem/voice-changelog.md` + issue comments when voice evolves (Phase 3)
 - **Testing**: Interface-based mocks (no mocking framework), table-driven tests, `//go:build integration` tagged tests for external services, `testdata/` fixtures, CI from day 1
 - **Logging**: Use `log/slog` (stdlib) for structured logging
 
@@ -77,7 +78,7 @@ tracker:
   repo: "user/repo"      # GitHub: owner/repo
   labels:
     active: ["todo", "in-progress"]
-    terminal: ["done", "cancelled"]
+    terminal: ["done", "canceled"]
 
 polling:
   interval_ms: 10000
@@ -142,13 +143,15 @@ Branch: anthem/{{issue.identifier}}
 
 ### 2. VOICE.md (Personality Layer)
 
-Anthem's differentiator: a self-evolving personality system inspired by OpenClaw's SOUL.md. Every agent session reads `VOICE.md` first, "waking up" with a consistent identity, tone, and awareness of the user.
+Anthem's differentiator: a self-evolving personality system inspired by OpenClaw's SOUL.md. Unlike Symphony (which has no personality concept), Anthem's orchestrator agent communicates with the user through a consistent identity, tone, and awareness.
 
-**Location**: Global at `~/.anthem/VOICE.md`. The voice is the same across all projects -- it defines who the agent is and how it relates to the user, which doesn't change between repos. WORKFLOW.md is project-specific; VOICE.md is user-specific.
+**Scope**: VOICE.md applies only to the **orchestrator agent** (Phase 3), not executor agents. Executor agents are headless coding workers that receive project context from WORKFLOW.md, skills, and MCP tools -- they get harnesses, not personality. The orchestrator agent uses VOICE.md for two purposes: (1) communicating with the user in an appealing style, and (2) understanding the user's preferences and working patterns for better task management decisions.
 
-**Pure personality**: VOICE.md contains only personality-related sections (Identity, Personality, User Context). Safety guardrails are handled by the separate constraints system (see below). This separation means agents can freely evolve personality without risk of removing safety rules.
+**Location**: Global at `~/.anthem/VOICE.md`. The voice is the same across all projects -- it defines who the orchestrator is and how it relates to the user, which doesn't change between repos. WORKFLOW.md is project-specific; VOICE.md is user-specific.
 
-**Bootstrapping**: On first run, if `~/.anthem/` doesn't exist, Anthem auto-creates it and writes a default `VOICE.md` template. If `~/.anthem/VOICE.md` is missing at runtime, Anthem logs a warning and runs without a personality (just the constraints + WORKFLOW.md prompt). The `anthem init` command creates both `~/.anthem/VOICE.md`, `~/.anthem/constraints.yaml`, and a starter `./WORKFLOW.md`.
+**Pure personality**: VOICE.md contains only personality-related sections (Identity, Personality, User Context). Safety guardrails are handled by the separate constraints system (see below). This separation means the orchestrator agent can freely evolve personality without risk of removing safety rules.
+
+**Bootstrapping**: On first run, if `~/.anthem/` doesn't exist, Anthem auto-creates it and writes a default `VOICE.md` template. The `anthem init` command creates `~/.anthem/VOICE.md`, `~/.anthem/constraints.yaml`, and a starter `./WORKFLOW.md`.
 
 **Example VOICE.md:**
 
@@ -174,37 +177,22 @@ Specialty: Pragmatic problem-solving, ships fast
 - Often works late; keep responses concise.
 ```
 
-**How it works:**
+**Current state (Phase 1-2)**: VOICE.md is parsed and loaded by the Go daemon. It is available in the prompt pipeline but is not yet used by an AI orchestrator agent. The parsing, section extraction, and merge utilities are implemented in `internal/voice/`.
 
-- Anthem reads `~/.anthem/VOICE.md` and prepends it to the prompt before every agent session
-- The prompt is assembled in order: (1) voice content, (2) constraints block, (3) rendered task template
-- The agent's issue comments, PR descriptions, and status updates all reflect the voice
-- All sections of VOICE.md can self-evolve as the agent learns the user (safety is in the constraints system)
+**Phase 3 -- orchestrator agent integration**: The orchestrator agent (a persistent Claude session) will use VOICE.md for personality when communicating with users via issue comments, status updates, and task management decisions. Self-evolution happens as the orchestrator agent learns the user's preferences over time.
 
-**Self-evolution mechanism (copy-diff-merge):**
+**Self-evolution mechanism (Phase 3, copy-diff-merge):**
 
-Rather than letting agents write directly to `~/.anthem/VOICE.md` (which would create concurrent write issues), Anthem uses a copy-diff-merge approach:
-
-1. Before each agent run, Anthem copies `~/.anthem/VOICE.md` into the workspace as `.anthem/VOICE.md`
-2. The agent works on this local copy during its session
-3. After the run completes, Anthem diffs the workspace copy against the original
-4. If changed, Anthem applies the merge logic: section merge for concurrent edits, approval gate if configured
-5. The merged result is written back to `~/.anthem/VOICE.md`
-
-This mirrors the workflow self-modification guardrail and keeps concurrent file safety simple.
+1. The orchestrator agent session has access to `~/.anthem/VOICE.md`
+2. As it interacts with the user and observes patterns, it updates VOICE.md sections
+3. Changes are applied via section-level merge logic (`internal/voice/merge.go`)
+4. Every change is logged to `~/.anthem/voice-changelog.md` with timestamps, reason, and diff (`internal/voice/changelog.go`)
 
 **Self-evolution examples:**
 
 - After the user repeatedly asks for shorter explanations: adds "Keep explanations under 3 sentences" to Personality
 - After working on several Unity tasks: adds "User's project uses Unity URP with isometric tilemaps" to User Context
 - After the user rejects a refactor: adds "User prefers incremental changes over large refactors" to User Context
-
-**Voice changelog:**
-
-Every VOICE.md change is logged with the reason, addressing the weakness identified in OpenClaw's SOUL.md system where agents "remember who they became but not why":
-
-- Changes are logged to `~/.anthem/voice-changelog.md` with timestamps, the task that triggered the change, and the diff
-- If the change originated from a tracked task, the diff is also posted as an issue comment for visibility
 
 ### 2b. Constraints (Safety Layer)
 
@@ -379,7 +367,6 @@ This ensures new users are protected by default while experienced users can remo
 - Lifecycle hooks: `after_create` (clone/setup), `before_run` (pull/sync), `after_complete` (cleanup)
 - Hard invariant: agent subprocess cwd = workspace path, which must resolve under workspace root
 - Startup cleanup: fetch terminal tasks, remove their workspace dirs
-- Before each run, copies `~/.anthem/VOICE.md` into the workspace as `.anthem/VOICE.md` for the self-evolution mechanism
 
 **Hook failure handling:**
 
@@ -400,7 +387,7 @@ type AgentRunner interface {
 
 type RunOpts struct {
     WorkspacePath string
-    Prompt        string        // VOICE.md + rendered WORKFLOW.md template
+    Prompt        string        // constraints + rendered WORKFLOW.md template
     MaxTurns      int
     AllowedTools  []string      // tool allowlist for auto-approval
     MCPConfig     string        // path to MCP server config file
@@ -567,13 +554,12 @@ Cross-platform signal handling:
 
 ### 11. Concurrent File Safety
 
-Multiple agents may attempt to edit shared files (`WORKFLOW.md`, `~/.anthem/VOICE.md`) simultaneously:
+Multiple executor agents may attempt to edit shared files (e.g., `WORKFLOW.md`) simultaneously:
 
-- Anthem holds an in-process mutex per protected file
+- Anthem holds an in-process mutex per protected file (`internal/workspace/lock.go`)
 - After an agent run completes, diffs are applied sequentially (not in parallel)
 - If two agents both propose `WORKFLOW.md` changes, the second one is queued and re-diffed against the already-applied first change
-- `VOICE.md` edits from different agent sessions are merged chronologically (last write wins for the same section, both preserved for different sections)
-- The copy-diff-merge approach for VOICE.md (section 2) means agents never write directly to the global file
+- `VOICE.md` is only modified by the orchestrator agent (Phase 3), which is a single session -- no concurrent write issues
 
 ### 12. Web Dashboard + Status API (Observability Layer)
 
@@ -672,7 +658,7 @@ anthem/
     workspace/          # Workspace manager, hooks, file safety, VOICE.md copy
     agent/              # AgentRunner interface
       claude/           # Claude Code driver (stream-json, session resume, cross-platform process mgmt)
-    voice/              # VOICE.md parser, [CORE] enforcement, merge logic, changelog
+    voice/              # VOICE.md parser, section merge logic, changelog
     dashboard/          # Embedded HTTP server, templates, API, WebSocket
     logging/            # Structured logger (slog)
     cost/               # Token/cost tracking, budget enforcement
@@ -703,21 +689,36 @@ anthem version                # Print version
 
 ## Build Phases
 
-### Phase 1: Foundation (Core Loop + GitHub + Claude Code + VOICE.md)
+### Phase 1: Foundation (COMPLETE)
 
-Get a single task flowing end-to-end: poll GitHub Issues, spawn Claude Code with VOICE.md personality, update issue on completion. Includes correct `--print --output-format stream-json` integration, session management, and basic cost parsing.
+Single task end-to-end: poll GitHub Issues, render WORKFLOW.md prompt with constraints, spawn Claude Code, update issue on completion. Includes `--output-format stream-json` integration, session management, cost parsing, ETag caching, rate limit throttling, auto-bootstrap, and two-tier constraints system.
 
-### Phase 2: Rules + Workspace Isolation + Self-Evolution
+### Phase 2: Go Daemon Reliability Layer (CURRENT)
 
-Add the rules engine, approval flow, workspace management with hooks and hook failure handling, retry/backoff, graceful shutdown, and VOICE.md self-evolution with copy-diff-merge, `[CORE]` protection, and voice changelog.
+Complete the mechanical reliability layer of the Go daemon:
 
-### Phase 3: Dashboard + Observability + Cost Tracking
+1. Rules engine completion -- wire `auto_assign`, `max_cost` enforcement, `TitlePattern` regex matching into orchestrator dispatch
+2. Real workspace manager -- replace mock with production implementation (per-task directories, hook lifecycle with failure handling, cleanup)
+3. Retry and backoff -- per-task retry tracking, exponential backoff, stall recovery
+4. Graceful shutdown -- WaitGroup drain of active dispatches, agent termination via ProcessManager, claim release (remove in-progress labels)
+5. State persistence -- save/load `~/.anthem/state.json` (active sessions, retry queue, token totals), startup reconciliation
+6. Config hot-reload -- fsnotify watcher on WORKFLOW.md, keep last valid config on parse failure
 
-Embedded web dashboard (tech TBD), status API, WebSocket streaming via EventBus, structured logging via slog, cost tracking with budget enforcement, and voice/rule change review UI.
+### Phase 3: Orchestrator Agent + Voice + Dashboard
+
+Layer the intelligence on top of the Go daemon:
+
+1. Orchestrator agent -- persistent Claude session with VOICE.md personality, communicates with user via issue comments and status updates
+2. Tool interface -- Go daemon exposes tools for the orchestrator agent: `create_task`, `list_tasks`, `start_agent`, `post_comment`, `get_cost_summary`, etc.
+3. Voice self-evolution -- orchestrator agent learns user preferences, updates VOICE.md via copy-diff-merge, voice changelog
+4. `require_plan` rule -- orchestrator agent decides when plans need approval, manages the pause/resume flow
+5. Task decomposition -- user describes a feature, orchestrator agent breaks it into ordered/parallel subtasks
+6. Dashboard + status API + WebSocket streaming via EventBus
+7. Cost tracking with budget enforcement and dashboard display
 
 ### Phase 4: Polish + Community
 
-Local JSON adapter, example workflows and VOICE.md templates, comprehensive README, CONTRIBUTING.md, CI/CD pipeline, cross-platform release binaries (Windows/macOS/Linux), contributor guide, and demo video.
+Example workflows and VOICE.md templates, comprehensive README, CONTRIBUTING.md, CI/CD pipeline, cross-platform release binaries via GoReleaser (Windows/macOS/Linux), code signing for Windows (SignPath.io or Azure Trusted Signing), and demo video.
 
 ## Future Enhancements (Post Phase 4)
 
@@ -727,9 +728,8 @@ Local JSON adapter, example workflows and VOICE.md templates, comprehensive READ
 
 ## Reference: OpenAI Symphony
 
-Anthem mirrors many of Symphony's proven design patterns. When implementing, reference the Symphony codebase at https://github.com/openai/openai-agents-python (specifically the `examples/agents/symphony/` directory) for patterns around:
+Anthem mirrors many of Symphony's proven design patterns (orchestrator loop, tracker adapters, workspace isolation, config parsing from markdown front matter) while adding a personality-aware orchestrator agent layer that Symphony lacks. Symphony's orchestrator is pure Elixir code with no AI -- Anthem's hybrid architecture adds a Claude orchestrator agent on top of the Go daemon for user communication, task decomposition, and self-evolution.
 
-- Orchestrator loop design
-- Tracker adapter interfaces
-- Workspace isolation
-- Config parsing from markdown front matter
+- Repository: https://github.com/openai/symphony
+- Language: Elixir (GenServer-based orchestrator)
+- Spec: `SPEC.md` in repo root defines the language-agnostic service specification

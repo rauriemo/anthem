@@ -175,6 +175,51 @@ func TestListActiveETagSentOnSecondCall(t *testing.T) {
 	}
 }
 
+func TestGetTaskSkipsETagCaching(t *testing.T) {
+	var secondCallEtag string
+	var callCount atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := callCount.Add(1)
+		if n == 2 {
+			secondCallEtag = r.Header.Get("If-None-Match")
+		}
+		w.Header().Set("ETag", `"issue-etag"`)
+		issue := issueJSON(1, "Test", []string{"todo"})
+		_ = json.NewEncoder(w).Encode(issue)
+	}))
+	defer srv.Close()
+
+	tracker := newTestTracker(t, srv.URL)
+	ctx := context.Background()
+	_, _ = tracker.GetTask(ctx, "1")
+	_, _ = tracker.GetTask(ctx, "1")
+
+	if secondCallEtag != "" {
+		t.Errorf("GetTask should not send ETag, got %q", secondCallEtag)
+	}
+}
+
+func TestIsListEndpoint(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/repos/owner/repo/issues", true},
+		{"/repos/owner/repo/issues/", true},
+		{"/repos/owner/repo/issues/123", false},
+		{"/repos/owner/repo/issues/1", false},
+		{"/repos/owner/repo/labels", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isListEndpoint(tt.path); got != tt.want {
+				t.Errorf("isListEndpoint(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestShouldThrottle(t *testing.T) {
 	tests := []struct {
 		name          string

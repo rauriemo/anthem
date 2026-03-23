@@ -17,7 +17,10 @@ import (
 	"github.com/rauriemo/anthem/internal/types"
 )
 
-// etagTransport injects If-None-Match headers for conditional requests.
+// etagTransport injects If-None-Match headers for list endpoints only.
+// Single-resource GETs (e.g. /issues/123) are excluded because they are
+// infrequent reconciliation calls that always want fresh data, and go-github
+// treats 304 responses as errors.
 type etagTransport struct {
 	base  http.RoundTripper
 	mu    sync.Mutex
@@ -25,23 +28,43 @@ type etagTransport struct {
 }
 
 func (t *etagTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	cacheable := isListEndpoint(req.URL.Path)
 	key := req.URL.String()
-	t.mu.Lock()
-	etag := t.etags[key]
-	t.mu.Unlock()
-	if etag != "" {
-		req.Header.Set("If-None-Match", etag)
+
+	if cacheable {
+		t.mu.Lock()
+		etag := t.etags[key]
+		t.mu.Unlock()
+		if etag != "" {
+			req.Header.Set("If-None-Match", etag)
+		}
 	}
+
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		return resp, err
 	}
-	if newEtag := resp.Header.Get("ETag"); newEtag != "" {
-		t.mu.Lock()
-		t.etags[key] = newEtag
-		t.mu.Unlock()
+
+	if cacheable {
+		if newEtag := resp.Header.Get("ETag"); newEtag != "" {
+			t.mu.Lock()
+			t.etags[key] = newEtag
+			t.mu.Unlock()
+		}
 	}
 	return resp, nil
+}
+
+// isListEndpoint returns true for paths like /repos/owner/repo/issues
+// but false for single-resource paths like /repos/owner/repo/issues/123.
+func isListEndpoint(path string) bool {
+	segments := strings.Split(strings.TrimRight(path, "/"), "/")
+	if len(segments) == 0 {
+		return false
+	}
+	last := segments[len(segments)-1]
+	_, err := strconv.Atoi(last)
+	return err != nil
 }
 
 // GitHubTracker implements tracker.IssueTracker using the GitHub API.

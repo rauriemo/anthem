@@ -5,12 +5,13 @@
 - **Language**: Go (latest stable)
 - **Module path**: `github.com/rauriemo/anthem`
 - **Cross-platform**: Windows-first, all three OS from day 1 (build tags for process management)
-- **VOICE.md location**: Global at `~/.anthem/VOICE.md` (shared across all projects, not per-project)
+- **Hybrid architecture**: Go daemon = mechanical reliability layer (polling, process mgmt, workspace, retry, state). Orchestrator agent (Phase 3) = intelligence layer (Claude with VOICE.md, user communication, task decomposition). Go daemon exposes tool interface for the orchestrator agent.
+- **VOICE.md**: Global at `~/.anthem/VOICE.md`. Orchestrator-agent only (Phase 3) -- not applied to executor agents. Executors get harnesses (WORKFLOW.md, skills, MCP tools, constraints), not personality.
 - **WORKFLOW.md location**: Per-project, typically `./WORKFLOW.md` in repo root
-- **Global state root**: `~/.anthem/` (VOICE.md, state.json, voice-changelog.md)
+- **Global state root**: `~/.anthem/` (VOICE.md, constraints.yaml, state.json, voice-changelog.md)
 - **GitHub auth**: `GITHUB_TOKEN` env var, fallback to `gh auth token` command. No custom credential storage.
 - **Dashboard**: Deferred to Phase 3 (tech choice TBD)
-- **Voice changelog**: Yes -- changelog file at `~/.anthem/voice-changelog.md` + issue comments when voice evolves
+- **Voice changelog**: Yes -- changelog file at `~/.anthem/voice-changelog.md` + issue comments when voice evolves (Phase 3)
 - **Testing**: Interface-based mocks (no mocking framework), table-driven tests, `//go:build integration` tagged tests for external services, `testdata/` fixtures, CI from day 1
 - **Logging**: Use `log/slog` (Go stdlib) for structured logging
 - **Error handling**: Wrap errors with `fmt.Errorf("context: %w", err)`. Never swallow errors silently.
@@ -32,9 +33,8 @@ anthem/
       watcher.go                     # fsnotify hot-reload (stub for Phase 2)
     voice/
       voice.go                       # VOICE.md parser, section extraction
-      core.go                        # [CORE] tag detection + immutability enforcement
-      merge.go                       # Section merge logic for concurrent edits
-      changelog.go                   # Voice change logging with reasons
+      merge.go                       # Section merge logic (used by orchestrator agent in Phase 3)
+      changelog.go                   # Voice change logging with reasons (Phase 3)
     tracker/
       tracker.go                     # IssueTracker interface definition
       github/
@@ -42,16 +42,14 @@ anthem/
       local/
         local.go                     # LocalJSONTracker adapter (tasks.json)
     orchestrator/
-      orchestrator.go                # Core loop: poll, sort, claim, dispatch
-      reconciler.go                  # Active run reconciliation
-      dispatch.go                    # Worker dispatch + concurrency control
+      orchestrator.go                # Core loop: poll, sort, claim, dispatch, reconcile
       state.go                       # State persistence (~/.anthem/state.json)
       events.go                      # EventBus interface + in-process implementation
     rules/
       engine.go                      # Rules engine: label matching, actions
       approval.go                    # require_approval, require_plan flows
     workspace/
-      manager.go                     # Directory creation, hooks, cleanup, VOICE.md copy
+      manager.go                     # Directory creation, hooks, cleanup
       safety.go                      # Path safety invariants
       lock.go                        # Concurrent file locking
     agent/
@@ -124,16 +122,16 @@ anthem/
 6. Define all interfaces: IssueTracker, AgentRunner, ProcessManager, WorkspaceManager, EventBus
 7. Create mock implementations of all interfaces for testing
 8. Define Config struct matching WORKFLOW.md YAML schema (including `system:` block, `agent.max_concurrent`, `agent.max_concurrent_per_label`), parser skeleton, validator skeleton
-9. Define VoiceConfig struct, parser skeleton with section extraction and [CORE] detection
+9. Define VoiceConfig struct, parser skeleton with section extraction
 10. Wire up Cobra CLI skeleton: `anthem init`, `anthem run`, `anthem validate`, `anthem status`, `anthem version`
 11. Create `WORKFLOW.md.example`, `VOICE.md.example`, `testdata/` fixtures
 
 ### Phase 1: Foundation (Core Loop + GitHub + Claude Code + VOICE.md)
 
-Single task end-to-end: poll GitHub Issues, render `~/.anthem/VOICE.md` + self-evolution instruction + `WORKFLOW.md` prompt, spawn Claude Code, update issue on completion.
+Single task end-to-end: poll GitHub Issues, render constraints + WORKFLOW.md prompt, spawn Claude Code, update issue on completion.
 
 1. Implement WORKFLOW.md parser -- YAML front matter + Go template body with sprig function map, `$ENV_VAR` expansion, validation, `system:` block with safe defaults
-2. Implement VOICE.md parser -- read from `~/.anthem/VOICE.md`, section extraction, [CORE] tag detection, prepend to prompt with self-evolution instruction referencing **workspace copy** (`.anthem/VOICE.md`) injected between voice and task content
+2. Implement VOICE.md parser -- read from `~/.anthem/VOICE.md`, section extraction (voice wiring into prompt deferred to Phase 3 orchestrator agent)
 3. Implement `~/.anthem/` bootstrapping -- auto-create directory and default VOICE.md on first run, warn and continue if VOICE.md missing
 4. Implement `anthem init` -- create starter `./WORKFLOW.md` from template + bootstrap `~/.anthem/VOICE.md`
 5. Implement GitHubTracker -- ListActive, GetTask, UpdateStatus, AddComment, AddLabel, RemoveLabel
@@ -146,36 +144,43 @@ Single task end-to-end: poll GitHub Issues, render `~/.anthem/VOICE.md` + self-e
 9. Wire up CLI commands to orchestrator (`anthem run`, `anthem validate`)
 10. End-to-end test with mock tracker + mock agent runner
 
-### Phase 2: Rules + Workspace + Self-Evolution
+### Phase 2: Go Daemon Reliability Layer (CURRENT)
 
-**Pre-Phase 2 change**: `[CORE]` enforcement in VOICE.md has been replaced by a two-tier constraints system (`~/.anthem/constraints.yaml` + `system.constraints` in WORKFLOW.md). VOICE.md is now pure personality. The constraints are combined in the prompt pipeline with a hardcoded meta-constraint preventing agents from editing constraint definitions. See `internal/constraints/` and the orchestrator's `buildConstraints()` / `buildFullPrompt()` functions.
+**Pre-Phase 2 changes completed**:
+- `[CORE]` enforcement in VOICE.md replaced by two-tier constraints system (`~/.anthem/constraints.yaml` + `system.constraints` in WORKFLOW.md). VOICE.md is now pure personality. See `internal/constraints/` and the orchestrator's `buildConstraints()` / `buildFullPrompt()` functions.
+- Quality audit: errcheck fixes, gofmt, unused field removal, ETag mutex, nil guards, strings.Builder optimization, .gitattributes.
+- Agent permission model documented in architecture.md (section 8b).
+- Deleted `internal/voice/core.go` (vestigial `[CORE]` code).
+- Deleted `internal/orchestrator/dispatch.go` and `reconciler.go` (empty stubs -- real logic lives in `orchestrator.go`, matching Symphony's single-module pattern).
 
-1. Rules engine -- label matching, require_approval, require_plan, auto_assign, max_cost
-2. Workspace manager -- directory lifecycle, hooks with failure handling (retry before_run 3x, fail after_create, warn-only after_complete), path safety, concurrent file locking
-3. VOICE.md self-evolution -- copy `~/.anthem/VOICE.md` into workspace before run, diff after run, section merge for concurrent edits (no [CORE] enforcement needed -- safety is in constraints)
-4. Voice changelog -- log changes to `~/.anthem/voice-changelog.md` + post diff as issue comment
-5. Workflow self-modification guardrail
-6. Retry/backoff, stall recovery
-7. Graceful shutdown -- cross-platform signal handling via ProcessManager, state persistence to `~/.anthem/state.json`, restart reconciliation
-8. Config hot-reload via fsnotify
+**Phase 2 implementation steps:**
 
-### Phase 3: Dashboard + Observability + Cost Tracking
+1. Rules engine completion -- wire `auto_assign`, `max_cost` enforcement, `TitlePattern` regex matching into orchestrator dispatch. Defer `require_plan` to Phase 3 (orchestrator-agent intelligence decision).
+2. Real workspace manager -- replace `MockWorkspaceManager` in `cmd/anthem/main.go` with production implementation. Per-task directories under `workspace.root`, hook lifecycle with failure handling (retry `before_run` 3x, fail `after_create`, warn-only `after_complete`), `Cleanup`, startup cleanup of terminal task workspaces.
+3. Retry and backoff -- per-task retry tracking, exponential backoff `min(10s * 2^(attempt-1), max_retry_backoff_ms)`, stall recovery, continuation delay (1s).
+4. Graceful shutdown -- `sync.WaitGroup` drain of active dispatches (10s timeout), agent termination via `ProcessManager`, claim release (remove `in-progress` labels), save state before exit.
+5. State persistence -- implement `state.go` with `OrchestratorState` struct (active sessions, retry queue, token totals), JSON I/O to `~/.anthem/state.json`, load on startup, reconcile against tracker.
+6. Config hot-reload -- `fsnotify` watcher on WORKFLOW.md, re-parse + validate on change, keep last valid config on failure, wire into `cmd/anthem/main.go`.
 
-1. Status HTTP API endpoints
-2. Web dashboard (tech TBD -- HTMX or SPA)
-3. WebSocket event stream (subscribes to EventBus)
-4. Structured JSON logging via slog with configurable sinks
-5. Cost tracking (per-task, aggregate, budget enforcement)
-6. Voice/rule change review UI
+### Phase 3: Orchestrator Agent + Voice + Dashboard
+
+Layer intelligence on top of the Go daemon:
+
+1. Orchestrator agent -- persistent Claude session with VOICE.md personality, communicates with user via issue comments and status updates
+2. Tool interface -- Go daemon exposes tools for the orchestrator agent: `create_task`, `list_tasks`, `start_agent`, `post_comment`, `get_cost_summary`, etc.
+3. Voice self-evolution -- orchestrator agent learns user preferences, updates VOICE.md via section merge (`internal/voice/merge.go`), voice changelog (`internal/voice/changelog.go`)
+4. `require_plan` rule -- orchestrator agent decides when plans need approval, manages pause/resume flow
+5. Task decomposition -- user describes a feature, orchestrator agent breaks it into ordered/parallel subtasks
+6. Dashboard + status API + WebSocket streaming via EventBus
+7. Cost tracking with budget enforcement and dashboard display
 
 ### Phase 4: Polish + Community
 
-1. LocalJSON tracker adapter (for offline/testing use)
-2. Example WORKFLOW.md + VOICE.md templates
-3. README, CONTRIBUTING.md
-4. CI/CD pipeline, cross-platform release binaries via GoReleaser (Windows/macOS/Linux)
-5. Code sign Windows release binaries in GitHub Actions (SignPath.io -- free for OSS, or Azure Trusted Signing) to avoid Windows Smart App Control blocking unsigned executables
-6. Demo video
+1. Example WORKFLOW.md + VOICE.md templates
+2. README, CONTRIBUTING.md
+3. CI/CD pipeline, cross-platform release binaries via GoReleaser (Windows/macOS/Linux)
+4. Code sign Windows release binaries in GitHub Actions (SignPath.io -- free for OSS, or Azure Trusted Signing)
+5. Demo video
 
 ### Future Enhancements (Post Phase 4)
 
@@ -185,14 +190,15 @@ Single task end-to-end: poll GitHub Issues, render `~/.anthem/VOICE.md` + self-e
 
 ## Dependencies (go.mod)
 
+Current:
 - `github.com/spf13/cobra` -- CLI framework
-- `github.com/google/go-github` -- GitHub API client (use latest stable version at scaffold time)
+- `github.com/google/go-github/v68` -- GitHub API client
 - `golang.org/x/oauth2` -- GitHub token auth
-- `github.com/fsnotify/fsnotify` -- File watching for hot-reload
 - `gopkg.in/yaml.v3` -- YAML parsing for WORKFLOW.md front matter
 - `github.com/Masterminds/sprig/v3` -- Template function library (same as Helm) for WORKFLOW.md body rendering
-- `github.com/stretchr/testify` -- Test assertions (standard in Go OSS)
-- `golang.org/x/sync` -- errgroup for concurrent operations
+
+Phase 2 additions:
+- `github.com/fsnotify/fsnotify` -- File watching for config hot-reload
 
 ## Testing Strategy
 
@@ -209,6 +215,8 @@ Single task end-to-end: poll GitHub Issues, render `~/.anthem/VOICE.md` + self-e
 ## Reference: OpenAI Symphony
 
 When in doubt about implementation patterns, reference Symphony's codebase:
-- Repository: https://github.com/openai/openai-agents-python
-- Directory: `examples/agents/symphony/`
-- Key patterns: orchestrator loop, tracker adapters, workspace isolation, config parsing
+- Repository: https://github.com/openai/symphony
+- Language: Elixir (GenServer-based orchestrator)
+- Spec: `SPEC.md` in repo root defines the language-agnostic service specification
+- Key patterns: single-module orchestrator (all dispatch/reconcile/state in one module), tracker adapters, workspace isolation, config parsing from markdown front matter
+- Key difference: Symphony has no personality/voice concept -- its orchestrator is pure code. Anthem adds the orchestrator agent layer on top (Phase 3).
