@@ -1,14 +1,15 @@
 package config
 
 type Config struct {
-	Tracker   TrackerConfig   `yaml:"tracker"`
-	Polling   PollingConfig   `yaml:"polling"`
-	Workspace WorkspaceConfig `yaml:"workspace"`
-	Hooks     HooksConfig     `yaml:"hooks"`
-	Agent     AgentConfig     `yaml:"agent"`
-	Rules     []RuleConfig    `yaml:"rules"`
-	System    SystemConfig    `yaml:"system"`
-	Server    ServerConfig    `yaml:"server"`
+	Tracker      TrackerConfig      `yaml:"tracker"`
+	Polling      PollingConfig      `yaml:"polling"`
+	Workspace    WorkspaceConfig    `yaml:"workspace"`
+	Hooks        HooksConfig        `yaml:"hooks"`
+	Agent        AgentConfig        `yaml:"agent"`
+	Rules        []RuleConfig       `yaml:"rules"`
+	System       SystemConfig       `yaml:"system"`
+	Orchestrator OrchestratorConfig `yaml:"orchestrator"`
+	Server       ServerConfig       `yaml:"server"`
 }
 
 type TrackerConfig struct {
@@ -47,6 +48,9 @@ type AgentConfig struct {
 	Model                 string            `yaml:"model"`
 	MCPServers            []MCPServerConfig `yaml:"mcp_servers"`
 	Skills                []string          `yaml:"skills"`
+	PermissionMode        string            `yaml:"permission_mode"`
+	SkipPermissions       bool              `yaml:"skip_permissions"`
+	DeniedTools           []string          `yaml:"denied_tools"`
 }
 
 type MCPServerConfig struct {
@@ -73,6 +77,12 @@ type SystemConfig struct {
 	Constraints                    []string `yaml:"constraints"`
 }
 
+type OrchestratorConfig struct {
+	Enabled          bool `yaml:"enabled"`
+	MaxContextTokens int  `yaml:"max_context_tokens"`
+	StallTimeoutMS   int  `yaml:"stall_timeout_ms"`
+}
+
 type ServerConfig struct {
 	Port int `yaml:"port"`
 }
@@ -90,6 +100,11 @@ func DefaultConfig() Config {
 		},
 		System: SystemConfig{
 			WorkflowChangesRequireApproval: true,
+		},
+		Orchestrator: OrchestratorConfig{
+			Enabled:          true,
+			MaxContextTokens: 80000,
+			StallTimeoutMS:   60000,
 		},
 		Server: ServerConfig{Port: 8080},
 	}

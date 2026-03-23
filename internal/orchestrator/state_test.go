@@ -233,7 +233,7 @@ func TestLoadAndReconcileRestoresRetryState(t *testing.T) {
 
 	// Mock tracker: task-active is still active, task-done is completed (terminal)
 	trk := tracker.NewMockTracker([]types.Task{
-		{ID: "task-active", Status: types.StatusActive},
+		{ID: "task-active", Status: types.StatusQueued},
 		{ID: "task-done", Status: types.StatusCompleted},
 	})
 
@@ -391,7 +391,7 @@ func TestRunCallsLoadAndReconcile(t *testing.T) {
 	}
 
 	trk := tracker.NewMockTracker([]types.Task{
-		{ID: "task-1", Status: types.StatusActive, Labels: []string{"todo"}, CreatedAt: time.Now()},
+		{ID: "task-1", Status: types.StatusQueued, Labels: []string{"todo"}, CreatedAt: time.Now()},
 	})
 
 	cfg := defaultTestConfig()

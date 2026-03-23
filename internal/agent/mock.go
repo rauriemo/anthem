@@ -9,7 +9,7 @@ import (
 
 type MockRunner struct {
 	RunFunc      func(ctx context.Context, opts types.RunOpts) (*types.RunResult, error)
-	ContinueFunc func(ctx context.Context, sessionID string, prompt string) (*types.RunResult, error)
+	ContinueFunc func(ctx context.Context, sessionID string, prompt string, opts types.ContinueOpts) (*types.RunResult, error)
 	KillFunc     func(pid int) error
 }
 
@@ -23,7 +23,7 @@ func NewMockRunner() *MockRunner {
 				Duration:  time.Second,
 			}, nil
 		},
-		ContinueFunc: func(_ context.Context, _ string, _ string) (*types.RunResult, error) {
+		ContinueFunc: func(_ context.Context, _ string, _ string, _ types.ContinueOpts) (*types.RunResult, error) {
 			return &types.RunResult{
 				SessionID: "mock-session",
 				ExitCode:  0,
@@ -39,8 +39,8 @@ func (m *MockRunner) Run(ctx context.Context, opts types.RunOpts) (*types.RunRes
 	return m.RunFunc(ctx, opts)
 }
 
-func (m *MockRunner) Continue(ctx context.Context, sessionID string, prompt string) (*types.RunResult, error) {
-	return m.ContinueFunc(ctx, sessionID, prompt)
+func (m *MockRunner) Continue(ctx context.Context, sessionID string, prompt string, opts types.ContinueOpts) (*types.RunResult, error) {
+	return m.ContinueFunc(ctx, sessionID, prompt, opts)
 }
 
 func (m *MockRunner) Kill(pid int) error {

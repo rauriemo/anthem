@@ -57,7 +57,7 @@ These are the source of truth for what to build and how.
 
 ## Current Status
 
-**Phase**: Phase 2 — Go Daemon Reliability Layer (**complete**)
+**Phase**: Phase 3a — Contract + Audit + Orchestrator Core (**complete**)
 **Scaffold**: Complete (all 11 steps done)
 **Phase 1**: Complete. All 10 steps implemented and verified with a live GitHub issue (pickup -> Claude Code execution -> issue closure -> label lifecycle).
 
@@ -82,9 +82,19 @@ These are the source of truth for what to build and how.
 - New files: `internal/orchestrator/retry.go`, `internal/orchestrator/state_test.go`, `internal/config/watcher_test.go`.
 - New dependency: `github.com/fsnotify/fsnotify`.
 
-**Phase 3a (in progress)**: Contract-first tool surface (action types, schemas, risk classification), SQLite audit log (`~/.anthem/audit.db`), formalized task lifecycle state machine, orchestrator agent as stateless allocator (Start/Consult/Refresh, wave model), driver permission fixes (`Run()` + `Continue()`), voice self-evolution wiring, dirty-snapshot gating. Detailed plan in `.cursor/plans/phase_3a_revised_plan_b5db9c3f.plan.md`.
+**Phase 3a completed** (Contract + Audit + Orchestrator Core):
+- Tool contract: 8 action types (dispatch, skip, comment, update_voice, request_approval, close_wave, create_subtasks, promote_knowledge) with risk classification (low/medium/high), validation, idempotency flags. Schema-only actions (create_subtasks, promote_knowledge) return ErrNotImplemented, logged and skipped.
+- SQLite audit log: append-only event log at `~/.anthem/audit.db` via `modernc.org/sqlite` (pure Go, no CGo). AuditLogger interface with Record, Query, RecentByTask, SummaryForWave. WAL mode, mutex-serialized writes, busy timeout. Injected into Orchestrator, closed on shutdown.
+- Task lifecycle state machine: 10 formalized states (queued, planned, running, blocked, retryQueued, needsApproval, completed, failed, canceled, skipped) replacing StatusActive/StatusPending. Transition(from, to) validation, StatusToLabel/LabelToStatus mapping, TerminalReason field on Task.
+- Executor prompt fix: removed VOICE.md from buildFullPrompt -- executors get constraints + WORKFLOW.md only. Voice is orchestrator-only.
+- Driver permission fixes: replaced hardcoded --dangerously-skip-permissions with config-driven PermissionMode (default dontAsk). Added DeniedTools to RunOpts. Added ContinueOpts to Continue() with workspace, stall timeout, allowed tools, permission mode. Fixed RunResult.Output population from stream event's result text (string or content block array). Added PermissionMode/SkipPermissions/DeniedTools to AgentConfig.
+- Orchestrator session manager: OrchestratorAgent with Start/Consult/Refresh. Builds system prompt with voice + action schema + wave model. Receives compact StateSnapshot, returns structured JSON actions. parseActions with brace-counting JSON extraction. ConsultWithRepair sends repair prompt on parse failure, falls back to nil (triggers mechanical dispatch). Token tracking for session refresh threshold.
+- Wave-aware tick loop: dirty-snapshot gating (SHA256 hash of task IDs+statuses+wave, skip consult on unchanged state). Wave tracking with frontier exhaustion detection. Fallback to Phase 2 mechanical dispatch when orchestrator is nil, disabled, or fails. executeActions validates each action against contract, dispatches tasks, updates tracker, records audit events. OrchestratorConfig (enabled, max_context_tokens, stall_timeout_ms) in config.go. main.go wiring creates audit logger + orchestrator agent + passes to Opts.
+- Voice self-evolution: update_voice contract action triggers voice.LoadFile -> voice.Merge -> write -> voice.AppendChangelog -> audit event. Updates in-memory voiceContent on both Orchestrator and OrchestratorAgent.
+- New files: `internal/orchestrator/contract.go`, `internal/orchestrator/orchagent.go`, `internal/orchestrator/integration_test.go`, `internal/orchestrator/voice_test.go`, `internal/audit/audit.go`, `internal/audit/schema.go`, `internal/audit/audit_test.go`.
+- New dependency: `modernc.org/sqlite`.
 
-**Phase 3b (after 3a)**: Dashboard + status API + WebSocket, garbage collection from audit log, knowledge promotion to repo, DAG execution plans, drift detection, `require_plan` rule, task decomposition.
+**Phase 3b (next)**: Dashboard + status API + WebSocket, garbage collection from audit log, knowledge promotion to repo, DAG execution plans, drift detection, `require_plan` rule, task decomposition.
 
 Update this section as phases are completed.
 

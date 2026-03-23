@@ -1,16 +1,19 @@
 # Anthem
 
-An open-source agent orchestrator for [Claude Code](https://docs.anthropic.com/en/docs/claude-code), built in Go. Anthem is an alternative to [OpenAI Symphony](https://github.com/openai/symphony) with a hybrid architecture: a Go daemon handles the mechanical reliability (polling, process management, workspace isolation, retry, state persistence) while an AI orchestrator agent (coming in Phase 3) will sit on top for intelligence -- user communication, task decomposition, and self-evolving personality via `VOICE.md`.
+An open-source agent orchestrator for [Claude Code](https://docs.anthropic.com/en/docs/claude-code), built in Go. Anthem is an alternative to [OpenAI Symphony](https://github.com/openai/symphony) with a hybrid architecture: a Go daemon handles the mechanical reliability (polling, process management, workspace isolation, retry, state persistence) while an AI orchestrator agent sits on top for intelligence -- task planning via wave-based dispatch, self-evolving personality via `VOICE.md`, and automatic fallback to mechanical dispatch if the AI layer fails.
 
 Executor agents are headless Claude Code workers that receive project context from your `WORKFLOW.md` template, safety guardrails from constraints, and skills -- they get harnesses, not personality.
 
 ## Features
 
 - **GitHub issue-driven**: poll issues by label, claim, dispatch, update status, close on completion
+- **AI orchestrator agent**: persistent Claude session that plans task dispatch in waves, proposes actions via a validated contract, and falls back to mechanical dispatch on failure
 - **Concurrent agents**: configurable global and per-label concurrency limits
 - **Rules engine**: match tasks by labels or title regex, enforce approval gates, auto-assign, budget caps
 - **Two-tier constraints**: user-level (`~/.anthem/constraints.yaml`) + project-level (`system.constraints` in WORKFLOW.md) safety rules injected into every prompt, protected by a meta-constraint agents cannot remove
 - **Per-task workspaces**: isolated directories with lifecycle hooks (`after_create`, `before_run`, `after_complete`)
+- **SQLite audit log**: append-only event log at `~/.anthem/audit.db` recording dispatches, retries, wave transitions, orchestrator actions, and voice updates
+- **Self-evolving personality**: orchestrator agent updates `VOICE.md` sections as it learns user preferences, with changelog tracking
 - **Retry with exponential backoff**: failed tasks retry automatically with increasing delays
 - **Graceful shutdown**: drains active agents, releases claims, saves state on Ctrl+C
 - **State persistence**: retry queue and cost data survive restarts via `~/.anthem/state.json`
@@ -21,20 +24,25 @@ Executor agents are headless Claude Code workers that receive project context fr
 ## How It Works
 
 1. You create GitHub issues and label them (e.g. `todo`)
-2. Anthem polls your repo, picks up labeled issues, and evaluates rules (approval, budget, assignment)
-3. For each eligible task, Anthem creates an isolated workspace, runs lifecycle hooks, renders the prompt from `WORKFLOW.md` with constraints, and spawns a Claude Code agent
-4. Claude Code runs autonomously. Anthem streams output, tracks cost, and detects stalls
-5. On success: labels updated to `done`, issue closed, retry state cleared
-6. On failure: exponential backoff scheduled, retry comment posted on the issue
-7. On shutdown (Ctrl+C): active agents drain (10s timeout), in-progress labels removed, state saved to disk
+2. Anthem polls your repo, picks up labeled issues, and builds a state snapshot
+3. If the orchestrator agent is enabled, it consults the AI to plan which tasks to dispatch, skip, or flag for approval -- all proposed as structured actions validated against a contract
+4. If the orchestrator is disabled or fails, Anthem falls back to Phase 2 mechanical dispatch (dispatch every eligible task)
+5. For each dispatched task, Anthem creates an isolated workspace, runs lifecycle hooks, renders the prompt from `WORKFLOW.md` with constraints, and spawns a Claude Code executor agent
+6. Claude Code runs autonomously. Anthem streams output, tracks cost, and detects stalls
+7. On success: labels updated to `done`, issue closed, retry state cleared
+8. On failure: exponential backoff scheduled, retry comment posted on the issue
+9. All dispatches, actions, and wave transitions are recorded in the SQLite audit log
+10. On shutdown (Ctrl+C): active agents drain (10s timeout), in-progress labels removed, state saved, audit log flushed
 
 ```
-GitHub Issues ──poll──> Anthem Orchestrator ──dispatch──> Claude Code CLI
-     ^                     |    |    |                         |
-     |                     |    |    └─ rules/budget check     v
-     |                     |    └─ workspace + hooks      stream-json
-     |                     v                                   |
-     └── label/close ── tracker <── result + cost ─────────────┘
+GitHub Issues ──poll──> Anthem Daemon ──consult──> Orchestrator Agent (AI)
+     ^                     |    |    |                    |
+     |                     |    |    └─ validate actions  v
+     |                     |    └─ workspace + hooks   dispatch/skip/comment
+     |                     v                              |
+     └── label/close ── tracker <── result + cost ────────┘
+                           |
+                           └── audit log (~/.anthem/audit.db)
 ```
 
 ## Prerequisites
@@ -275,15 +283,16 @@ Role: Senior engineer
 - Prefers small, focused commits.
 ```
 
-In Phase 3, VOICE.md will be used exclusively by the orchestrator agent for user communication and task management. The orchestrator will learn your preferences over time and evolve its personality. See [VOICE.md.example](VOICE.md.example) for a full example.
+VOICE.md is used exclusively by the orchestrator agent (not executor agents) for task management decisions. The orchestrator learns your preferences over time and evolves its personality via the `update_voice` contract action -- changes are merged, written to disk, and logged to `~/.anthem/voice-changelog.md`. See [VOICE.md.example](VOICE.md.example) for a full example.
 
 ## Architecture
 
 Anthem uses a **hybrid architecture** inspired by [OpenAI Symphony](https://github.com/openai/symphony):
 
-- **Go daemon** (Phases 1-2, complete): handles polling, process management, workspace isolation, retry, state persistence, config hot-reload. This is the mechanical reliability layer -- it never makes judgment calls.
-- **Orchestrator agent** (Phase 3, upcoming): a persistent Claude session with VOICE.md personality that sits on top of the daemon. Handles user communication, task decomposition, parallel planning, and voice self-evolution. The daemon exposes a tool interface for the orchestrator agent to call.
-- **Executor agents**: headless Claude Code workers. They receive WORKFLOW.md templates, constraints, and skills -- harnesses for getting work done, not personality.
+- **Go daemon** (Phases 1-2): handles polling, process management, workspace isolation, retry, state persistence, config hot-reload. This is the mechanical reliability layer -- it validates and executes actions, never makes judgment calls.
+- **Orchestrator agent** (Phase 3a): a stateless allocator -- a Claude session with VOICE.md personality that receives state snapshots and proposes actions (dispatch, skip, comment, request approval, close wave, update voice). The daemon validates each action against a typed contract before execution. If the orchestrator fails, the daemon falls back to mechanical dispatch automatically.
+- **Executor agents**: headless Claude Code workers. They receive WORKFLOW.md templates and constraints -- harnesses for getting work done, not personality.
+- **Audit log**: append-only SQLite database at `~/.anthem/audit.db` recording all dispatches, wave transitions, orchestrator actions, and voice updates. Uses `modernc.org/sqlite` (pure Go, no CGo).
 
 Symphony's orchestrator is pure Elixir code with no AI. Anthem adds the intelligence layer on top.
 
@@ -303,8 +312,10 @@ See [docs/plans/architecture.md](docs/plans/architecture.md) for the full system
 
 **Phase 2** (complete): Rules engine (TitlePattern, AutoAssign, MaxCost), production workspace manager with hooks, retry with exponential backoff, graceful shutdown, state persistence, config hot-reload via fsnotify.
 
+**Phase 3a** (complete): Contract-first tool surface (8 action types with risk classification and validation), SQLite audit log, formalized task lifecycle state machine (10 states), orchestrator agent session manager (Start/Consult/Refresh with repair loop), wave-aware tick loop with dirty-snapshot gating and mechanical fallback, voice self-evolution wiring, driver permission fixes.
+
 Upcoming:
-- **Phase 3**: Orchestrator agent (persistent Claude session with VOICE.md personality), tool interface, voice self-evolution, task decomposition, web dashboard, WebSocket event stream
+- **Phase 3b**: Web dashboard + status API + WebSocket, garbage collection from audit log, knowledge promotion to repo, DAG execution plans, drift detection, task decomposition
 - **Phase 4**: Example templates, CONTRIBUTING.md, cross-platform release binaries via GoReleaser, code signing
 
 ## License

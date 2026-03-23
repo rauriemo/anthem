@@ -2,21 +2,34 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/rauriemo/anthem/internal/agent"
+	"github.com/rauriemo/anthem/internal/audit"
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/cost"
 	"github.com/rauriemo/anthem/internal/rules"
 	"github.com/rauriemo/anthem/internal/tracker"
 	"github.com/rauriemo/anthem/internal/types"
+	"github.com/rauriemo/anthem/internal/voice"
 	"github.com/rauriemo/anthem/internal/workspace"
 )
+
+type Wave struct {
+	ID              string
+	FrontierTaskIDs []string
+	Status          string // "active" or "exhausted"
+	CreatedAt       time.Time
+}
 
 type Orchestrator struct {
 	cfg             *config.Config
@@ -31,6 +44,11 @@ type Orchestrator struct {
 	voiceContent    string
 	userConstraints []string
 	statePath       string
+	orchAgent       *OrchestratorAgent
+	auditLogger     audit.AuditLogger
+	currentWave     *Wave
+	lastSnapHash    string
+	homeDir         string
 
 	wg         sync.WaitGroup
 	mu         sync.Mutex
@@ -56,6 +74,8 @@ type Opts struct {
 	VoiceContent    string
 	UserConstraints []string
 	StatePath       string
+	OrchAgent       *OrchestratorAgent
+	AuditLogger     audit.AuditLogger
 }
 
 func New(opts Opts) *Orchestrator {
@@ -80,6 +100,8 @@ func New(opts Opts) *Orchestrator {
 		voiceContent:    opts.VoiceContent,
 		userConstraints: opts.UserConstraints,
 		statePath:       opts.StatePath,
+		orchAgent:       opts.OrchAgent,
+		auditLogger:     opts.AuditLogger,
 		active:          make(map[string]*ActiveRun),
 		retryState:      make(map[string]*RetryInfo),
 	}
@@ -149,6 +171,12 @@ func (o *Orchestrator) Shutdown() {
 
 	// Save state for next startup
 	o.saveState()
+
+	if o.auditLogger != nil {
+		if err := o.auditLogger.Close(); err != nil {
+			o.logger.Warn("failed to close audit logger", "error", err)
+		}
+	}
 }
 
 // releaseClaims removes in-progress labels for all active runs and clears the
@@ -301,7 +329,280 @@ func (o *Orchestrator) tick(ctx context.Context) {
 	// 3. Sort by priority (ascending), then created_at, then ID
 	sortTasks(tasks)
 
-	// 4. Check eligibility and dispatch
+	// 4. Build snapshot and check for changes
+	snapshot := o.buildStateSnapshot(tasks)
+	hash := snapshotHash(snapshot)
+	if hash == o.lastSnapHash {
+		o.logger.Debug("snapshot unchanged, skipping consult")
+		return
+	}
+
+	// 5. Orchestrator-driven dispatch or fallback
+	if o.orchAgent != nil {
+		actions, err := o.orchAgent.ConsultWithRepair(ctx, snapshot)
+		if err != nil {
+			o.logger.Warn("orchestrator consult failed, falling back to mechanical dispatch", "error", err)
+			o.mechanicalDispatch(ctx, tasks)
+		} else if actions == nil {
+			o.logger.Debug("orchestrator returned nil actions, falling back to mechanical dispatch")
+			o.mechanicalDispatch(ctx, tasks)
+		} else {
+			o.executeActions(ctx, tasks, actions)
+		}
+	} else {
+		o.mechanicalDispatch(ctx, tasks)
+	}
+
+	o.lastSnapHash = hash
+
+	// Check wave exhaustion
+	if o.isWaveExhausted() {
+		o.logger.Info("wave exhausted", "wave_id", o.currentWave.ID)
+		o.currentWave.Status = "exhausted"
+	}
+
+	o.logger.Debug("tick complete", "active_count", o.activeCount())
+}
+
+func (o *Orchestrator) buildStateSnapshot(tasks []types.Task) StateSnapshot {
+	snap := StateSnapshot{
+		Budget: BudgetSummary{
+			TotalSpentUSD: o.costTracker.TotalCost(),
+		},
+	}
+
+	for _, t := range tasks {
+		snap.Tasks = append(snap.Tasks, TaskSummary{
+			ID:       t.ID,
+			Title:    t.Title,
+			Status:   string(t.Status),
+			Labels:   t.Labels,
+			CostUSD:  o.costTracker.TaskCost(t.ID),
+			Priority: t.Priority,
+		})
+	}
+
+	o.mu.Lock()
+	for id, ri := range o.retryState {
+		snap.RetryQueue = append(snap.RetryQueue, RetrySummary{
+			ID:        id,
+			Attempts:  ri.Attempts,
+			NextRetry: ri.NextRetryAt.Format(time.RFC3339),
+			LastError: ri.LastError,
+		})
+	}
+	o.mu.Unlock()
+
+	if o.currentWave != nil {
+		snap.Wave = &WaveSummary{
+			ID:              o.currentWave.ID,
+			FrontierTaskIDs: o.currentWave.FrontierTaskIDs,
+			Status:          o.currentWave.Status,
+		}
+	}
+
+	return snap
+}
+
+func snapshotHash(snap StateSnapshot) string {
+	var b strings.Builder
+	for _, t := range snap.Tasks {
+		b.WriteString(t.ID)
+		b.WriteByte(':')
+		b.WriteString(t.Status)
+		b.WriteByte(',')
+	}
+	if snap.Wave != nil {
+		b.WriteString("wave:")
+		b.WriteString(snap.Wave.Status)
+	}
+	h := sha256.Sum256([]byte(b.String()))
+	return fmt.Sprintf("%x", h[:8])
+}
+
+func (o *Orchestrator) isWaveExhausted() bool {
+	if o.currentWave == nil || o.currentWave.Status == "exhausted" {
+		return false
+	}
+	for _, id := range o.currentWave.FrontierTaskIDs {
+		task, err := o.tracker.GetTask(context.Background(), id)
+		if err != nil || task == nil {
+			continue
+		}
+		if !task.Status.IsTerminal() && task.Status != types.StatusBlocked && task.Status != types.StatusNeedsApproval {
+			return false
+		}
+	}
+	return true
+}
+
+func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, actions []Action) {
+	taskMap := make(map[string]types.Task, len(tasks))
+	validIDs := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		taskMap[t.ID] = t
+		validIDs = append(validIDs, t.ID)
+	}
+
+	var dispatchedIDs []string
+
+	for _, action := range actions {
+		if err := ValidateAction(action, validIDs); err != nil {
+			o.logger.Warn("invalid orchestrator action, skipping", "action", action.Type, "error", err)
+			continue
+		}
+
+		if SchemaOnly(action.Type) {
+			o.logger.Info("schema-only action, not implemented yet", "action", action.Type)
+			o.recordAudit(ctx, "action.not_implemented", action.TaskID, strPtr(string(action.Type)))
+			continue
+		}
+
+		switch action.Type {
+		case ActionDispatch:
+			task, ok := taskMap[action.TaskID]
+			if !ok {
+				continue
+			}
+			o.mu.Lock()
+			_, running := o.active[task.ID]
+			slots := o.availableSlots(task)
+			o.mu.Unlock()
+			if running || slots <= 0 {
+				continue
+			}
+			o.claim(task)
+			snap := o.configSnapshot()
+			o.wg.Add(1)
+			go o.dispatch(ctx, task, snap)
+			dispatchedIDs = append(dispatchedIDs, task.ID)
+			o.recordAudit(ctx, "task.dispatched", action.TaskID, strPtr("dispatch"))
+
+		case ActionSkip:
+			_ = o.tracker.UpdateStatus(ctx, action.TaskID, string(types.StatusSkipped))
+			o.recordAudit(ctx, "task.skipped", action.TaskID, strPtr("skip"))
+
+		case ActionComment:
+			_ = o.tracker.AddComment(ctx, action.TaskID, action.Body)
+			o.recordAudit(ctx, "task.commented", action.TaskID, strPtr("comment"))
+
+		case ActionRequestApproval:
+			_ = o.tracker.AddLabel(ctx, action.TaskID, "needs-approval")
+			o.recordAudit(ctx, "task.approval_requested", action.TaskID, strPtr("request_approval"))
+
+		case ActionCloseWave:
+			if o.currentWave != nil {
+				o.currentWave.Status = "exhausted"
+			}
+			o.recordAudit(ctx, "wave.closed", "", strPtr("close_wave"))
+
+		case ActionUpdateVoice:
+			if err := o.executeUpdateVoice(ctx, action); err != nil {
+				o.logger.Warn("update_voice failed", "section", action.SectionName, "error", err)
+			}
+		}
+	}
+
+	// Update or create wave with dispatched frontier
+	if len(dispatchedIDs) > 0 {
+		if o.currentWave == nil || o.currentWave.Status == "exhausted" {
+			o.currentWave = &Wave{
+				ID:              fmt.Sprintf("wave-%d", time.Now().UnixMilli()),
+				FrontierTaskIDs: dispatchedIDs,
+				Status:          "active",
+				CreatedAt:       time.Now(),
+			}
+		} else {
+			o.currentWave.FrontierTaskIDs = append(o.currentWave.FrontierTaskIDs, dispatchedIDs...)
+		}
+	}
+}
+
+func (o *Orchestrator) recordAudit(ctx context.Context, eventType string, taskID string, actionName *string) {
+	if o.auditLogger == nil {
+		return
+	}
+	ev := audit.AuditEvent{
+		Timestamp:  time.Now(),
+		EventType:  eventType,
+		ActionName: actionName,
+	}
+	if taskID != "" {
+		ev.TaskID = &taskID
+	}
+	if o.currentWave != nil {
+		ev.WaveID = &o.currentWave.ID
+	}
+	if err := o.auditLogger.Record(ctx, ev); err != nil {
+		o.logger.Warn("failed to record audit event", "event_type", eventType, "error", err)
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+func (o *Orchestrator) executeUpdateVoice(ctx context.Context, action Action) error {
+	home := o.homeDir
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolving home directory: %w", err)
+		}
+	}
+
+	voicePath := filepath.Join(home, ".anthem", "VOICE.md")
+	changelogPath := filepath.Join(home, ".anthem", "voice-changelog.md")
+
+	current, err := voice.LoadFile(voicePath)
+	if err != nil {
+		current = &voice.VoiceConfig{}
+	}
+
+	proposed := &voice.VoiceConfig{
+		Sections: []voice.Section{{Name: action.SectionName, Content: action.SectionContent}},
+	}
+
+	merged := voice.Merge(current, proposed)
+
+	if err := os.WriteFile(voicePath, []byte(merged.Raw), 0644); err != nil {
+		return fmt.Errorf("writing VOICE.md: %w", err)
+	}
+
+	diff := fmt.Sprintf("- %s\n+ %s", current.Raw, merged.Raw)
+
+	if err := voice.AppendChangelog(changelogPath, "orchestrator", diff); err != nil {
+		o.logger.Warn("failed to append voice changelog", "error", err)
+	}
+
+	o.voiceContent = merged.Raw
+	if o.orchAgent != nil {
+		o.orchAgent.SetVoiceContent(merged.Raw)
+	}
+
+	o.logger.Info("voice updated", "section", action.SectionName)
+
+	// Record audit
+	inputJSON, _ := json.Marshal(action)
+	ev := audit.AuditEvent{
+		Timestamp:   time.Now(),
+		EventType:   "voice.updated",
+		ActionName:  strPtr("update_voice"),
+		ActionInput: strPtr(string(inputJSON)),
+		Metadata:    strPtr(diff),
+	}
+	if o.currentWave != nil {
+		ev.WaveID = &o.currentWave.ID
+	}
+	if o.auditLogger != nil {
+		if err := o.auditLogger.Record(ctx, ev); err != nil {
+			o.logger.Warn("failed to record voice audit event", "error", err)
+		}
+	}
+
+	return nil
+}
+
+func (o *Orchestrator) mechanicalDispatch(ctx context.Context, tasks []types.Task) {
 	for _, task := range tasks {
 		if ctx.Err() != nil {
 			return
@@ -316,15 +617,11 @@ func (o *Orchestrator) tick(ctx context.Context) {
 			continue
 		}
 
-		// 4b. Check retry eligibility
 		if !o.isRetryEligible(task.ID) {
-			o.logger.Debug("task in backoff, skipping",
-				"task_id", task.ID,
-			)
+			o.logger.Debug("task in backoff, skipping", "task_id", task.ID)
 			continue
 		}
 
-		// 5. Evaluate rules (snapshot to avoid holding lock)
 		o.mu.Lock()
 		rulesEngine := o.rules
 		o.mu.Unlock()
@@ -341,34 +638,24 @@ func (o *Orchestrator) tick(ctx context.Context) {
 						"approval_label", r.ApprovalLabel,
 					)
 					_ = o.tracker.AddLabel(ctx, task.ID, "waiting-for-approval")
-					o.publish(types.Event{
-						Type:   "task.waiting_approval",
-						TaskID: task.ID,
-					})
+					o.publish(types.Event{Type: "task.waiting_approval", TaskID: task.ID})
 					skip = true
 				}
 			case rules.ActionAutoAssign:
 				if r.AutoAssignee != "" {
 					_ = o.tracker.AddComment(ctx, task.ID, fmt.Sprintf("Auto-assigned to @%s", r.AutoAssignee))
-					o.logger.Info("auto-assigned task",
-						"task_id", task.ID,
-						"assignee", r.AutoAssignee,
-					)
+					o.logger.Info("auto-assigned task", "task_id", task.ID, "assignee", r.AutoAssignee)
 				}
 			case rules.ActionMaxCost:
 				if r.MaxCost > 0 {
 					currentCost := o.costTracker.TaskCost(task.ID)
 					if currentCost >= r.MaxCost {
 						o.logger.Warn("task exceeded budget, skipping",
-							"task_id", task.ID,
-							"max_cost", r.MaxCost,
-							"current_cost", currentCost,
-						)
+							"task_id", task.ID, "max_cost", r.MaxCost, "current_cost", currentCost)
 						_ = o.tracker.AddLabel(ctx, task.ID, "exceeded-budget")
 						o.publish(types.Event{
-							Type:   "task.budget_exceeded",
-							TaskID: task.ID,
-							Data:   map[string]float64{"max_cost": r.MaxCost, "current_cost": currentCost},
+							Type: "task.budget_exceeded", TaskID: task.ID,
+							Data: map[string]float64{"max_cost": r.MaxCost, "current_cost": currentCost},
 						})
 						skip = true
 					}
@@ -382,14 +669,12 @@ func (o *Orchestrator) tick(ctx context.Context) {
 			continue
 		}
 
-		// 6. Claim and dispatch (capture config snapshot for the goroutine)
 		o.claim(task)
 		snap := o.configSnapshot()
 		o.wg.Add(1)
 		go o.dispatch(ctx, task, snap)
+		o.recordAudit(ctx, "task.dispatched.fallback", task.ID, nil)
 	}
-
-	o.logger.Debug("tick complete", "active_count", o.activeCount())
 }
 
 func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSnapshot) {
@@ -459,8 +744,8 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 		return
 	}
 
-	// Build full prompt: voice + constraints + task template
-	fullPrompt := buildFullPrompt(o.voiceContent, o.userConstraints, cfg.System.Constraints, prompt)
+	// Build full prompt: constraints + task template (voice is orchestrator-only, not for executors)
+	fullPrompt := buildFullPrompt(o.userConstraints, cfg.System.Constraints, prompt)
 
 	// Continuation delay for retried tasks
 	if ri := o.retryInfo(task.ID); ri != nil {
@@ -475,6 +760,11 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 	// Run agent
 	o.publish(types.Event{Type: "agent.started", TaskID: task.ID})
 
+	permMode := cfg.Agent.PermissionMode
+	if cfg.Agent.SkipPermissions {
+		permMode = "bypassPermissions"
+	}
+
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		WorkspacePath:  wsPath,
 		Prompt:         fullPrompt,
@@ -482,6 +772,8 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 		AllowedTools:   cfg.Agent.AllowedTools,
 		Model:          cfg.Agent.Model,
 		StallTimeoutMS: cfg.Agent.StallTimeoutMS,
+		PermissionMode: permMode,
+		DeniedTools:    cfg.Agent.DeniedTools,
 	})
 
 	o.release(task.ID)
@@ -678,11 +970,8 @@ func buildConstraints(userConstraints []string, projectConstraints []string) str
 	return strings.Join(lines, "\n")
 }
 
-func buildFullPrompt(voiceContent string, userConstraints []string, projectConstraints []string, taskPrompt string) string {
+func buildFullPrompt(userConstraints []string, projectConstraints []string, taskPrompt string) string {
 	var sections []string
-	if voiceContent != "" {
-		sections = append(sections, voiceContent)
-	}
 	if constraintBlock := buildConstraints(userConstraints, projectConstraints); constraintBlock != "" {
 		sections = append(sections, constraintBlock)
 	}

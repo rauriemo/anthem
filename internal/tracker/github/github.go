@@ -351,7 +351,7 @@ func issueToTask(issue *gh.Issue, owner, repo string) types.Task {
 		Title:      title,
 		Body:       body,
 		Labels:     labels,
-		Status:     types.StatusActive,
+		Status:     types.StatusQueued,
 		CreatedAt:  createdAt,
 		RepoURL:    fmt.Sprintf("https://github.com/%s/%s", owner, repo),
 		Metadata:   make(map[string]string),

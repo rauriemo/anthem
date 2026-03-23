@@ -246,16 +246,17 @@ This design separates concerns: personality evolves freely, safety rules are imm
 
 ```go
 type Task struct {
-    ID         string
-    Identifier string   // e.g. "GH-42" or "PROJ-123"
-    Title      string
-    Body       string
-    Labels     []string
-    Status     string   // mapped to active/terminal
-    Priority   int
-    CreatedAt  time.Time
-    RepoURL    string   // for workspace population
-    Metadata   map[string]string
+    ID             string
+    Identifier     string   // e.g. "GH-42" or "PROJ-123"
+    Title          string
+    Body           string
+    Labels         []string
+    Status         Status   // queued|planned|running|blocked|retryQueued|needsApproval|completed|failed|canceled|skipped
+    Priority       int
+    CreatedAt      time.Time
+    RepoURL        string   // for workspace population
+    Metadata       map[string]string
+    TerminalReason string
 }
 
 type IssueTracker interface {
@@ -389,23 +390,33 @@ Spawns Claude Code CLI in print mode (non-interactive):
 ```go
 type AgentRunner interface {
     Run(ctx context.Context, opts RunOpts) (*RunResult, error)
-    Continue(ctx context.Context, sessionID string, prompt string) (*RunResult, error)
+    Continue(ctx context.Context, sessionID string, prompt string, opts ContinueOpts) (*RunResult, error)
     Kill(pid int) error
 }
 
 type RunOpts struct {
-    WorkspacePath string
-    Prompt        string        // constraints + rendered WORKFLOW.md template
-    MaxTurns      int
-    AllowedTools  []string      // tool allowlist for auto-approval
-    MCPConfig     string        // path to MCP server config file
-    Model         string        // claude model override (optional)
+    WorkspacePath  string
+    Prompt         string        // constraints + rendered WORKFLOW.md template
+    MaxTurns       int
+    AllowedTools   []string      // tool allowlist for auto-approval
+    MCPConfig      string        // path to MCP server config file
+    Model          string        // claude model override (optional)
+    StallTimeoutMS int
+    PermissionMode string        // "dontAsk" (default) or "bypassPermissions"
+    DeniedTools    []string      // explicit tool deny list
+}
+
+type ContinueOpts struct {
+    WorkspacePath  string
+    StallTimeoutMS int
+    AllowedTools   []string
+    PermissionMode string
 }
 
 type RunResult struct {
     SessionID   string
     ExitCode    int
-    Output      string
+    Output      string          // response text from result stream event
     TokensIn    int
     TokensOut   int
     CostUSD     float64         // parsed from Claude's native cost output
@@ -440,7 +451,7 @@ Key implementation details:
 - MCP servers configured in `WORKFLOW.md` are written to a temp JSON file and passed via Claude Code's MCP config mechanism
 - Stall detection: kills process if no stdout activity for `stall_timeout_ms`
 
-**Phase 3a driver fixes**: `Run()` currently hardcodes `--dangerously-skip-permissions` -- this is replaced with config-driven `PermissionMode` (default `dontAsk`) and `DeniedTools` support. `Continue()` gains `ContinueOpts` with workspace, stall timeout, allowed tools, and permission mode. `parseStdout` is fixed to populate `RunResult.Output` from the `result` stream event's response text (required for the orchestrator session manager to parse actions). The `AgentRunner` interface changes: `Continue(ctx, sessionID, prompt, opts ContinueOpts)`.
+**Phase 3a driver fixes (complete)**: `Run()` uses config-driven `PermissionMode` (default `dontAsk`) instead of hardcoded `--dangerously-skip-permissions`. Supports `DeniedTools` via `--deniedTools` flags. `Continue()` accepts `ContinueOpts` with workspace, stall timeout, allowed tools, and permission mode. `parseStdout` populates `RunResult.Output` from the `result` stream event's response text (string or content block array), required for the orchestrator session manager to parse actions.
 
 **Cross-platform process management:**
 
@@ -714,19 +725,21 @@ All six steps implemented and tested:
 5. State persistence -- atomic write to `~/.anthem/state.json`, LoadAndReconcile on startup (skips terminal tasks)
 6. Config hot-reload -- fsnotify watcher with debounce, validates before applying, configSnapshot pattern for goroutines
 
-### Phase 3a: Contract + Audit + Orchestrator Core
+### Phase 3a: Contract + Audit + Orchestrator Core (COMPLETE)
 
-Build the intelligence layer using a contract-first, orchestrator-as-allocator architecture. The daemon remains the authority; the orchestrator proposes actions via a defined contract.
+Intelligence layer built using contract-first, orchestrator-as-allocator architecture. The daemon is the authority; the orchestrator proposes actions via a defined contract. If the orchestrator fails, the daemon falls back to Phase 2 mechanical dispatch.
 
-1. **Tool contract** (`internal/orchestrator/contract.go`) -- action types with schemas (dispatch, skip, comment, update_voice, request_approval, close_wave), risk classification, validation, idempotency. Schema-only actions for 3b: create_subtasks, promote_knowledge.
-2. **SQLite audit log** (`internal/audit/`) -- append-only event log at `~/.anthem/audit.db` via `modernc.org/sqlite`. AuditLogger interface: Record, Query, RecentByTask, SummaryForWave. Injected into Orchestrator, flushed on shutdown.
-3. **Task lifecycle state machine** -- formalized states (queued, planned, running, blocked, retryQueued, needsApproval, completed, failed, canceled, skipped) replacing loose string enum. `Transition(from, to)` validation enforced by daemon. StatusToLabel/LabelToStatus mapping. Reconcile applies external tracker changes directly (bypasses Transition).
-4. **Fix executor prompts** -- remove VOICE.md from executors (voice is orchestrator-only, executors get constraints + WORKFLOW)
-5. **Fix agent driver** -- permission handling in `Run()` and `Continue()`, add `ContinueOpts`, fix `RunResult.Output` population from stream events, add `PermissionMode`/`DeniedTools` to config
-6. **Orchestrator session manager** (`internal/orchestrator/orchagent.go`) -- OrchestratorAgent with Start/Consult/Refresh. Receives compact StateSnapshot, returns structured JSON actions. Action parser with repair loop. Token tracking for session refresh threshold.
-7. **Wire into tick loop** -- orchestrator consultation with dirty-snapshot gating (skip consult when state unchanged), wave tracking (frontier exhaustion detection), fallback to mechanical dispatch, schema-only action handling (ErrNotImplemented logged + skipped), main.go wiring with `orchestrator.enabled` config flag
-8. **Voice self-evolution** -- `update_voice` contract action triggers voice.Merge + changelog + audit event
-9. **Update documentation** -- mark 3a complete, refresh all context docs
+All 9 steps completed:
+
+1. **Tool contract** (`internal/orchestrator/contract.go`) -- 8 action types (dispatch, skip, comment, update_voice, request_approval, close_wave, create_subtasks, promote_knowledge) with risk classification, ValidateAction, IsIdempotent, SchemaOnly. Schema-only actions (create_subtasks, promote_knowledge) log ErrNotImplemented and skip.
+2. **SQLite audit log** (`internal/audit/`) -- append-only event log at `~/.anthem/audit.db` via `modernc.org/sqlite` (pure Go, no CGo). AuditLogger interface: Record, Query, RecentByTask, SummaryForWave, Close. WAL mode, mutex-serialized writes. Injected into Orchestrator, closed on shutdown.
+3. **Task lifecycle state machine** (`internal/types/task.go`) -- 10 formalized states (queued, planned, running, blocked, retryQueued, needsApproval, completed, failed, canceled, skipped). Transition(from, to) validation. StatusToLabel/LabelToStatus mapping. TerminalReason field. Reconcile applies external tracker changes directly.
+4. **Executor prompt fix** -- removed VOICE.md from buildFullPrompt. Executors get constraints + WORKFLOW.md only. Voice is orchestrator-only.
+5. **Agent driver fix** -- config-driven PermissionMode (default dontAsk), DeniedTools, ContinueOpts (workspace, stall timeout, allowed tools, permissions). RunResult.Output populated from stream result text.
+6. **Orchestrator session manager** (`internal/orchestrator/orchagent.go`) -- OrchestratorAgent with Start/Consult/Refresh. StateSnapshot builder. parseActions with brace-counting JSON extraction. ConsultWithRepair repair loop. Token tracking for refresh threshold.
+7. **Tick loop wiring** -- dirty-snapshot gating (SHA256 hash, skip unchanged). Wave tracking (frontier exhaustion). Fallback to mechanical dispatch. OrchestratorConfig in config.go. main.go creates audit logger + orchestrator agent.
+8. **Voice self-evolution** -- update_voice action triggers voice.Merge + changelog + audit event. Updates in-memory voiceContent on Orchestrator and OrchestratorAgent.
+9. **Documentation** -- all docs updated to reflect Phase 3a completion.
 
 ### Phase 3b: Dashboard + Advanced Features
 

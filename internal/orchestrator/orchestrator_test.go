@@ -23,7 +23,7 @@ func testLogger() *slog.Logger {
 
 func TestOrchestratorDispatchesTasks(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "Fix bug", Body: "Fix it", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "Fix bug", Body: "Fix it", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 
@@ -71,9 +71,9 @@ func TestOrchestratorDispatchesTasks(t *testing.T) {
 
 func TestOrchestratorRespectsMaxConcurrent(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "T1", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
-		{ID: "2", Identifier: "GH-2", Title: "T2", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 2, CreatedAt: time.Now()},
-		{ID: "3", Identifier: "GH-3", Title: "T3", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 3, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "T1", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+		{ID: "2", Identifier: "GH-2", Title: "T2", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 2, CreatedAt: time.Now()},
+		{ID: "3", Identifier: "GH-3", Title: "T3", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 3, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 
@@ -123,7 +123,7 @@ func TestOrchestratorRespectsMaxConcurrent(t *testing.T) {
 
 func TestOrchestratorSkipsApprovalRequired(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "Plan something", Labels: []string{"planning"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "Plan something", Labels: []string{"planning"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 
@@ -199,7 +199,7 @@ func TestTickSkippedWhenThrottled(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tasks := []types.Task{
-				{ID: "1", Identifier: "GH-1", Title: "T1", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+				{ID: "1", Identifier: "GH-1", Title: "T1", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
 			}
 			trk := tracker.NewMockTracker(tasks)
 			trk.ThrottleUntil = tt.throttleUntil
@@ -245,7 +245,7 @@ func TestTickSkippedWhenThrottled(t *testing.T) {
 
 func TestConstraintsInPrompt(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "Fix bug", Body: "Fix it", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "Fix bug", Body: "Fix it", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 
@@ -288,9 +288,14 @@ func TestConstraintsInPrompt(t *testing.T) {
 		t.Fatal("expected prompt to be set")
 	}
 
-	// Voice should appear first
-	if !strings.HasPrefix(receivedPrompt, "# Voice") {
-		t.Error("prompt should start with voice content")
+	// Voice should NOT appear in executor prompts (orchestrator-only)
+	if strings.Contains(receivedPrompt, "# Voice") {
+		t.Error("executor prompt should not contain voice content")
+	}
+
+	// Constraints should appear first
+	if !strings.HasPrefix(receivedPrompt, "## Constraints") {
+		t.Error("prompt should start with constraints")
 	}
 
 	// Constraints header
@@ -369,7 +374,7 @@ func TestBuildConstraints(t *testing.T) {
 
 func TestPromptWithoutVoice(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "Add feature", Body: "Do it", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "Add feature", Body: "Do it", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 
@@ -454,7 +459,7 @@ func TestSortTasks(t *testing.T) {
 
 func TestMaxCostEnforcementSkipsOverBudget(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "Expensive task", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "Expensive task", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 
@@ -530,7 +535,7 @@ func TestMaxCostEnforcementSkipsOverBudget(t *testing.T) {
 
 func TestMaxCostAllowsUnderBudget(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "Cheap task", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "Cheap task", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 
@@ -581,7 +586,7 @@ func TestMaxCostAllowsUnderBudget(t *testing.T) {
 
 func TestAutoAssignAddsComment(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "Fix bug", Body: "Fix it", Labels: []string{"bug"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "Fix bug", Body: "Fix it", Labels: []string{"bug"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 
@@ -695,7 +700,7 @@ func TestComputeBackoff(t *testing.T) {
 
 func TestFailedTaskNotRedispatchedBeforeRetryTime(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "Flaky task", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "Flaky task", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 
@@ -753,7 +758,7 @@ func TestFailedTaskNotRedispatchedBeforeRetryTime(t *testing.T) {
 
 func TestSuccessfulCompletionClearsRetryState(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "Recovering task", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "Recovering task", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 
@@ -810,7 +815,7 @@ func TestSuccessfulCompletionClearsRetryState(t *testing.T) {
 
 func TestReconcileReleasesStaleClaimBeyondStallTimeout(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "Stalled task", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "Stalled task", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 
@@ -868,7 +873,7 @@ func TestReconcileReleasesStaleClaimBeyondStallTimeout(t *testing.T) {
 
 func TestShutdownWaitsForActiveDispatches(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "Slow task", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "Slow task", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 
@@ -931,7 +936,7 @@ func TestShutdownWaitsForActiveDispatches(t *testing.T) {
 
 func TestShutdownTimeoutOnStuckDispatch(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "Stuck task", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "Stuck task", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 
@@ -990,8 +995,8 @@ func TestShutdownTimeoutOnStuckDispatch(t *testing.T) {
 
 func TestShutdownRemovesInProgressLabels(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "T1", Labels: []string{"todo", "in-progress"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
-		{ID: "2", Identifier: "GH-2", Title: "T2", Labels: []string{"todo", "in-progress"}, Status: types.StatusActive, Priority: 2, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "T1", Labels: []string{"todo", "in-progress"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+		{ID: "2", Identifier: "GH-2", Title: "T2", Labels: []string{"todo", "in-progress"}, Status: types.StatusQueued, Priority: 2, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 
@@ -1041,7 +1046,7 @@ func TestShutdownRemovesInProgressLabels(t *testing.T) {
 
 func TestReconcileDoesNotReleaseRecentRun(t *testing.T) {
 	tasks := []types.Task{
-		{ID: "1", Identifier: "GH-1", Title: "Active task", Labels: []string{"todo"}, Status: types.StatusActive, Priority: 1, CreatedAt: time.Now()},
+		{ID: "1", Identifier: "GH-1", Title: "Active task", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
 	}
 	trk := tracker.NewMockTracker(tasks)
 

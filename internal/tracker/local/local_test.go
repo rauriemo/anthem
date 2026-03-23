@@ -26,9 +26,9 @@ func TestListActiveFiltersTerminal(t *testing.T) {
 	path := filepath.Join(dir, "tasks.json")
 
 	seedFile(t, path, []types.Task{
-		{ID: "1", Title: "Active", Status: types.StatusActive},
+		{ID: "1", Title: "Queued", Status: types.StatusQueued},
 		{ID: "2", Title: "Done", Status: types.StatusCompleted},
-		{ID: "3", Title: "Pending", Status: types.StatusPending},
+		{ID: "3", Title: "Planned", Status: types.StatusPlanned},
 	})
 
 	tracker := New(path)
@@ -37,7 +37,7 @@ func TestListActiveFiltersTerminal(t *testing.T) {
 		t.Fatalf("ListActive: %v", err)
 	}
 	if len(tasks) != 2 {
-		t.Fatalf("len(tasks) = %d, want 2 (active + pending)", len(tasks))
+		t.Fatalf("len(tasks) = %d, want 2 (queued + planned)", len(tasks))
 	}
 }
 
@@ -77,7 +77,7 @@ func TestUpdateStatusPersists(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tasks.json")
 	seedFile(t, path, []types.Task{
-		{ID: "1", Status: types.StatusActive},
+		{ID: "1", Status: types.StatusQueued},
 	})
 
 	tracker := New(path)

@@ -3,10 +3,12 @@ package claude
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,7 +35,15 @@ func (d *Driver) Run(ctx context.Context, opts types.RunOpts) (*types.RunResult,
 		"-p", opts.Prompt,
 		"--output-format", "stream-json",
 		"--verbose",
-		"--dangerously-skip-permissions",
+	}
+	switch opts.PermissionMode {
+	case "bypassPermissions":
+		args = append(args, "--dangerously-skip-permissions")
+	default:
+		args = append(args, "--permission-mode", "dontAsk")
+	}
+	for _, tool := range opts.DeniedTools {
+		args = append(args, "--deniedTools", tool)
 	}
 	if opts.MaxTurns > 0 {
 		args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
@@ -50,14 +60,25 @@ func (d *Driver) Run(ctx context.Context, opts types.RunOpts) (*types.RunResult,
 	return d.execute(ctx, opts.WorkspacePath, args, opts)
 }
 
-func (d *Driver) Continue(ctx context.Context, sessionID string, prompt string) (*types.RunResult, error) {
+func (d *Driver) Continue(ctx context.Context, sessionID string, prompt string, opts types.ContinueOpts) (*types.RunResult, error) {
 	args := []string{
 		"-p", prompt,
 		"--output-format", "stream-json",
 		"--verbose",
 		"--resume", sessionID,
 	}
-	return d.execute(ctx, "", args, types.RunOpts{})
+	switch opts.PermissionMode {
+	case "bypassPermissions":
+		args = append(args, "--dangerously-skip-permissions")
+	default:
+		args = append(args, "--permission-mode", "dontAsk")
+	}
+	if len(opts.AllowedTools) > 0 {
+		for _, tool := range opts.AllowedTools {
+			args = append(args, "--allowedTools", tool)
+		}
+	}
+	return d.execute(ctx, opts.WorkspacePath, args, types.RunOpts{StallTimeoutMS: opts.StallTimeoutMS})
 }
 
 func (d *Driver) Kill(pid int) error {
@@ -188,6 +209,7 @@ func (d *Driver) parseStdout(ctx context.Context, r io.Reader, start time.Time, 
 			result = &types.RunResult{
 				SessionID: event.SessionID,
 				ExitCode:  exitCode,
+				Output:    extractResultText(event.ResultText),
 				TokensIn:  tokensIn,
 				TokensOut: tokensOut,
 				CostUSD:   event.TotalCost,
@@ -213,4 +235,35 @@ func (d *Driver) parseStdout(ctx context.Context, r io.Reader, start time.Time, 
 	}
 
 	return result, nil
+}
+
+// extractResultText extracts response text from the result event's "result" field.
+// The field may be a plain string or an array of content blocks [{type:"text",text:"..."}].
+func extractResultText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+
+	// Try plain string first.
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+
+	// Try array of content blocks.
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		var parts []string
+		for _, b := range blocks {
+			if b.Type == "text" && b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		return strings.Join(parts, "")
+	}
+
+	return ""
 }

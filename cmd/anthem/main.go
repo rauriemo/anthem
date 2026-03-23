@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rauriemo/anthem/internal/agent/claude"
+	"github.com/rauriemo/anthem/internal/audit"
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/constraints"
 	"github.com/rauriemo/anthem/internal/logging"
@@ -122,6 +123,22 @@ func runCmd() *cobra.Command {
 				return fmt.Errorf("resolving state path: %w", err)
 			}
 
+			// Open audit logger
+			auditPath := filepath.Join(home, ".anthem", "audit.db")
+			auditLogger, err := audit.NewSQLiteAuditLogger(auditPath)
+			if err != nil {
+				return fmt.Errorf("opening audit database: %w", err)
+			}
+			defer auditLogger.Close()
+
+			// Create orchestrator agent if enabled
+			var orchAgent *orchestrator.OrchestratorAgent
+			if cfg.Orchestrator.Enabled {
+				orchAgent = orchestrator.NewOrchestratorAgent(
+					runner, voiceContent, cfg.Orchestrator.MaxContextTokens, logger,
+				)
+			}
+
 			orch := orchestrator.New(orchestrator.Opts{
 				Config:          cfg,
 				TemplateBody:    body,
@@ -133,6 +150,8 @@ func runCmd() *cobra.Command {
 				VoiceContent:    voiceContent,
 				UserConstraints: userConstraints,
 				StatePath:       statePath,
+				OrchAgent:       orchAgent,
+				AuditLogger:     auditLogger,
 			})
 
 			// Start config hot-reload watcher
