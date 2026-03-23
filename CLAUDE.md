@@ -66,9 +66,6 @@ These are the source of truth for what to build and how.
 - Deleted empty stub files `dispatch.go` and `reconciler.go` from orchestrator (real logic in `orchestrator.go`).
 - CI lint fix: `golangci-lint` built from source for Go 1.26 compatibility.
 
-**Known issues to fix at start of Phase 2**:
-- `GetTask` single-issue endpoint hits ETag cache, `go-github` treats 304 as error, causes noisy WARN logs during reconciliation. Fix: exclude single-issue GETs from ETag transport or handle 304 gracefully in reconcile.
-
 **Phase 2 implementation order** (see `docs/plans/implementation.md` for details):
 1. Rules engine completion — wire `auto_assign`, `max_cost`, `TitlePattern` regex matching
 2. Real workspace manager — replace mock, per-task dirs, hook lifecycle
