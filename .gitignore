@@ -9,6 +9,7 @@
 claude_stderr.txt
 test.txt
 *.out
+cov_*
 coverage/
 
 # Claude Code local config
