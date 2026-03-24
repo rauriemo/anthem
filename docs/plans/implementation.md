@@ -212,6 +212,7 @@ All 11 steps completed:
 9. **Orchestrator prompt** (`internal/orchestrator/orchagent.go`) -- reply + request_maintenance in Actions section. Channel Messages section (intent, decomposition, commands, status, approval). Multi-Format Input section (text, markdown, mermaid, ASCII, images, mixed).
 10. **main.go wiring** (`cmd/anthem/main.go`) -- channel credentials, Channel Manager, Slack adapter registration, EventBridge, maintenance scanner, StartChannelListener. All with deferred Close.
 11. **Documentation** -- all four docs updated.
+12. **Project context enrichment** -- `ProjectContext` struct added to `StateSnapshot` with `file_tree`, `architecture`, `implementation`, `project_summary`. `loadProjectContext()` called at startup and on hot-reload. `generateFileTree()` walks workspace root (depth 6, excluded dirs/files, 8KB cap). Doc files read from project root with 8KB truncation. Static between ticks (excluded from `snapshotHash`). System prompt updated with `## Project Context` section. Tests in `context_test.go`.
 
 ### Phase 4: Dashboard + Polish + Community
 

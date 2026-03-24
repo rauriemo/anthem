@@ -760,6 +760,7 @@ Two-way communication between the orchestrator agent and the user, plus audit-dr
 10. **main.go wiring** -- loads channel credentials, creates Channel Manager, registers Slack adapters, starts channel manager + EventBridge + maintenance scanner + channel listener. Graceful shutdown via deferred Close.
 11. **Documentation** -- CLAUDE.md, architecture.md, implementation.md, README.md updated.
 10. **New dependency**: `github.com/slack-go/slack`
+12. **Project context enrichment** (`internal/orchestrator/orchagent.go`, `orchestrator.go`) -- StateSnapshot now includes a `Project` field (`ProjectContext`) carrying `file_tree`, `architecture`, `implementation`, and `project_summary`. Loaded at startup via `loadProjectContext()` and refreshed on config hot-reload. `generateFileTree()` walks the workspace root with configurable depth (default 6), skipping excluded directories (`.git`, `vendor`, `node_modules`, `workspaces`, `.idea`, `.vscode`, `.claude`, `.cursor`) and binary/temp files, with an 8KB output cap. Doc files (`CLAUDE.md`, `docs/plans/architecture.md`, `docs/plans/implementation.md`) are read from the project root with 8KB truncation. Project context is static between ticks and excluded from `snapshotHash` dirty-check to avoid unnecessary orchestrator consultations. The orchestrator system prompt includes a `## Project Context` section instructing the agent how to use this data for informed task decomposition.
 
 ### Phase 4: Dashboard + Polish + Community
 

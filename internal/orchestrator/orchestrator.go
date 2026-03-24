@@ -51,6 +51,7 @@ type Orchestrator struct {
 	currentWave     *Wave
 	lastSnapHash    string
 	homeDir         string
+	projectCtx      *ProjectContext
 
 	wg         sync.WaitGroup
 	mu         sync.Mutex
@@ -125,6 +126,8 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			o.logger.Warn("failed to load persisted state, starting fresh", "error", err)
 		}
 	}
+
+	o.loadProjectContext()
 
 	o.logger.Info("orchestrator started",
 		"interval_ms", o.cfg.Polling.IntervalMS,
@@ -308,6 +311,7 @@ func (o *Orchestrator) ReloadConfig(cfg *config.Config, body string) {
 	o.cfg = cfg
 	o.body = body
 	o.rules = rules.NewEngine(cfg.Rules, o.logger)
+	o.loadProjectContext()
 }
 
 func (o *Orchestrator) tick(ctx context.Context) {
@@ -404,6 +408,8 @@ func (o *Orchestrator) buildStateSnapshot(tasks []types.Task) StateSnapshot {
 			Status:          o.currentWave.Status,
 		}
 	}
+
+	snap.Project = o.projectCtx
 
 	return snap
 }
@@ -1131,6 +1137,176 @@ func isTextMime(mime string) bool {
 		mime == "application/json" ||
 		mime == "application/yaml" ||
 		mime == "application/x-yaml"
+}
+
+const maxDocBytes = 8 * 1024
+
+func (o *Orchestrator) loadProjectContext() {
+	pctx := &ProjectContext{}
+
+	root := o.cfg.Workspace.Root
+	if root == "" || root == "." {
+		wd, err := os.Getwd()
+		if err != nil {
+			o.logger.Warn("failed to get working directory for file tree", "error", err)
+			o.projectCtx = pctx
+			return
+		}
+		root = wd
+	}
+
+	tree, err := generateFileTree(root, 6)
+	if err != nil {
+		o.logger.Warn("failed to generate file tree", "error", err)
+	} else {
+		pctx.FileTree = tree
+	}
+
+	pctx.ProjectSummary = readDocFile("CLAUDE.md")
+	pctx.Architecture = readDocFile(filepath.Join("docs", "plans", "architecture.md"))
+	pctx.Implementation = readDocFile(filepath.Join("docs", "plans", "implementation.md"))
+
+	o.projectCtx = pctx
+}
+
+func readDocFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	s := string(data)
+	if len(s) > maxDocBytes {
+		return s[:maxDocBytes] + "\n[truncated]"
+	}
+	return s
+}
+
+const maxTreeBytes = 8 * 1024
+
+var skipDirs = map[string]bool{
+	".git": true, "vendor": true, "node_modules": true, "workspaces": true,
+	".idea": true, ".vscode": true, ".claude": true, ".cursor": true,
+}
+
+var skipFileExts = map[string]bool{
+	".exe": true, ".dll": true, ".so": true, ".dylib": true,
+	".out": true, ".swp": true, ".swo": true,
+}
+
+var skipFileNames = map[string]bool{
+	".DS_Store": true, "Thumbs.db": true,
+}
+
+type dirEntry struct {
+	name  string
+	isDir bool
+}
+
+func generateFileTree(root string, maxDepth int) (string, error) {
+	if maxDepth <= 0 {
+		maxDepth = 6
+	}
+
+	// Collect all entries grouped by parent directory.
+	children := make(map[string][]dirEntry)
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "." {
+			return nil
+		}
+
+		name := d.Name()
+		depth := strings.Count(rel, "/") + 1
+
+		if d.IsDir() {
+			if skipDirs[name] {
+				return filepath.SkipDir
+			}
+			if depth > maxDepth {
+				return filepath.SkipDir
+			}
+			parent := filepath.ToSlash(filepath.Dir(rel))
+			children[parent] = append(children[parent], dirEntry{name: name, isDir: true})
+			return nil
+		}
+
+		// Skip filtered files
+		if skipFileNames[name] || skipFileExts[filepath.Ext(name)] {
+			return nil
+		}
+		if depth > maxDepth {
+			return nil
+		}
+
+		parent := filepath.ToSlash(filepath.Dir(rel))
+		children[parent] = append(children[parent], dirEntry{name: name, isDir: false})
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("walking directory: %w", err)
+	}
+
+	// Sort each group: directories first, then files, both alphabetical.
+	for key := range children {
+		entries := children[key]
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].isDir != entries[j].isDir {
+				return entries[i].isDir
+			}
+			return entries[i].name < entries[j].name
+		})
+	}
+
+	// Render tree via DFS.
+	var b strings.Builder
+	truncated := false
+
+	var render func(parent string, depth int)
+	render = func(parent string, depth int) {
+		if truncated {
+			return
+		}
+		for _, e := range children[parent] {
+			if truncated {
+				return
+			}
+			indent := strings.Repeat("  ", depth)
+			display := e.name
+			if e.isDir {
+				display += "/"
+			}
+			line := indent + display + "\n"
+			if b.Len()+len(line) > maxTreeBytes {
+				truncated = true
+				return
+			}
+			b.WriteString(line)
+			if e.isDir {
+				childPath := e.name
+				if parent != "." {
+					childPath = parent + "/" + e.name
+				}
+				render(childPath, depth+1)
+			}
+		}
+	}
+
+	render(".", 0)
+
+	result := b.String()
+	if truncated {
+		result += "... (truncated)\n"
+	}
+	return result, nil
 }
 
 func (o *Orchestrator) StartChannelListener(ctx context.Context) {

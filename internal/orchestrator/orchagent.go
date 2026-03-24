@@ -50,6 +50,13 @@ type UserMessageContext struct {
 	Files []string `json:"files,omitempty"`
 }
 
+type ProjectContext struct {
+	FileTree       string `json:"file_tree"`
+	Architecture   string `json:"architecture,omitempty"`
+	Implementation string `json:"implementation,omitempty"`
+	ProjectSummary string `json:"project_summary,omitempty"`
+}
+
 type StateSnapshot struct {
 	Tasks        []TaskSummary       `json:"tasks"`
 	RetryQueue   []RetrySummary      `json:"retry_queue,omitempty"`
@@ -57,6 +64,7 @@ type StateSnapshot struct {
 	Wave         *WaveSummary        `json:"wave,omitempty"`
 	RecentEvents []EventSummary      `json:"recent_events,omitempty"`
 	UserMessage  *UserMessageContext `json:"user_message,omitempty"`
+	Project      *ProjectContext     `json:"project,omitempty"`
 }
 
 func (s StateSnapshot) Serialize() string {
@@ -157,6 +165,21 @@ Users may describe features in multiple formats. Handle all of these:
 - Mixed: message text combined with one or more attached files
 
 Always decompose complex features into small, independently executable tasks. Each task should be completable by a single executor agent session.`)
+
+	sections = append(sections, `## Project Context
+
+The state snapshot includes a "project" field containing:
+- file_tree: the project's directory structure showing all source files
+- project_summary: contents of CLAUDE.md with design decisions and current status
+- architecture: contents of docs/plans/architecture.md with system design
+- implementation: contents of docs/plans/implementation.md with build plan and phase status
+
+Use this context to:
+- Understand the codebase structure when decomposing features into subtasks
+- Reference specific files and modules when writing subtask descriptions
+- Respect architectural decisions documented in the project summary
+- Understand what has been built (completed phases) vs what is planned (future phases)
+- Write subtask bodies that reference the correct file paths and existing patterns`)
 
 	sections = append(sections, `## Wave Model
 
