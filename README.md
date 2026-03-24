@@ -1,115 +1,195 @@
 # Anthem
 
-An open-source agent orchestrator for [Claude Code](https://docs.anthropic.com/en/docs/claude-code), built in Go. Anthem is an alternative to [OpenAI Symphony](https://github.com/openai/symphony) with a hybrid architecture: a Go daemon handles the mechanical reliability (polling, process management, workspace isolation, retry, state persistence) while an AI orchestrator agent sits on top for intelligence -- task planning via wave-based dispatch, self-evolving personality via `VOICE.md`, and automatic fallback to mechanical dispatch if the AI layer fails.
+[![CI](https://github.com/rauriemo/anthem/actions/workflows/ci.yml/badge.svg)](https://github.com/rauriemo/anthem/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.26.1+-00ADD8?logo=go)](https://go.dev/dl/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Executor agents are headless Claude Code workers that receive project context from your `WORKFLOW.md` template, safety guardrails from constraints, and skills -- they get harnesses, not personality.
+**Anthem** is a hybrid orchestrator for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that turns labeled GitHub issues into isolated workspaces and runs coding agents with guardrails.
 
-## Features
+Think "conductor + metronome": Anthem's Go daemon handles reliability (polling, processes, retries, state), while an optional AI orchestrator plans work in waves and communicates in your chosen voice.
 
-- **GitHub issue-driven**: poll issues by label, claim, dispatch, update status, close on completion
-- **AI orchestrator agent**: persistent Claude session that plans task dispatch in waves, proposes actions via a validated contract, and falls back to mechanical dispatch on failure
-- **Concurrent agents**: configurable global and per-label concurrency limits
-- **Rules engine**: match tasks by labels or title regex, enforce approval gates, auto-assign, budget caps
-- **Two-tier constraints**: user-level (`~/.anthem/constraints.yaml`) + project-level (`system.constraints` in WORKFLOW.md) safety rules injected into every prompt, protected by a meta-constraint agents cannot remove
-- **Per-task workspaces**: isolated directories with lifecycle hooks (`after_create`, `before_run`, `after_complete`)
-- **SQLite audit log**: append-only event log at `~/.anthem/audit.db` recording dispatches, retries, wave transitions, orchestrator actions, and voice updates
-- **Self-evolving personality**: orchestrator agent updates `VOICE.md` sections as it learns user preferences, with changelog tracking
-- **Two-way Slack integration**: receive feature requests, commands, and approvals via Slack; orchestrator replies in-thread with status and confirmations
-- **Multi-format task decomposition**: send plain text, markdown specs, mermaid diagrams, or images via Slack -- orchestrator decomposes into GitHub issues automatically
-- **Maintenance scanner**: periodic audit log analysis detects repeated failures, stale tasks, budget anomalies, and drift -- notifies via channel with configurable auto-approve
-- **Retry with exponential backoff**: failed tasks retry automatically with increasing delays
-- **Graceful shutdown**: drains active agents, releases claims, saves state on Ctrl+C
-- **State persistence**: retry queue and cost data survive restarts via `~/.anthem/state.json`
-- **Config hot-reload**: edit `WORKFLOW.md` while running -- changes apply on next tick
-- **Cross-platform**: Windows (Job Objects), macOS/Linux (process groups) from day one
-- **ETag caching + rate limiting**: efficient GitHub API usage with conditional requests
+[Design docs](docs/plans/architecture.md) | [Build plan](docs/plans/implementation.md) | [WORKFLOW.md schema](#configuration-reference)
 
-## How It Works
-
-1. You create GitHub issues and label them (e.g. `todo`)
-2. Anthem polls your repo, picks up labeled issues, and builds a state snapshot
-3. If the orchestrator agent is enabled, it consults the AI to plan which tasks to dispatch, skip, or flag for approval -- all proposed as structured actions validated against a contract
-4. If the orchestrator is disabled or fails, Anthem falls back to Phase 2 mechanical dispatch (dispatch every eligible task)
-5. For each dispatched task, Anthem creates an isolated workspace, runs lifecycle hooks, renders the prompt from `WORKFLOW.md` with constraints, and spawns a Claude Code executor agent
-6. Claude Code runs autonomously. Anthem streams output, tracks cost, and detects stalls
-7. On success: labels updated to `done`, issue closed, retry state cleared
-8. On failure: exponential backoff scheduled, retry comment posted on the issue
-9. All dispatches, actions, and wave transitions are recorded in the SQLite audit log
-10. On shutdown (Ctrl+C): active agents drain (10s timeout), in-progress labels removed, state saved, audit log flushed
-
-```
-GitHub Issues ──poll──> Anthem Daemon ──consult──> Orchestrator Agent (AI)
-     ^                     |    |    |                    |
-     |                     |    |    └─ validate actions  v
-     |                     |    └─ workspace + hooks   dispatch/skip/comment
-     |                     v                              |
-     └── label/close ── tracker <── result + cost ────────┘
-                           |
-                           └── audit log (~/.anthem/audit.db)
-```
-
-## Prerequisites
-
-- **Go 1.22+** -- [install](https://go.dev/dl/)
-- **Claude Code CLI** -- installed and authenticated (`claude --version` to verify)
-- **GitHub access** -- either `GITHUB_TOKEN` env var or [GitHub CLI](https://cli.github.com/) authenticated (`gh auth status`)
+> **Safety note:** Anthem runs a coding agent that can edit files and execute commands. Start in a trusted repo, keep `permission_mode: dontAsk` (the default) until you're comfortable, and use [constraints](#constraints) to define non-negotiables. See the [safety model](#permission-model) below.
 
 ## Quick Start
 
-### 1. Build
-
 ```bash
+# 1. Install
+go install github.com/rauriemo/anthem/cmd/anthem@latest
+
+# 2. Initialize (in the repo you want Anthem to work on)
+cd /path/to/your-repo
+anthem init
+
+# 3. Edit WORKFLOW.md -- set tracker.repo to your GitHub repo
+#    (this is the only line you must change)
+
+# 4. Authenticate GitHub
+gh auth login          # or: export GITHUB_TOKEN="ghp_..."
+
+# 5. Create a test issue on GitHub with the label "todo"
+
+# 6. Run
+anthem run --log-level info
+```
+
+**You're done when:**
+1. You see a `dispatching task` log line
+2. Your issue gets the `in-progress` label while the agent works
+3. On completion the issue receives your terminal label (e.g. `done`) and closes
+4. A workspace directory appears under `./workspaces/`
+
+<details>
+<summary>Expected log output</summary>
+
+```
+{"level":"INFO","msg":"starting anthem","tracker":"github"}
+{"level":"INFO","msg":"orchestrator started","interval_ms":10000,"max_concurrent":3}
+{"level":"INFO","msg":"dispatching task","task_id":"1","identifier":"GH-1","title":"Add a CONTRIBUTING.md file"}
+{"level":"INFO","msg":"task completed","task_id":"1","exit_code":0,"cost_usd":0.058,...}
+```
+</details>
+
+Press `Ctrl+C` to stop. Anthem drains active agents (up to 10s), releases all claims, and saves state for next startup.
+
+## How It Works
+
+```mermaid
+flowchart LR
+  U["You\n(Slack / GitHub)"] -->|describe feature| OA["Orchestrator agent\n(Claude + VOICE.md)"]
+  OA -->|create issues| GH["GitHub Issues"]
+  GH -->|poll| D["Anthem daemon\n(Go)"]
+  D -->|dispatch| W[Workspace per task]
+  W -->|run| EA["Executor agent\n(Claude Code)"]
+  EA -->|"result + cost"| D
+  D -->|"label + close"| GH
+  D -->|events| AUD["audit.db"]
+```
+
+1. You describe a feature or goal -- via Slack message or by creating a GitHub issue with a label (e.g. `todo`)
+2. The orchestrator agent decomposes it into tasks, creates GitHub issues, and plans dispatch in waves
+3. Anthem's Go daemon polls for labeled issues, builds a state snapshot, and validates the orchestrator's proposed actions against a typed contract
+4. For each dispatched task: create an isolated workspace, run hooks, render the prompt with constraints, spawn Claude Code
+5. Claude Code runs autonomously. Anthem streams output, tracks cost, and detects stalls
+6. On success: labels updated, issue closed, retry state cleared
+7. On failure: exponential backoff, retry comment posted
+8. Everything is recorded in the SQLite audit log
+
+If the orchestrator is disabled or fails, Anthem falls back to mechanical dispatch -- every eligible issue gets dispatched directly.
+
+### Label Lifecycle
+
+```mermaid
+stateDiagram-v2
+  state "todo" as Todo
+  state "in-progress" as InProgress
+  state "done" as Done
+  [*] --> Todo: issue labeled
+  Todo --> InProgress: Anthem claims task\n(adds in-progress, removes other active labels)
+  InProgress --> Done: success\n(adds terminal label, closes issue)
+  InProgress --> Todo: failure/abort\n(removes in-progress)
+```
+
+The `in-progress` label is hard-coded. Include it in your `labels.active` list so Anthem can see tasks that were mid-flight if it restarts.
+
+## Installation
+
+**Recommended** (Go install):
+```bash
+go install github.com/rauriemo/anthem/cmd/anthem@latest
+```
+
+**From source** (for contributors):
+```bash
+git clone https://github.com/rauriemo/anthem
+cd anthem
 go build -o anthem ./cmd/anthem
 ```
 
-On Windows, if Smart App Control blocks `go run`, use `go build` and run the binary directly:
+On Windows, if Smart App Control blocks `go run`, build and run the binary directly (`go build ./cmd/anthem` then `.\anthem.exe`).
 
-```powershell
-go build -o anthem.exe ./cmd/anthem
-.\anthem.exe
-```
+**Binary releases**: planned for Phase 4 via GoReleaser.
 
-### 2. Initialize
+**Requires:** Go 1.26.1+, Claude Code CLI (`claude --version`), GitHub auth (`gh auth status` or `GITHUB_TOKEN`).
 
-```bash
-./anthem init
-```
+## Features
 
-This creates:
-- `./WORKFLOW.md` -- your project's orchestration config and prompt template
-- `~/.anthem/VOICE.md` -- global agent personality (shared across all projects)
-- `~/.anthem/constraints.yaml` -- global safety rules that apply to all projects
+- **GitHub issue-driven**: poll by label, claim, dispatch, update status, close on completion
+- **AI orchestrator agent**: persistent Claude session that plans dispatch in waves, proposes actions via a validated contract, falls back to mechanical dispatch on failure
+- **Two-way Slack integration**: send feature requests, commands, and approvals; orchestrator decomposes into subtasks and replies in-thread
+- **Multi-format input**: plain text, markdown specs, mermaid diagrams, or images via Slack -- decomposed into GitHub issues
+- **Concurrent agents**: configurable global and per-label concurrency
+- **Rules engine**: label/title matching, approval gates, auto-assign, budget caps
+- **Two-tier constraints**: user-level + project-level safety rules injected into every prompt, protected by a meta-constraint agents cannot remove
+- **Per-task workspaces**: isolated directories with lifecycle hooks
+- **SQLite audit log**: append-only event log for dispatches, retries, wave transitions, orchestrator actions, voice updates
+- **Maintenance scanner**: detects repeated failures, stale tasks, budget anomalies, and drift -- notifies via channel
+- **Self-evolving personality**: orchestrator updates VOICE.md as it learns preferences, with changelog
+- **Retry with backoff**: failed tasks retry with exponential delays
+- **State persistence**: retry queue and cost data survive restarts
+- **Config hot-reload**: edit WORKFLOW.md while running
+- **Graceful shutdown**: drains agents, releases claims, saves state on Ctrl+C
+- **Cross-platform**: Windows (Job Objects), macOS/Linux (process groups)
 
-### 3. Configure WORKFLOW.md
+## CLI Commands
 
-Edit `WORKFLOW.md` and set your repo:
+| Command | Description |
+|---------|-------------|
+| `anthem init` | Create starter WORKFLOW.md + bootstrap `~/.anthem/` |
+| `anthem run` | Start the orchestrator |
+| `anthem run -w path/to/WORKFLOW.md` | Use a specific workflow file |
+| `anthem run --log-level debug` | Verbose logging |
+| `anthem validate` | Check WORKFLOW.md syntax without starting |
+| `anthem version` | Print version |
+
+## Configuration Reference
+
+### Minimal WORKFLOW.md
+
+If you only change one line, change `tracker.repo`:
 
 ```yaml
 ---
 tracker:
   kind: github
-  repo: "your-username/your-repo"
+  repo: "owner/repo"
   labels:
-    active: ["todo"]
+    # Issues with ANY of these labels are eligible.
+    # Anthem adds "in-progress" while working and removes other active labels.
+    active: ["todo", "in-progress"]
     terminal: ["done"]
 
 polling:
   interval_ms: 10000
+
+workspace:
+  root: "./workspaces"
+
+hooks:
+  after_create: "git clone {{issue.repo_url}} ."
+  before_run: "git pull origin main"
 
 agent:
   command: "claude"
   max_turns: 5
   max_concurrent: 3
   stall_timeout_ms: 300000
+  max_retry_backoff_ms: 300000
 
 system:
   constraints:
+    - "Never commit secrets or credentials"
     - "Run tests before opening a PR"
+
+server:
+  port: 8080
 ---
 
 You are an expert software engineer working on {{.issue.title}}.
 
 Repository: {{.issue.repo_url}}
+Branch: anthem/{{.issue.identifier}}
 
 ## Task
 {{.issue.body}}
@@ -121,132 +201,42 @@ Repository: {{.issue.repo_url}}
 ```
 
 The file has two parts separated by `---`:
-- **YAML front matter** -- tracker, polling, agent settings, rules, constraints
+- **YAML front matter** -- tracker, polling, agent, rules, constraints, channels
 - **Go template body** -- the prompt sent to Claude Code, with access to `{{.issue.title}}`, `{{.issue.body}}`, `{{.issue.identifier}}`, `{{.issue.repo_url}}`, and `{{.issue.labels}}`
 
-The template engine supports [sprig functions](http://masterminds.github.io/sprig/) for advanced logic.
+The template engine supports [sprig functions](http://masterminds.github.io/sprig/).
 
-### 4. Set Up GitHub Auth
-
-Anthem needs read/write access to your repo's issues. Choose one:
-
-```bash
-# Option A: environment variable (recommended for CI)
-export GITHUB_TOKEN="ghp_your_token_here"
-
-# Option B: GitHub CLI (recommended for local dev)
-gh auth login
-```
-
-The token needs `repo` scope for private repos, or `public_repo` for public repos.
-
-### 5. Create a Test Issue
-
-Go to your repo on GitHub and create an issue:
-- **Title**: anything, e.g. "Add a CONTRIBUTING.md file"
-- **Label**: add `todo` (or whatever you set in `labels.active`)
-
-### 6. Run Anthem
-
-```bash
-./anthem run --log-level debug
-```
-
-You'll see:
-
-```
-{"level":"INFO","msg":"starting anthem","tracker":"github"}
-{"level":"INFO","msg":"orchestrator started","interval_ms":10000,"max_concurrent":3}
-{"level":"INFO","msg":"dispatching task","task_id":"1","identifier":"GH-1","title":"Add a CONTRIBUTING.md file"}
-{"level":"INFO","msg":"task completed","task_id":"1","exit_code":0,"cost_usd":0.058,...}
-```
-
-Anthem will:
-1. Find the issue labeled `todo`
-2. Swap the label to `in-progress`
-3. Create a workspace, run hooks, render the prompt with constraints
-4. Spawn Claude Code and monitor for stalls
-5. On completion, label it `done` and close the issue
-
-Press `Ctrl+C` to stop. Anthem will drain active agents (up to 10s), release all claims, and save state for next startup.
-
-## CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `anthem init` | Create starter WORKFLOW.md + bootstrap ~/.anthem/ (VOICE.md, constraints.yaml) |
-| `anthem run` | Start the orchestrator |
-| `anthem run -w path/to/WORKFLOW.md` | Use a specific workflow file |
-| `anthem run --log-level debug` | Verbose logging |
-| `anthem validate` | Check WORKFLOW.md syntax without starting |
-| `anthem version` | Print version |
-
-## Configuration Reference
-
-### Tracker
-
-```yaml
-tracker:
-  kind: github          # "github" or "local_json"
-  repo: "owner/repo"    # GitHub owner/repo
-  labels:
-    active: ["todo"]    # Issues with these labels are picked up
-    terminal: ["done"]  # Labels added when task completes
-```
-
-### Workspace & Hooks
-
-```yaml
-workspace:
-  root: "./workspaces"          # Per-task directories created here
-
-hooks:
-  after_create: "git clone {{issue.repo_url}} ."   # Runs once after workspace created (fail = task fails)
-  before_run: "git pull origin main"                # Runs before each agent run (retries 3x on failure)
-  after_complete: "make clean"                      # Runs after task completes (warn-only on failure)
-```
-
-### Agent
+### Permission Model
 
 ```yaml
 agent:
-  command: "claude"             # CLI command to invoke
-  max_turns: 5                  # Max conversation turns per task
-  max_concurrent: 3             # Global concurrency limit
-  max_concurrent_per_label:     # Per-label concurrency limits
-    planning: 1
-  stall_timeout_ms: 300000      # Kill agent if no output for 5 min
-  max_retry_backoff_ms: 300000  # Max backoff between retries (5 min cap)
-  model: ""                     # Override Claude model (optional)
-  permission_mode: "dontAsk"    # "dontAsk" (safe default) or "bypassPermissions" (trusted)
-  skip_permissions: false       # Shorthand: true = bypassPermissions
-  allowed_tools:                # Tools auto-approved in dontAsk mode
+  permission_mode: "dontAsk"    # Safe default: only allowed_tools run
+  allowed_tools:
     - "Read"
     - "Edit"
     - "Grep"
     - "Glob"
     - "Bash(git *)"
     - "Bash(go test *)"
-  denied_tools:                 # Explicit deny list (overrides allow)
+  denied_tools:                 # Explicit deny (overrides allow)
     - "Bash(git push --force *)"
 ```
 
-In `dontAsk` mode (the default), only tools listed in `allowed_tools` are auto-approved. Everything else is auto-denied without hanging -- the agent sees the denial and adapts. Set `skip_permissions: true` for full autonomy (no permission checks).
+In `dontAsk` mode (the default), only tools in `allowed_tools` are auto-approved. Everything else is denied -- the agent sees the denial and adapts. Set `skip_permissions: true` for full autonomy.
 
 ### Orchestrator
 
 ```yaml
 orchestrator:
-  enabled: true                 # Enable AI orchestrator agent (false = mechanical dispatch only)
-  max_context_tokens: 80000     # Token threshold before refreshing orchestrator session
-  stall_timeout_ms: 60000       # Stall timeout for orchestrator Claude session
+  enabled: true                 # false = mechanical dispatch only
+  max_context_tokens: 80000     # Token threshold before session refresh
 ```
 
-When enabled, the orchestrator agent (a persistent Claude session) plans task dispatch in waves. When disabled or if the orchestrator fails, Anthem falls back to Phase 2 mechanical dispatch (dispatch every eligible task).
+When enabled, the orchestrator agent (a persistent Claude session) plans task dispatch in waves. When disabled or on failure, Anthem falls back to mechanical dispatch.
 
-### Channels
+### Channels (Slack)
 
-Two-way communication with the orchestrator via Slack (or other adapters). Global credentials go in `~/.anthem/channels.yaml`:
+Two-way communication with the orchestrator. Global credentials in `~/.anthem/channels.yaml`:
 
 ```yaml
 slack:
@@ -254,16 +244,16 @@ slack:
   app_token: "xapp-your-app-token"
 ```
 
-Per-project channel targets go in WORKFLOW.md front matter:
+Per-project targets in WORKFLOW.md:
 
 ```yaml
 channels:
   - kind: slack
-    target: "C0123456789"          # Slack channel ID
+    target: "C0123456789"
     events: ["task.completed", "task.failed", "maintenance.suggested"]
 ```
 
-The EventBridge routes internal events to channels. The orchestrator replies in-thread when users send messages.
+Requires a Slack app with Socket Mode enabled, `message.channels` event subscription, and bot scopes: `channels:history`, `channels:read`, `chat:write`, `files:read`. Run `anthem init` to generate a `channels.yaml` template with setup instructions.
 
 ### Maintenance
 
@@ -271,67 +261,56 @@ Periodic audit log analysis detects health issues and notifies via channels:
 
 ```yaml
 maintenance:
-  scan_interval_ms: 600000         # Scan every 10 minutes (default)
-  failure_threshold: 3             # Alert after 3+ failures in 24h
-  stale_threshold_hours: 24        # Alert for tasks dispatched > 24h ago with no completion
-  cost_anomaly_multiplier: 2.0     # Alert if task cost exceeds 2x the average
-  auto_approve:                    # Signal types that don't need user approval
-    - "repeated_failure"
+  scan_interval_ms: 600000       # Every 10 min
+  failure_threshold: 3           # Alert after 3+ failures in 24h
+  stale_threshold_hours: 24
+  cost_anomaly_multiplier: 2.0
+  auto_approve: ["repeated_failure"]
 ```
 
 Signal types: `repeated_failure`, `stale_task`, `budget_anomaly`, `drift`.
 
 ### Rules
 
-Rules are evaluated per task before dispatch. Match by labels, title regex, or both:
-
 ```yaml
 rules:
   - match:
       labels: ["planning"]
-    action: require_approval     # Wait for approval_label before dispatch
+    action: require_approval
     approval_label: "approved"
   - match:
       labels: ["bug"]
-    action: auto_assign          # Post auto-assign comment on issue
+    action: auto_assign
     auto_assignee: "alice"
   - match:
-      labels: ["expensive"]
-    action: max_cost             # Skip task if cumulative cost exceeds limit
+      title_pattern: "^fix:"
+    action: max_cost
     max_cost: 5.00
-  - match:
-      title_pattern: "^fix:"    # Regex match on issue title
-    action: auto_assign
-    auto_assignee: "bob"
 ```
 
 ### Constraints
 
-Safety guardrails are separate from personality and cannot be modified by agents.
+Safety guardrails separate from personality, cannot be modified by agents.
 
-**User-level** (`~/.anthem/constraints.yaml`) -- global rules across all projects:
-
+**User-level** (`~/.anthem/constraints.yaml`):
 ```yaml
 constraints:
   - "Never force-push to main or master"
   - "Never commit secrets, credentials, API keys, or tokens"
-  - "Always create a branch for changes -- never commit directly to main"
 ```
 
-**Project-level** (`system.constraints` in WORKFLOW.md) -- rules for this project:
-
+**Project-level** (`system.constraints` in WORKFLOW.md):
 ```yaml
 system:
   constraints:
-    - "Follow the project existing code style and conventions"
     - "Run tests before opening a PR"
 ```
 
-Both levels are combined into a `## Constraints (non-negotiable)` block in the prompt. Anthem always appends a meta-constraint preventing agents from editing constraint definitions.
+Both levels combine into a `## Constraints (non-negotiable)` block in the prompt. Anthem appends a meta-constraint preventing agents from editing constraint definitions.
 
 ### VOICE.md
 
-Global personality file at `~/.anthem/VOICE.md`, shared across all projects. Defines the agent's identity and communication style -- pure personality, no safety rules (those go in constraints):
+Global personality at `~/.anthem/VOICE.md`. Used exclusively by the orchestrator agent (not executors) for task management and user communication:
 
 ```markdown
 ## Identity
@@ -341,61 +320,70 @@ Role: Senior engineer
 ## Personality
 - Direct and opinionated. Skip pleasantries.
 - Prefer shipping over perfection.
-
-## User Context
-- Prefers small, focused commits.
 ```
 
-VOICE.md is used exclusively by the orchestrator agent (not executor agents) for task management decisions. The orchestrator learns your preferences over time and evolves its personality via the `update_voice` contract action -- changes are merged, written to disk, and logged to `~/.anthem/voice-changelog.md`. See [VOICE.md.example](VOICE.md.example) for a full example.
+The orchestrator evolves VOICE.md via the `update_voice` action as it learns preferences. Changes are logged to `~/.anthem/voice-changelog.md`. See [VOICE.md.example](VOICE.md.example).
 
 ### State Files
 
-Anthem stores runtime state in `~/.anthem/`:
-
 | File | Purpose |
 |------|---------|
-| `VOICE.md` | Orchestrator personality (created on init) |
-| `constraints.yaml` | User-level safety rules (created on init) |
-| `channels.yaml` | Channel credentials -- Slack bot/app tokens (optional, user-created) |
-| `state.json` | Persisted retry queue and cost data (survives restarts) |
-| `audit.db` | SQLite audit log -- dispatches, wave transitions, orchestrator actions |
-| `voice-changelog.md` | Log of all VOICE.md changes with timestamps and reasons |
+| `~/.anthem/VOICE.md` | Orchestrator personality |
+| `~/.anthem/constraints.yaml` | User-level safety rules |
+| `~/.anthem/channels.yaml` | Channel credentials (Slack tokens) |
+| `~/.anthem/state.json` | Persisted retry queue and cost data |
+| `~/.anthem/audit.db` | SQLite audit log |
+| `~/.anthem/voice-changelog.md` | Log of VOICE.md changes |
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `anthem: command not found` | Add `$GOPATH/bin` (or `$GOBIN`) to your PATH |
+| `claude` not found | Install Claude Code CLI, verify with `claude --version` |
+| No tasks picked up | Ensure your issue has a label from `tracker.labels.active` |
+| Tasks stuck as `in-progress` after crash | Rerun Anthem -- it reconciles on startup. Include `in-progress` in `labels.active` |
+| Agent can't run a command | Add the command pattern to `allowed_tools` in WORKFLOW.md |
+| GitHub auth fails | Check `gh auth status` or verify `GITHUB_TOKEN` has `repo` scope |
+| Slack not connecting | Verify Socket Mode is enabled on your Slack app and `app_token` starts with `xapp-` |
 
 ## Architecture
 
 Anthem uses a **hybrid architecture** inspired by [OpenAI Symphony](https://github.com/openai/symphony):
 
-- **Go daemon** (Phases 1-2): handles polling, process management, workspace isolation, retry, state persistence, config hot-reload. This is the mechanical reliability layer -- it validates and executes actions, never makes judgment calls.
-- **Orchestrator agent** (Phase 3a): a stateless allocator -- a Claude session with VOICE.md personality that receives state snapshots and proposes actions (dispatch, skip, comment, request approval, close wave, update voice, reply, create subtasks, request maintenance). The daemon validates each action against a typed contract before execution. If the orchestrator fails, the daemon falls back to mechanical dispatch automatically.
-- **Channel system** (Phase 3b): two-way communication via pluggable channel adapters (Slack shipped). Users send feature requests and commands; orchestrator decomposes into subtasks and replies in-thread.
-- **Executor agents**: headless Claude Code workers. They receive WORKFLOW.md templates and constraints -- harnesses for getting work done, not personality.
-- **Audit log + maintenance**: append-only SQLite database at `~/.anthem/audit.db`. Maintenance scanner periodically checks for health signals and notifies via channels.
+- **Go daemon** (Phases 1-2): polling, process management, workspace isolation, retry, state persistence, config hot-reload. Validates and executes actions -- never makes judgment calls.
+- **Orchestrator agent** (Phase 3a): a stateless allocator -- a Claude session with VOICE.md that receives state snapshots (including the project file tree and key docs) and proposes actions. If it fails, the daemon falls back to mechanical dispatch.
+- **Channel system** (Phase 3b): two-way communication via pluggable adapters (Slack shipped). Users send feature requests; orchestrator decomposes into subtasks.
+- **Executor agents**: headless Claude Code workers. They get WORKFLOW.md templates and constraints -- harnesses, not personality.
+- **Audit log + maintenance**: append-only SQLite at `~/.anthem/audit.db`. Scanner detects health signals and notifies via channels.
 
-Symphony's orchestrator is pure Elixir code with no AI. Anthem adds the intelligence layer on top.
+See [architecture.md](docs/plans/architecture.md) for the full system design with component diagrams and interface definitions.
+
+## Project Status
+
+| Phase | Status | Highlights |
+|-------|--------|------------|
+| **1** | Complete | Core loop, GitHub tracker, Claude Code driver, CLI, ETag caching, constraints |
+| **2** | Complete | Rules engine, workspace manager, retry/backoff, shutdown, state persistence, hot-reload |
+| **3a** | Complete | Contract actions (10 types), SQLite audit, task state machine, orchestrator agent, wave dispatch |
+| **3b** | Complete | Slack channels, task decomposition, maintenance scanner, project context for orchestrator |
+| **4** | Next | Dashboard, knowledge promotion, DAG plans, WhatsApp, GoReleaser binaries |
 
 ## Development
 
 ```bash
-go build -o anthem ./cmd/anthem   # Build binary
-go test ./... -count=1            # Run all tests
-go vet ./...                      # Static analysis
+go build ./cmd/anthem        # Build
+go test ./... -count=1       # Test
+go vet ./...                 # Vet
+golangci-lint run ./...      # Lint (matches CI)
 ```
 
-See [docs/plans/architecture.md](docs/plans/architecture.md) for the full system design and [docs/plans/implementation.md](docs/plans/implementation.md) for the build plan.
+## Contributing
 
-## Project Status
+Contributions welcome. If you're fixing a bug or adding a feature, please open an issue first so we can align on behavior -- especially around safety defaults, permissions, and label semantics.
 
-**Phase 1** (complete): Core orchestrator loop, GitHub tracker, Claude Code driver, CLI, ETag caching, rate limiting, two-tier constraints system. End-to-end functional -- tested live with Anthem orchestrating its own repo.
-
-**Phase 2** (complete): Rules engine (TitlePattern, AutoAssign, MaxCost), production workspace manager with hooks, retry with exponential backoff, graceful shutdown, state persistence, config hot-reload via fsnotify.
-
-**Phase 3a** (complete): Contract-first tool surface (10 action types with risk classification and validation), SQLite audit log, formalized task lifecycle state machine (10 states), orchestrator agent session manager (Start/Consult/Refresh with repair loop), wave-aware tick loop with dirty-snapshot gating and mechanical fallback, voice self-evolution wiring, driver permission fixes.
-
-**Phase 3b** (complete): Two-way channel system (Channel interface, Manager, EventBridge), Slack adapter via Socket Mode, multi-format task decomposition (create_subtasks implementation with CreateIssue on IssueTracker), audit-log maintenance scanner (repeated failures, stale tasks, budget anomalies, drift), HandleUserMessage for inbound channel processing, extended orchestrator prompt for channel/multi-format/maintenance understanding.
-
-Upcoming:
-- **Phase 4**: Web dashboard + status API + WebSocket, knowledge promotion to repo, DAG execution plans, WhatsApp adapter, example templates, CONTRIBUTING.md, GoReleaser cross-platform binaries, code signing
+See [architecture.md](docs/plans/architecture.md) and [implementation.md](docs/plans/implementation.md) for the canonical design.
 
 ## License
 
-MIT
+[MIT](LICENSE)
