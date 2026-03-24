@@ -299,10 +299,16 @@ func initCmd() *cobra.Command {
 				return err
 			}
 
+			channelsPath := filepath.Join(anthemDir, "channels.yaml")
+			if err := createFileIfNotExists(channelsPath, defaultChannels); err != nil {
+				return err
+			}
+
 			fmt.Println("Anthem initialized:")
 			fmt.Println("  ./WORKFLOW.md created")
 			fmt.Printf("  %s created\n", voicePath)
 			fmt.Printf("  %s created\n", constraintsPath)
+			fmt.Printf("  %s created\n", channelsPath)
 			return nil
 		},
 	}
@@ -382,6 +388,15 @@ func bootstrapDir(anthemDir string, logger *slog.Logger) error {
 			return fmt.Errorf("writing %s: %w", constraintsPath, err)
 		}
 		logger.Info("created default constraints.yaml", "path", constraintsPath)
+		created = true
+	}
+
+	channelsPath := filepath.Join(anthemDir, "channels.yaml")
+	if _, err := os.Stat(channelsPath); os.IsNotExist(err) {
+		if err := os.WriteFile(channelsPath, []byte(defaultChannels), 0644); err != nil {
+			return fmt.Errorf("writing %s: %w", channelsPath, err)
+		}
+		logger.Info("created default channels.yaml", "path", channelsPath)
 		created = true
 	}
 

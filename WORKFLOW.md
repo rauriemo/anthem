@@ -35,6 +35,17 @@ system:
     - "Run all tests before merging"
     - "Do not commit secrets or credentials"
 
+channels:
+  - kind: slack
+    target: "C0ANBSDP40N"
+    events:
+      - task.completed
+      - task.failed
+      - task.waiting_approval
+      - task.budget_exceeded
+      - maintenance.suggested
+      - wave.completed
+
 server:
   port: 8080
 ---

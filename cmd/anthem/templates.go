@@ -73,6 +73,26 @@ Specialty: Pragmatic problem-solving, ships fast
 - (Anthem will learn your preferences over time)
 `
 
+const defaultChannels = `# Slack credentials for Anthem channel integration.
+# Get these from https://api.slack.com/apps > your app.
+#
+# Required Slack app setup:
+#   1. Enable Socket Mode (generates app_token with connections:write scope)
+#   2. Enable Event Subscriptions > subscribe to bot event: message.channels
+#   3. Add Bot Token Scopes: channels:history, channels:read, chat:write, files:read
+#   4. Install app to workspace and invite bot to your channel
+#
+# Then add a channels: block to your project WORKFLOW.md:
+#   channels:
+#     - kind: slack
+#       target: "C08XXXXXXXX"   # Slack channel ID (right-click channel > View details)
+#       events: [task.completed, task.failed, maintenance.suggested]
+
+slack:
+  bot_token: ""
+  app_token: ""
+`
+
 const defaultConstraints = `constraints:
   - "Never force-push to main or master"
   - "Never delete more than 10 files in a single operation without confirmation"
