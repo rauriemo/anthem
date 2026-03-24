@@ -264,6 +264,38 @@ func TestShouldThrottle(t *testing.T) {
 	}
 }
 
+func TestCreateIssue(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/repos/test/repo/issues" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		resp := map[string]any{
+			"id":     999,
+			"number": 42,
+			"title":  req["title"],
+			"body":   req["body"],
+			"labels": []map[string]any{},
+			"state":  "open",
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	tracker := newTestTracker(t, srv.URL)
+	id, err := tracker.CreateIssue(context.Background(), "New subtask", "Do the thing", []string{"todo"})
+	if err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+	if id != "42" {
+		t.Errorf("ID = %q, want 42", id)
+	}
+}
+
 func TestCheckRateLimitSetsThrottle(t *testing.T) {
 	tests := []struct {
 		name          string

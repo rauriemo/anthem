@@ -19,14 +19,16 @@ const (
 type ActionType string
 
 const (
-	ActionDispatch         ActionType = "dispatch"
-	ActionSkip             ActionType = "skip"
-	ActionComment          ActionType = "comment"
-	ActionUpdateVoice      ActionType = "update_voice"
-	ActionRequestApproval  ActionType = "request_approval"
-	ActionCloseWave        ActionType = "close_wave"
-	ActionCreateSubtasks   ActionType = "create_subtasks"
-	ActionPromoteKnowledge ActionType = "promote_knowledge"
+	ActionDispatch           ActionType = "dispatch"
+	ActionSkip               ActionType = "skip"
+	ActionComment            ActionType = "comment"
+	ActionUpdateVoice        ActionType = "update_voice"
+	ActionRequestApproval    ActionType = "request_approval"
+	ActionCloseWave          ActionType = "close_wave"
+	ActionCreateSubtasks     ActionType = "create_subtasks"
+	ActionPromoteKnowledge   ActionType = "promote_knowledge"
+	ActionReply              ActionType = "reply"
+	ActionRequestMaintenance ActionType = "request_maintenance"
 )
 
 // allActionTypes enumerates every known action type for validation.
@@ -39,6 +41,8 @@ var allActionTypes = []ActionType{
 	ActionCloseWave,
 	ActionCreateSubtasks,
 	ActionPromoteKnowledge,
+	ActionReply,
+	ActionRequestMaintenance,
 }
 
 // SubtaskDef defines a subtask to be created by the create_subtasks action.
@@ -50,15 +54,17 @@ type SubtaskDef struct {
 
 // Action is a single proposal from the orchestrator agent to the daemon.
 type Action struct {
-	Type           ActionType   `json:"type"`
-	TaskID         string       `json:"task_id,omitempty"`
-	Reason         string       `json:"reason,omitempty"`
-	Body           string       `json:"body,omitempty"`
-	SectionName    string       `json:"section_name,omitempty"`
-	SectionContent string       `json:"section_content,omitempty"`
-	Subtasks       []SubtaskDef `json:"subtasks,omitempty"`
-	Summary        string       `json:"summary,omitempty"`
-	ArtifactPath   string       `json:"artifact_path,omitempty"`
+	Type            ActionType   `json:"type"`
+	TaskID          string       `json:"task_id,omitempty"`
+	Reason          string       `json:"reason,omitempty"`
+	Body            string       `json:"body,omitempty"`
+	SectionName     string       `json:"section_name,omitempty"`
+	SectionContent  string       `json:"section_content,omitempty"`
+	Subtasks        []SubtaskDef `json:"subtasks,omitempty"`
+	Summary         string       `json:"summary,omitempty"`
+	ArtifactPath    string       `json:"artifact_path,omitempty"`
+	MaintenanceType string       `json:"maintenance_type,omitempty"`
+	AutoApprovable  bool         `json:"auto_approvable,omitempty"`
 }
 
 // OrchestratorResponse is the full JSON response parsed from the orchestrator agent.
@@ -73,9 +79,9 @@ var ErrNotImplemented = errors.New("action not implemented in this phase")
 // RiskForAction returns the risk level for a given action type.
 func RiskForAction(actionType ActionType) RiskLevel {
 	switch actionType {
-	case ActionDispatch, ActionSkip, ActionComment, ActionUpdateVoice, ActionRequestApproval:
+	case ActionDispatch, ActionSkip, ActionComment, ActionUpdateVoice, ActionRequestApproval, ActionReply:
 		return RiskLow
-	case ActionCloseWave, ActionCreateSubtasks, ActionPromoteKnowledge:
+	case ActionCloseWave, ActionCreateSubtasks, ActionPromoteKnowledge, ActionRequestMaintenance:
 		return RiskMedium
 	default:
 		return RiskHigh
@@ -138,6 +144,19 @@ func ValidateAction(action Action, validTaskIDs []string) error {
 		if action.Summary == "" {
 			return fmt.Errorf("promote_knowledge action requires summary")
 		}
+
+	case ActionReply:
+		if action.Body == "" {
+			return fmt.Errorf("reply action requires body")
+		}
+
+	case ActionRequestMaintenance:
+		if action.MaintenanceType == "" {
+			return fmt.Errorf("request_maintenance action requires maintenance_type")
+		}
+		if action.Reason == "" {
+			return fmt.Errorf("request_maintenance action requires reason")
+		}
 	}
 
 	return nil
@@ -146,17 +165,17 @@ func ValidateAction(action Action, validTaskIDs []string) error {
 // IsIdempotent reports whether repeating the action produces the same outcome.
 func IsIdempotent(actionType ActionType) bool {
 	switch actionType {
-	case ActionComment, ActionSkip, ActionRequestApproval, ActionUpdateVoice:
+	case ActionComment, ActionSkip, ActionRequestApproval, ActionUpdateVoice, ActionReply:
 		return true
 	default:
 		return false
 	}
 }
 
-// SchemaOnly reports whether the action is defined in Phase 3a but not yet executable.
+// SchemaOnly reports whether the action's schema is defined but execution is deferred to a future phase.
 func SchemaOnly(actionType ActionType) bool {
 	switch actionType {
-	case ActionCreateSubtasks, ActionPromoteKnowledge:
+	case ActionPromoteKnowledge:
 		return true
 	default:
 		return false

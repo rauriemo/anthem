@@ -12,9 +12,12 @@ import (
 
 	"github.com/rauriemo/anthem/internal/agent/claude"
 	"github.com/rauriemo/anthem/internal/audit"
+	"github.com/rauriemo/anthem/internal/channel"
+	slackch "github.com/rauriemo/anthem/internal/channel/slack"
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/constraints"
 	"github.com/rauriemo/anthem/internal/logging"
+	"github.com/rauriemo/anthem/internal/maintenance"
 	"github.com/rauriemo/anthem/internal/orchestrator"
 	"github.com/rauriemo/anthem/internal/tracker"
 	ghtracker "github.com/rauriemo/anthem/internal/tracker/github"
@@ -131,6 +134,33 @@ func runCmd() *cobra.Command {
 			}
 			defer auditLogger.Close()
 
+			// Load channel credentials
+			credPath, err := channel.DefaultCredentialsPath()
+			if err != nil {
+				return fmt.Errorf("resolving channel credentials path: %w", err)
+			}
+			channelCreds, err := channel.LoadCredentials(credPath)
+			if err != nil {
+				return fmt.Errorf("loading channel credentials: %w", err)
+			}
+
+			// Create channel manager and register adapters
+			chanManager := channel.NewManager(logger)
+			if channelCreds != nil && channelCreds.Slack != nil && len(cfg.Channels) > 0 {
+				for _, chCfg := range cfg.Channels {
+					if chCfg.Kind == "slack" {
+						slackAdapter := slackch.NewAdapter(
+							channelCreds.Slack.BotToken,
+							channelCreds.Slack.AppToken,
+							chCfg.Target,
+							logger,
+						)
+						chanManager.Register(slackAdapter)
+						logger.Info("registered slack channel", "target", chCfg.Target)
+					}
+				}
+			}
+
 			// Create orchestrator agent if enabled
 			var orchAgent *orchestrator.OrchestratorAgent
 			if cfg.Orchestrator.Enabled {
@@ -152,6 +182,7 @@ func runCmd() *cobra.Command {
 				StatePath:       statePath,
 				OrchAgent:       orchAgent,
 				AuditLogger:     auditLogger,
+				ChannelManager:  chanManager,
 			})
 
 			// Start config hot-reload watcher
@@ -163,6 +194,35 @@ func runCmd() *cobra.Command {
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
 			defer stop()
+
+			// Start channel manager
+			if err := chanManager.Start(ctx); err != nil {
+				logger.Warn("failed to start channel manager, continuing without channels", "error", err)
+			}
+			defer chanManager.Close()
+
+			// Merge event filters from all channel configs for the bridge
+			seen := make(map[string]bool)
+			var bridgeAllowedEvents []string
+			for _, chCfg := range cfg.Channels {
+				for _, ev := range chCfg.Events {
+					if !seen[ev] {
+						seen[ev] = true
+						bridgeAllowedEvents = append(bridgeAllowedEvents, ev)
+					}
+				}
+			}
+			eventBridge := channel.NewEventBridge(chanManager, events.Subscribe(), bridgeAllowedEvents, logger)
+			eventBridge.Start(ctx)
+			defer eventBridge.Close()
+
+			// Start maintenance scanner
+			scanner := maintenance.NewScanner(auditLogger, events, cfg.Maintenance, logger)
+			scanner.Start(ctx)
+			defer scanner.Close()
+
+			// Start channel listener for inbound messages
+			orch.StartChannelListener(ctx)
 
 			logger.Info("starting anthem",
 				"workflow", workflowPath,

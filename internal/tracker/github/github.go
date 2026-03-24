@@ -302,6 +302,19 @@ func (g *GitHubTracker) RemoveLabel(ctx context.Context, id string, label string
 	return nil
 }
 
+func (g *GitHubTracker) CreateIssue(ctx context.Context, title string, body string, labels []string) (string, error) {
+	issue, resp, err := g.client.Issues.Create(ctx, g.owner, g.repo, &gh.IssueRequest{
+		Title:  &title,
+		Body:   &body,
+		Labels: &labels,
+	})
+	if err != nil {
+		return "", fmt.Errorf("creating issue: %w", err)
+	}
+	g.checkRateLimit(resp)
+	return strconv.Itoa(issue.GetNumber()), nil
+}
+
 func (g *GitHubTracker) checkRateLimit(resp *gh.Response) {
 	if resp == nil {
 		return

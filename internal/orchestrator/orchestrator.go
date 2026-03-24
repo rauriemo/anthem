@@ -15,6 +15,7 @@ import (
 
 	"github.com/rauriemo/anthem/internal/agent"
 	"github.com/rauriemo/anthem/internal/audit"
+	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/cost"
 	"github.com/rauriemo/anthem/internal/rules"
@@ -46,6 +47,7 @@ type Orchestrator struct {
 	statePath       string
 	orchAgent       *OrchestratorAgent
 	auditLogger     audit.AuditLogger
+	channelMgr      *channel.Manager
 	currentWave     *Wave
 	lastSnapHash    string
 	homeDir         string
@@ -76,6 +78,7 @@ type Opts struct {
 	StatePath       string
 	OrchAgent       *OrchestratorAgent
 	AuditLogger     audit.AuditLogger
+	ChannelManager  *channel.Manager
 }
 
 func New(opts Opts) *Orchestrator {
@@ -102,6 +105,7 @@ func New(opts Opts) *Orchestrator {
 		statePath:       opts.StatePath,
 		orchAgent:       opts.OrchAgent,
 		auditLogger:     opts.AuditLogger,
+		channelMgr:      opts.ChannelManager,
 		active:          make(map[string]*ActiveRun),
 		retryState:      make(map[string]*RetryInfo),
 	}
@@ -499,6 +503,48 @@ func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, a
 		case ActionUpdateVoice:
 			if err := o.executeUpdateVoice(ctx, action); err != nil {
 				o.logger.Warn("update_voice failed", "section", action.SectionName, "error", err)
+			}
+
+		case ActionCreateSubtasks:
+			for _, sub := range action.Subtasks {
+				createdID, err := o.tracker.CreateIssue(ctx, sub.Title, sub.Body, sub.Labels)
+				if err != nil {
+					o.logger.Warn("failed to create subtask", "title", sub.Title, "error", err)
+					continue
+				}
+				o.logger.Info("created subtask", "id", createdID, "title", sub.Title)
+			}
+			o.recordAudit(ctx, "subtasks.created", "", strPtr("create_subtasks"))
+
+		case ActionReply:
+			if o.channelMgr != nil {
+				replyMsg := channel.OutgoingMessage{Text: action.Body, Markdown: true}
+				if err := o.channelMgr.Broadcast(ctx, replyMsg); err != nil {
+					o.logger.Warn("failed to send channel reply", "error", err)
+				}
+			}
+			o.recordAudit(ctx, "channel.reply_sent", "", strPtr("reply"))
+
+		case ActionRequestMaintenance:
+			if o.channelMgr != nil {
+				notify := channel.OutgoingMessage{
+					Text:     fmt.Sprintf("**Maintenance proposal** (%s): %s", action.MaintenanceType, action.Reason),
+					Markdown: true,
+				}
+				if err := o.channelMgr.Broadcast(ctx, notify); err != nil {
+					o.logger.Warn("failed to send maintenance notification", "error", err)
+				}
+			}
+			if action.AutoApprovable && o.isMaintenanceAutoApproved(action.MaintenanceType) {
+				o.logger.Info("auto-approved maintenance action", "type", action.MaintenanceType)
+				o.publish(types.Event{
+					Type: "maintenance.approved",
+					Data: map[string]string{"type": action.MaintenanceType, "reason": action.Reason},
+				})
+				o.recordAudit(ctx, "maintenance.auto_approved", "", strPtr("request_maintenance"))
+			} else {
+				o.logger.Info("maintenance action awaiting user approval", "type", action.MaintenanceType)
+				o.recordAudit(ctx, "maintenance.pending_approval", "", strPtr("request_maintenance"))
 			}
 		}
 	}
@@ -951,6 +997,15 @@ func hasLabel(labels []string, label string) bool {
 	return false
 }
 
+func (o *Orchestrator) isMaintenanceAutoApproved(maintenanceType string) bool {
+	for _, approved := range o.cfg.Maintenance.AutoApprove {
+		if approved == maintenanceType {
+			return true
+		}
+	}
+	return false
+}
+
 const metaConstraint = "Do not modify constraint definitions in WORKFLOW.md system.constraints or ~/.anthem/constraints.yaml"
 
 func buildConstraints(userConstraints []string, projectConstraints []string) string {
@@ -977,4 +1032,122 @@ func buildFullPrompt(userConstraints []string, projectConstraints []string, task
 	}
 	sections = append(sections, taskPrompt)
 	return strings.Join(sections, "\n\n")
+}
+
+const maxFileContentBytes = 50 * 1024
+
+func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.IncomingMessage) {
+	o.logger.Info("handling user message",
+		"sender", msg.SenderID,
+		"text_len", len(msg.Text),
+		"file_count", len(msg.Files),
+	)
+
+	tasks, err := o.tracker.ListActive(ctx)
+	if err != nil {
+		o.logger.Error("failed to fetch tasks for user message", "error", err)
+		o.sendErrorReply(ctx, msg.ThreadID, "Failed to fetch current tasks.")
+		return
+	}
+
+	snap := o.buildStateSnapshot(tasks)
+	snap.UserMessage = buildUserMessageContext(msg)
+
+	if o.orchAgent == nil {
+		o.sendErrorReply(ctx, msg.ThreadID, "Orchestrator agent is not enabled.")
+		return
+	}
+
+	actions, err := o.orchAgent.ConsultWithRepair(ctx, snap)
+	if err != nil {
+		o.logger.Warn("orchestrator consultation failed for user message", "error", err)
+		o.sendErrorReply(ctx, msg.ThreadID, "I couldn't process your message. The orchestrator encountered an error.")
+		return
+	}
+
+	if actions == nil {
+		o.sendErrorReply(ctx, msg.ThreadID, "I couldn't understand your request. Please try again.")
+		return
+	}
+
+	// Execute actions, using thread ID for any replies
+	for i := range actions {
+		if actions[i].Type == ActionReply && o.channelMgr != nil {
+			replyMsg := channel.OutgoingMessage{
+				Text:     actions[i].Body,
+				ThreadID: msg.ThreadID,
+				Markdown: true,
+			}
+			if err := o.channelMgr.Broadcast(ctx, replyMsg); err != nil {
+				o.logger.Warn("failed to send channel reply", "error", err)
+			}
+			o.recordAudit(ctx, "channel.reply_sent", "", strPtr("reply"))
+		}
+	}
+
+	// Execute non-reply actions via the standard path
+	var nonReplyActions []Action
+	for _, a := range actions {
+		if a.Type != ActionReply {
+			nonReplyActions = append(nonReplyActions, a)
+		}
+	}
+	o.executeActions(ctx, tasks, nonReplyActions)
+
+	o.recordAudit(ctx, "channel.user_message", "", strPtr("handle_user_message"))
+}
+
+func (o *Orchestrator) sendErrorReply(ctx context.Context, threadID string, text string) {
+	if o.channelMgr == nil {
+		return
+	}
+	_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+		Text:     text,
+		ThreadID: threadID,
+		Markdown: false,
+	})
+}
+
+func buildUserMessageContext(msg channel.IncomingMessage) *UserMessageContext {
+	umc := &UserMessageContext{Text: msg.Text}
+	for _, f := range msg.Files {
+		if isTextMime(f.MimeType) {
+			content := string(f.Content)
+			if len(content) > maxFileContentBytes {
+				content = content[:maxFileContentBytes] + "\n[truncated]"
+			}
+			umc.Files = append(umc.Files, content)
+		} else if strings.HasPrefix(f.MimeType, "image/") {
+			umc.Files = append(umc.Files, fmt.Sprintf("[image: %s]", f.Name))
+		} else {
+			umc.Files = append(umc.Files, fmt.Sprintf("[file: %s, type: %s]", f.Name, f.MimeType))
+		}
+	}
+	return umc
+}
+
+func isTextMime(mime string) bool {
+	return strings.HasPrefix(mime, "text/") ||
+		mime == "application/json" ||
+		mime == "application/yaml" ||
+		mime == "application/x-yaml"
+}
+
+func (o *Orchestrator) StartChannelListener(ctx context.Context) {
+	if o.channelMgr == nil {
+		return
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg, ok := <-o.channelMgr.Incoming():
+				if !ok {
+					return
+				}
+				o.HandleUserMessage(ctx, msg)
+			}
+		}
+	}()
 }

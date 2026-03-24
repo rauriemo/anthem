@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,6 +220,33 @@ func TestConsultWithRepair_FirstAttemptFails(t *testing.T) {
 	}
 	if callCount != 2 {
 		t.Errorf("Continue called %d times, want 2 (consult + repair)", callCount)
+	}
+}
+
+func TestBuildSystemPrompt_ContainsNewActions(t *testing.T) {
+	prompt := buildSystemPrompt("")
+
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{"reply action", "- reply: Send a message back to the user"},
+		{"request_maintenance action", "- request_maintenance: Propose a maintenance action"},
+		{"channel messages section", "## Channel Messages"},
+		{"multi-format section", "## Multi-Format Input"},
+		{"create_subtasks not schema-only", "- create_subtasks: Create subtasks as new tracker issues"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !strings.Contains(prompt, tt.content) {
+				t.Errorf("system prompt missing %q", tt.content)
+			}
+		})
+	}
+
+	if strings.Contains(prompt, "create_subtasks: (schema-only)") {
+		t.Error("create_subtasks should no longer be marked as schema-only")
 	}
 }
 

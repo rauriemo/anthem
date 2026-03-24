@@ -14,6 +14,9 @@ Executor agents are headless Claude Code workers that receive project context fr
 - **Per-task workspaces**: isolated directories with lifecycle hooks (`after_create`, `before_run`, `after_complete`)
 - **SQLite audit log**: append-only event log at `~/.anthem/audit.db` recording dispatches, retries, wave transitions, orchestrator actions, and voice updates
 - **Self-evolving personality**: orchestrator agent updates `VOICE.md` sections as it learns user preferences, with changelog tracking
+- **Two-way Slack integration**: receive feature requests, commands, and approvals via Slack; orchestrator replies in-thread with status and confirmations
+- **Multi-format task decomposition**: send plain text, markdown specs, mermaid diagrams, or images via Slack -- orchestrator decomposes into GitHub issues automatically
+- **Maintenance scanner**: periodic audit log analysis detects repeated failures, stale tasks, budget anomalies, and drift -- notifies via channel with configurable auto-approve
 - **Retry with exponential backoff**: failed tasks retry automatically with increasing delays
 - **Graceful shutdown**: drains active agents, releases claims, saves state on Ctrl+C
 - **State persistence**: retry queue and cost data survive restarts via `~/.anthem/state.json`
@@ -241,6 +244,43 @@ orchestrator:
 
 When enabled, the orchestrator agent (a persistent Claude session) plans task dispatch in waves. When disabled or if the orchestrator fails, Anthem falls back to Phase 2 mechanical dispatch (dispatch every eligible task).
 
+### Channels
+
+Two-way communication with the orchestrator via Slack (or other adapters). Global credentials go in `~/.anthem/channels.yaml`:
+
+```yaml
+slack:
+  bot_token: "xoxb-your-bot-token"
+  app_token: "xapp-your-app-token"
+```
+
+Per-project channel targets go in WORKFLOW.md front matter:
+
+```yaml
+channels:
+  - kind: slack
+    target: "C0123456789"          # Slack channel ID
+    events: ["task.completed", "task.failed", "maintenance.suggested"]
+```
+
+The EventBridge routes internal events to channels. The orchestrator replies in-thread when users send messages.
+
+### Maintenance
+
+Periodic audit log analysis detects health issues and notifies via channels:
+
+```yaml
+maintenance:
+  scan_interval_ms: 600000         # Scan every 10 minutes (default)
+  failure_threshold: 3             # Alert after 3+ failures in 24h
+  stale_threshold_hours: 24        # Alert for tasks dispatched > 24h ago with no completion
+  cost_anomaly_multiplier: 2.0     # Alert if task cost exceeds 2x the average
+  auto_approve:                    # Signal types that don't need user approval
+    - "repeated_failure"
+```
+
+Signal types: `repeated_failure`, `stale_task`, `budget_anomaly`, `drift`.
+
 ### Rules
 
 Rules are evaluated per task before dispatch. Match by labels, title regex, or both:
@@ -316,6 +356,7 @@ Anthem stores runtime state in `~/.anthem/`:
 |------|---------|
 | `VOICE.md` | Orchestrator personality (created on init) |
 | `constraints.yaml` | User-level safety rules (created on init) |
+| `channels.yaml` | Channel credentials -- Slack bot/app tokens (optional, user-created) |
 | `state.json` | Persisted retry queue and cost data (survives restarts) |
 | `audit.db` | SQLite audit log -- dispatches, wave transitions, orchestrator actions |
 | `voice-changelog.md` | Log of all VOICE.md changes with timestamps and reasons |
@@ -325,9 +366,10 @@ Anthem stores runtime state in `~/.anthem/`:
 Anthem uses a **hybrid architecture** inspired by [OpenAI Symphony](https://github.com/openai/symphony):
 
 - **Go daemon** (Phases 1-2): handles polling, process management, workspace isolation, retry, state persistence, config hot-reload. This is the mechanical reliability layer -- it validates and executes actions, never makes judgment calls.
-- **Orchestrator agent** (Phase 3a): a stateless allocator -- a Claude session with VOICE.md personality that receives state snapshots and proposes actions (dispatch, skip, comment, request approval, close wave, update voice). The daemon validates each action against a typed contract before execution. If the orchestrator fails, the daemon falls back to mechanical dispatch automatically.
+- **Orchestrator agent** (Phase 3a): a stateless allocator -- a Claude session with VOICE.md personality that receives state snapshots and proposes actions (dispatch, skip, comment, request approval, close wave, update voice, reply, create subtasks, request maintenance). The daemon validates each action against a typed contract before execution. If the orchestrator fails, the daemon falls back to mechanical dispatch automatically.
+- **Channel system** (Phase 3b): two-way communication via pluggable channel adapters (Slack shipped). Users send feature requests and commands; orchestrator decomposes into subtasks and replies in-thread.
 - **Executor agents**: headless Claude Code workers. They receive WORKFLOW.md templates and constraints -- harnesses for getting work done, not personality.
-- **Audit log**: append-only SQLite database at `~/.anthem/audit.db` recording all dispatches, wave transitions, orchestrator actions, and voice updates. Uses `modernc.org/sqlite` (pure Go, no CGo).
+- **Audit log + maintenance**: append-only SQLite database at `~/.anthem/audit.db`. Maintenance scanner periodically checks for health signals and notifies via channels.
 
 Symphony's orchestrator is pure Elixir code with no AI. Anthem adds the intelligence layer on top.
 
@@ -347,10 +389,11 @@ See [docs/plans/architecture.md](docs/plans/architecture.md) for the full system
 
 **Phase 2** (complete): Rules engine (TitlePattern, AutoAssign, MaxCost), production workspace manager with hooks, retry with exponential backoff, graceful shutdown, state persistence, config hot-reload via fsnotify.
 
-**Phase 3a** (complete): Contract-first tool surface (8 action types with risk classification and validation), SQLite audit log, formalized task lifecycle state machine (10 states), orchestrator agent session manager (Start/Consult/Refresh with repair loop), wave-aware tick loop with dirty-snapshot gating and mechanical fallback, voice self-evolution wiring, driver permission fixes.
+**Phase 3a** (complete): Contract-first tool surface (10 action types with risk classification and validation), SQLite audit log, formalized task lifecycle state machine (10 states), orchestrator agent session manager (Start/Consult/Refresh with repair loop), wave-aware tick loop with dirty-snapshot gating and mechanical fallback, voice self-evolution wiring, driver permission fixes.
+
+**Phase 3b** (complete): Two-way channel system (Channel interface, Manager, EventBridge), Slack adapter via Socket Mode, multi-format task decomposition (create_subtasks implementation with CreateIssue on IssueTracker), audit-log maintenance scanner (repeated failures, stale tasks, budget anomalies, drift), HandleUserMessage for inbound channel processing, extended orchestrator prompt for channel/multi-format/maintenance understanding.
 
 Upcoming:
-- **Phase 3b**: Two-way channel system (Slack first, WhatsApp in Phase 4), multi-format task decomposition (user sends prompts/markdown/flowcharts/diagrams via Slack, orchestrator decomposes into GitHub issues), audit-log maintenance signals with user approval gate, `require_plan` via channel conversation flow
 - **Phase 4**: Web dashboard + status API + WebSocket, knowledge promotion to repo, DAG execution plans, WhatsApp adapter, example templates, CONTRIBUTING.md, GoReleaser cross-platform binaries, code signing
 
 ## License

@@ -1,15 +1,31 @@
 package config
 
 type Config struct {
-	Tracker      TrackerConfig      `yaml:"tracker"`
-	Polling      PollingConfig      `yaml:"polling"`
-	Workspace    WorkspaceConfig    `yaml:"workspace"`
-	Hooks        HooksConfig        `yaml:"hooks"`
-	Agent        AgentConfig        `yaml:"agent"`
-	Rules        []RuleConfig       `yaml:"rules"`
-	System       SystemConfig       `yaml:"system"`
-	Orchestrator OrchestratorConfig `yaml:"orchestrator"`
-	Server       ServerConfig       `yaml:"server"`
+	Tracker      TrackerConfig         `yaml:"tracker"`
+	Polling      PollingConfig         `yaml:"polling"`
+	Workspace    WorkspaceConfig       `yaml:"workspace"`
+	Hooks        HooksConfig           `yaml:"hooks"`
+	Agent        AgentConfig           `yaml:"agent"`
+	Rules        []RuleConfig          `yaml:"rules"`
+	System       SystemConfig          `yaml:"system"`
+	Orchestrator OrchestratorConfig    `yaml:"orchestrator"`
+	Channels     []ChannelTargetConfig `yaml:"channels"`
+	Maintenance  MaintenanceConfig     `yaml:"maintenance"`
+	Server       ServerConfig          `yaml:"server"`
+}
+
+type ChannelTargetConfig struct {
+	Kind   string   `yaml:"kind"`
+	Target string   `yaml:"target"`
+	Events []string `yaml:"events"`
+}
+
+type MaintenanceConfig struct {
+	ScanIntervalMS        int      `yaml:"scan_interval_ms"`
+	AutoApprove           []string `yaml:"auto_approve"`
+	FailureThreshold      int      `yaml:"failure_threshold"`
+	StaleThresholdHours   int      `yaml:"stale_threshold_hours"`
+	CostAnomalyMultiplier float64  `yaml:"cost_anomaly_multiplier"`
 }
 
 type TrackerConfig struct {
@@ -105,6 +121,12 @@ func DefaultConfig() Config {
 			Enabled:          true,
 			MaxContextTokens: 80000,
 			StallTimeoutMS:   60000,
+		},
+		Maintenance: MaintenanceConfig{
+			ScanIntervalMS:        600000,
+			FailureThreshold:      3,
+			StaleThresholdHours:   24,
+			CostAnomalyMultiplier: 2.0,
 		},
 		Server: ServerConfig{Port: 8080},
 	}

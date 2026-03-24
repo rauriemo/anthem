@@ -197,19 +197,21 @@ Intelligence layer built using orchestrator-as-allocator architecture. Daemon is
 8. **Voice self-evolution** (`orchestrator.go`) -- executeUpdateVoice: voice.LoadFile -> voice.Merge -> write -> voice.AppendChangelog -> audit event. Updates in-memory voiceContent on Orchestrator and OrchestratorAgent via SetVoiceContent.
 9. **Documentation** -- CLAUDE.md, architecture.md, implementation.md, README.md all updated.
 
-### Phase 3b: Channels + Task Decomposition + Maintenance
+### Phase 3b: Channels + Task Decomposition + Maintenance (COMPLETE)
 
-1. Channel interface + Manager -- define `Channel` (Kind, Start, Send, Incoming, Close), `IncomingMessage`, `OutgoingMessage`, `File` types. Implement Channel Manager with Register, Start, Broadcast, Incoming, Close
-2. Channel config -- `~/.anthem/channels.yaml` loader for global credentials, `channels:` block in WORKFLOW.md for per-project targets + event filters
-3. EventBridge -- subscriber that routes EventBus events to channels, configurable event type filter, EventFormatter for human-readable messages
-4. New contract actions -- `ActionReply` (channel response, low risk, idempotent), `ActionRequestMaintenance` (maintenance proposal with approval gate, medium risk). Wire into `executeActions`
-5. Slack adapter -- Socket Mode via `github.com/slack-go/slack`, inbound text + file handling (md, txt, images), outbound markdown messages
-6. `create_subtasks` implementation -- implement the currently schema-only action to create GitHub issues via tracker. Add `CreateIssue` to `IssueTracker` interface
-7. HandleUserMessage -- new orchestrator method for inbound channel messages. Builds state snapshot with user message + file contents, consults orchestrator agent, executes actions, routes replies back through Channel Manager
-8. Audit-log maintenance scanner -- periodic queries on `audit.db` for repeated failures (3+ retries), stale tasks (queued/planned > N hours), budget anomalies (2x avg cost), drift (re-opened completed tasks). Emits `maintenance.suggested` events. WORKFLOW.md `maintenance:` config block with scan_interval_ms, auto_approve list, failure_threshold, stale_threshold_hours, cost_anomaly_multiplier
-9. Orchestrator agent prompt -- extend system prompt for channel messages, multi-format input understanding (prompts, markdown, flowcharts, diagrams, images), reply actions, task decomposition, maintenance approval
-10. main.go wiring -- Channel Manager, Slack adapter, EventBridge, maintenance scanner, graceful channel shutdown
-11. Documentation -- update CLAUDE.md, architecture.md, implementation.md, README.md
+All 11 steps completed:
+
+1. **Channel interface + Manager** (`internal/channel/channel.go`, `manager.go`) -- `Channel` interface, `IncomingMessage`/`OutgoingMessage`/`File` types. Manager with Register, Start, Broadcast, Incoming, Close. Mutex-protected, buffered merged incoming (64), per-channel fan-in goroutines.
+2. **Channel config** (`internal/channel/config.go`, `internal/config/config.go`) -- `ChannelsConfig`/`SlackCredentials` in channels.yaml. `ChannelTargetConfig` (kind, target, events) and `MaintenanceConfig` (scan_interval_ms, auto_approve, failure_threshold, stale_threshold_hours, cost_anomaly_multiplier) in Config struct. Defaults: 600000ms scan, 3 failures, 24h stale, 2.0x cost.
+3. **EventBridge** (`internal/channel/bridge.go`) -- subscribes to EventBus, filters by allowed types (empty = all), FormatEvent for 7 event types + default. Start/Close lifecycle.
+4. **New contract actions** (`internal/orchestrator/contract.go`) -- `ActionReply` (low risk, idempotent, requires body), `ActionRequestMaintenance` (medium risk, requires maintenance_type + reason). `ActionCreateSubtasks` removed from SchemaOnly. `MaintenanceType`/`AutoApprovable` fields on Action.
+5. **Slack adapter** (`internal/channel/slack/adapter.go`) -- Socket Mode. EventsAPIEvent handling filtered by channelID, bot/subtype filtering, file download with 10MB cap, PostMessageContext with thread TS.
+6. **`create_subtasks` implementation** -- `CreateIssue` on IssueTracker (GitHubTracker, LocalJSONTracker, MockTracker). `executeActions` case iterates SubtaskDefs, creates issues, records audit.
+7. **HandleUserMessage** (`internal/orchestrator/orchestrator.go`) -- builds StateSnapshot with UserMessageContext (text content for text/json/yaml, image/binary placeholders, 50KB truncation). Consults orchestrator with repair. Reply actions sent with thread ID. Non-reply actions executed. Error replies on failure. `StartChannelListener` goroutine.
+8. **Maintenance scanner** (`internal/maintenance/scanner.go`) -- Scanner with ticker. checkRepeatedFailures, checkStaleTasks, checkBudgetAnomalies, checkDrift. AutoApprove from config. Publishes `maintenance.suggested` events.
+9. **Orchestrator prompt** (`internal/orchestrator/orchagent.go`) -- reply + request_maintenance in Actions section. Channel Messages section (intent, decomposition, commands, status, approval). Multi-Format Input section (text, markdown, mermaid, ASCII, images, mixed).
+10. **main.go wiring** (`cmd/anthem/main.go`) -- channel credentials, Channel Manager, Slack adapter registration, EventBridge, maintenance scanner, StartChannelListener. All with deferred Close.
+11. **Documentation** -- all four docs updated.
 
 ### Phase 4: Dashboard + Polish + Community
 

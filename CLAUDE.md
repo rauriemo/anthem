@@ -60,7 +60,7 @@ These are the source of truth for what to build and how.
 
 ## Current Status
 
-**Phase**: Phase 3a — Contract + Audit + Orchestrator Core (**complete**)
+**Phase**: Phase 3b — Channels + Task Decomposition + Maintenance (**complete**)
 **Scaffold**: Complete (all 11 steps done)
 **Phase 1**: Complete. All 10 steps implemented and verified with a live GitHub issue (pickup -> Claude Code execution -> issue closure -> label lifecycle).
 
@@ -97,16 +97,21 @@ These are the source of truth for what to build and how.
 - New files: `internal/orchestrator/contract.go`, `internal/orchestrator/orchagent.go`, `internal/orchestrator/integration_test.go`, `internal/orchestrator/voice_test.go`, `internal/audit/audit.go`, `internal/audit/schema.go`, `internal/audit/audit_test.go`.
 - New dependency: `modernc.org/sqlite`.
 
-**Phase 3b (next)** (Channels + Task Decomposition + Maintenance):
-- Two-way channel system: modular `Channel` interface, Channel Manager, EventBridge for outbound event notifications. Slack adapter via Socket Mode (no HTTP server needed).
-- Multi-format task decomposition: user sends prompts, markdown, flowcharts, or diagrams via channel; orchestrator decomposes into GitHub issues via `create_subtasks` (implements the currently schema-only action).
-- Audit-log maintenance signals: periodic scanner detects repeated failures, stale tasks, budget anomalies, drift; notifies user via channel with approval gate (configurable auto-approve per type).
-- `require_plan` folded into channel conversation flow (orchestrator proposes plan via reply, user approves, dispatch begins).
-- New contract actions: `ActionReply` (channel response), `ActionRequestMaintenance` (maintenance proposal with approval gate).
-- New packages: `internal/channel/`, `internal/channel/slack/`, `internal/maintenance/`.
+**Phase 3b completed** (Channels + Task Decomposition + Maintenance):
+- Channel system: `Channel` interface (Kind, Start, Send, Incoming, Close), `IncomingMessage`/`OutgoingMessage`/`File` types. `Manager` with Register, Start, Broadcast, Incoming, Close — mutex-protected channel slice, buffered merged incoming channel (size 64), per-channel fan-in goroutines. `EventBridge` subscriber routes internal EventBus events to external channels with configurable event type filter and `FormatEvent` for human-readable markdown.
+- Channel config: global credentials in `~/.anthem/channels.yaml` (`ChannelsConfig` with optional `SlackCredentials`), per-project targets in WORKFLOW.md `channels:` block (`ChannelTargetConfig` with kind, target, events). `LoadCredentials` returns nil for missing file (channels are optional).
+- Slack adapter: Socket Mode via `github.com/slack-go/slack` (pure WebSocket, no HTTP server). Handles `EventsAPIEvent` message callbacks, filters by channel ID, ignores bot messages and subtypes. Downloads file attachments with Authorization header, 10MB cap. Outbound via `PostMessageContext` with thread support.
+- New contract actions: `ActionReply` (channel response, low risk, idempotent) requires body. `ActionRequestMaintenance` (maintenance proposal, medium risk) requires maintenance_type and reason, optional auto_approvable. Both added to allActionTypes, RiskForAction, ValidateAction, IsIdempotent.
+- `create_subtasks` implementation: removed from SchemaOnly. `CreateIssue(ctx, title, body, labels) (string, error)` added to `IssueTracker` interface, implemented in `GitHubTracker` (Issues.Create), `LocalJSONTracker` (append to JSON), and `MockTracker`. `executeActions` case creates issues for each SubtaskDef, records audit event.
+- HandleUserMessage on Orchestrator: fetches tasks, builds StateSnapshot with `UserMessageContext` (text + file contents as strings for text/JSON/YAML, `[image: name]` placeholders for images, `[file: name, type: mime]` for binary, 50KB truncation). Consults orchestrator agent, sends reply actions with thread ID via channel manager, executes non-reply actions. Error replies on failure. `StartChannelListener(ctx)` goroutine reads from channel manager's incoming.
+- Maintenance scanner: `Scanner` in `internal/maintenance/` queries audit log periodically (configurable `scan_interval_ms`). Four signal types: `repeated_failure` (>= failure_threshold in 24h), `stale_task` (dispatched > stale_threshold_hours with no completion), `budget_anomaly` (cost > cost_anomaly_multiplier * average), `drift` (completed then re-dispatched). AutoApprove per signal kind from config. Publishes `maintenance.suggested` events.
+- Extended orchestrator system prompt: added reply and request_maintenance action descriptions, Channel Messages section (intent understanding, feature decomposition, command execution, status queries, plan/maintenance approval), Multi-Format Input section (text, markdown, mermaid, ASCII, images, mixed).
+- Maintenance config: `MaintenanceConfig` with scan_interval_ms (default 600000), failure_threshold (default 3), stale_threshold_hours (default 24), cost_anomaly_multiplier (default 2.0), auto_approve list.
+- main.go wiring: loads channel credentials, creates Channel Manager, registers Slack adapters from config, starts channel manager + EventBridge + maintenance scanner + channel listener. All with graceful shutdown via deferred Close.
+- New files: `internal/channel/channel.go`, `internal/channel/manager.go`, `internal/channel/config.go`, `internal/channel/bridge.go`, `internal/channel/slack/adapter.go`, `internal/maintenance/scanner.go`, plus test files.
 - New dependency: `github.com/slack-go/slack`.
 
-**Phase 4**: Dashboard + status API + WebSocket streaming via EventBus, knowledge promotion (`promote_knowledge` action), DAG execution plans, WhatsApp channel adapter, example templates, CONTRIBUTING.md, GoReleaser cross-platform binaries, code signing, demo video.
+**Phase 4 (next)**: Dashboard + status API + WebSocket streaming via EventBus, knowledge promotion (`promote_knowledge` action), DAG execution plans, WhatsApp channel adapter, example templates, CONTRIBUTING.md, GoReleaser cross-platform binaries, code signing, demo video.
 
 Update this section as phases are completed.
 

@@ -120,6 +120,45 @@ func TestAddRemoveLabel(t *testing.T) {
 	}
 }
 
+func TestCreateIssuePersists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tasks.json")
+	seedFile(t, path, []types.Task{
+		{ID: "1", Title: "Existing", Status: types.StatusQueued},
+	})
+
+	tracker := New(path)
+	ctx := context.Background()
+
+	id, err := tracker.CreateIssue(ctx, "New subtask", "Do the thing", []string{"todo", "bug"})
+	if err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if id != "2" {
+		t.Errorf("ID = %q, want 2", id)
+	}
+
+	task, err := tracker.GetTask(ctx, "2")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if task == nil {
+		t.Fatal("expected created task to exist")
+	}
+	if task.Title != "New subtask" {
+		t.Errorf("Title = %q, want 'New subtask'", task.Title)
+	}
+	if task.Body != "Do the thing" {
+		t.Errorf("Body = %q, want 'Do the thing'", task.Body)
+	}
+	if len(task.Labels) != 2 || task.Labels[0] != "todo" || task.Labels[1] != "bug" {
+		t.Errorf("Labels = %v, want [todo bug]", task.Labels)
+	}
+	if task.Status != types.StatusQueued {
+		t.Errorf("Status = %q, want queued", task.Status)
+	}
+}
+
 func TestLoadMissingFileReturnsError(t *testing.T) {
 	tracker := New("/nonexistent/tasks.json")
 	_, err := tracker.ListActive(context.Background())

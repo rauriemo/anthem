@@ -215,3 +215,50 @@ func TestTick_OrchestratorFallback(t *testing.T) {
 		t.Error("expected fallback mechanical dispatch when orchestrator fails")
 	}
 }
+
+func TestExecuteActions_CreateSubtasks(t *testing.T) {
+	trk := tracker.NewMockTracker([]types.Task{
+		{ID: "1", Title: "Parent", Status: types.StatusQueued},
+	})
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       newNoopRunner(),
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	tasks := []types.Task{{ID: "1", Title: "Parent", Status: types.StatusQueued}}
+	actions := []Action{
+		{
+			Type: ActionCreateSubtasks,
+			Subtasks: []SubtaskDef{
+				{Title: "Subtask A", Body: "Do A", Labels: []string{"todo"}},
+				{Title: "Subtask B", Body: "Do B", Labels: []string{"todo", "bug"}},
+			},
+		},
+	}
+
+	orch.executeActions(context.Background(), tasks, actions)
+
+	// Original task + 2 subtasks = 3
+	if len(trk.Tasks) != 3 {
+		t.Fatalf("expected 3 tasks (1 original + 2 subtasks), got %d", len(trk.Tasks))
+	}
+	if trk.Tasks[1].Title != "Subtask A" {
+		t.Errorf("subtask 1 title = %q, want 'Subtask A'", trk.Tasks[1].Title)
+	}
+	if trk.Tasks[2].Title != "Subtask B" {
+		t.Errorf("subtask 2 title = %q, want 'Subtask B'", trk.Tasks[2].Title)
+	}
+	if len(trk.Tasks[2].Labels) != 2 {
+		t.Errorf("subtask 2 labels = %v, want [todo bug]", trk.Tasks[2].Labels)
+	}
+}

@@ -45,12 +45,18 @@ type EventSummary struct {
 	Timestamp string `json:"timestamp"`
 }
 
+type UserMessageContext struct {
+	Text  string   `json:"text"`
+	Files []string `json:"files,omitempty"`
+}
+
 type StateSnapshot struct {
-	Tasks        []TaskSummary  `json:"tasks"`
-	RetryQueue   []RetrySummary `json:"retry_queue,omitempty"`
-	Budget       BudgetSummary  `json:"budget"`
-	Wave         *WaveSummary   `json:"wave,omitempty"`
-	RecentEvents []EventSummary `json:"recent_events,omitempty"`
+	Tasks        []TaskSummary       `json:"tasks"`
+	RetryQueue   []RetrySummary      `json:"retry_queue,omitempty"`
+	Budget       BudgetSummary       `json:"budget"`
+	Wave         *WaveSummary        `json:"wave,omitempty"`
+	RecentEvents []EventSummary      `json:"recent_events,omitempty"`
+	UserMessage  *UserMessageContext `json:"user_message,omitempty"`
 }
 
 func (s StateSnapshot) Serialize() string {
@@ -104,8 +110,53 @@ Available action types:
 - update_voice: Propose a VOICE.md section update. Required: section_name, section_content.
 - request_approval: Flag a task for human review. Required: task_id.
 - close_wave: Mark the current wave as exhausted. No extra fields.
-- create_subtasks: (schema-only) Create subtasks. Required: subtasks list with title, body, labels.
-- promote_knowledge: (schema-only) Promote knowledge to repo. Required: summary.`)
+- create_subtasks: Create subtasks as new tracker issues. Required: subtasks list with title, body, labels.
+- promote_knowledge: (schema-only) Promote knowledge to repo. Required: summary.
+- reply: Send a message back to the user through the communication channel. Required: body.
+- request_maintenance: Propose a maintenance action (gc, lint, test, drift check). Required: maintenance_type, reason. Optional: auto_approvable (bool).`)
+
+	sections = append(sections, `## Channel Messages
+
+When a user message arrives through a channel (Slack, etc.), the state snapshot includes a "user_message" field with text and optional file contents. You must:
+
+1. Understand the user's intent from their message, which may be:
+   - A feature request (plain text, markdown, flowchart, mermaid diagram, or image)
+   - A command ("approve the plan", "cancel task X", "skip task Y")
+   - A question about project status
+   - Approval/rejection of a proposed plan or maintenance action
+
+2. For feature requests containing task descriptions:
+   - Decompose the feature into concrete, actionable subtasks
+   - Use create_subtasks with detailed titles and bodies for each subtask
+   - Include appropriate labels (e.g. "priority:high", "type:feature")
+   - Reply with a summary of the created tasks for user confirmation
+
+3. For commands:
+   - Execute the appropriate action (dispatch, skip, cancel, etc.)
+   - Reply confirming the action taken
+
+4. For status questions:
+   - Reply with a concise summary based on the current state snapshot
+
+5. For plan approval:
+   - When the user approves a proposed plan, dispatch the planned tasks
+   - When the user rejects or adjusts, update the plan accordingly and reply with changes
+
+6. For maintenance approval:
+   - When you receive maintenance signals, explain them clearly to the user
+   - Wait for explicit approval before dispatching maintenance tasks`)
+
+	sections = append(sections, `## Multi-Format Input
+
+Users may describe features in multiple formats. Handle all of these:
+- Plain text: direct feature description or command
+- Markdown files: structured specs with sections, acceptance criteria, etc.
+- Mermaid diagrams: flowcharts describing user flows or system architecture
+- ASCII diagrams: text-based diagrams of flows or architecture
+- Images: screenshots, whiteboard photos, flowchart images (described as [image: filename])
+- Mixed: message text combined with one or more attached files
+
+Always decompose complex features into small, independently executable tasks. Each task should be completable by a single executor agent session.`)
 
 	sections = append(sections, `## Wave Model
 

@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -92,6 +93,20 @@ func (m *MockTracker) RemoveLabel(_ context.Context, id string, label string) er
 		}
 	}
 	return nil
+}
+
+func (m *MockTracker) CreateIssue(_ context.Context, title string, body string, labels []string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := fmt.Sprintf("%d", len(m.Tasks)+1)
+	m.Tasks = append(m.Tasks, types.Task{
+		ID:     id,
+		Title:  title,
+		Body:   body,
+		Labels: labels,
+		Status: types.StatusQueued,
+	})
+	return id, nil
 }
 
 func (m *MockTracker) ShouldThrottle() (bool, time.Duration) {

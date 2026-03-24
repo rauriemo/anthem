@@ -14,5 +14,6 @@ type IssueTracker interface {
 	AddComment(ctx context.Context, id string, body string) error
 	AddLabel(ctx context.Context, id string, label string) error
 	RemoveLabel(ctx context.Context, id string, label string) error
+	CreateIssue(ctx context.Context, title string, body string, labels []string) (string, error)
 	ShouldThrottle() (bool, time.Duration)
 }

@@ -130,6 +130,29 @@ func (l *LocalJSONTracker) RemoveLabel(_ context.Context, id string, label strin
 	return nil
 }
 
+func (l *LocalJSONTracker) CreateIssue(_ context.Context, title string, body string, labels []string) (string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	tasks, err := l.load()
+	if err != nil {
+		return "", err
+	}
+	id := fmt.Sprintf("%d", len(tasks)+1)
+	task := types.Task{
+		ID:        id,
+		Title:     title,
+		Body:      body,
+		Labels:    labels,
+		Status:    types.StatusQueued,
+		CreatedAt: time.Now(),
+	}
+	tasks = append(tasks, task)
+	if err := l.save(tasks); err != nil {
+		return "", fmt.Errorf("saving new issue: %w", err)
+	}
+	return id, nil
+}
+
 func (l *LocalJSONTracker) ShouldThrottle() (bool, time.Duration) {
 	return false, 0
 }

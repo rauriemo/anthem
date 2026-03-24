@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -128,6 +129,36 @@ func TestValidateAction(t *testing.T) {
 			wantErr: true,
 			errMsg:  "promote_knowledge action requires summary",
 		},
+
+		// reply
+		{
+			name:   "reply valid",
+			action: Action{Type: ActionReply, Body: "here is the answer"},
+		},
+		{
+			name:    "reply missing body",
+			action:  Action{Type: ActionReply},
+			wantErr: true,
+			errMsg:  "reply action requires body",
+		},
+
+		// request_maintenance
+		{
+			name:   "request_maintenance valid",
+			action: Action{Type: ActionRequestMaintenance, MaintenanceType: "stale_tasks", Reason: "3 tasks queued over 24h"},
+		},
+		{
+			name:    "request_maintenance missing maintenance_type",
+			action:  Action{Type: ActionRequestMaintenance, Reason: "something"},
+			wantErr: true,
+			errMsg:  "request_maintenance action requires maintenance_type",
+		},
+		{
+			name:    "request_maintenance missing reason",
+			action:  Action{Type: ActionRequestMaintenance, MaintenanceType: "stale_tasks"},
+			wantErr: true,
+			errMsg:  "request_maintenance action requires reason",
+		},
 	}
 
 	for _, tt := range tests {
@@ -137,7 +168,7 @@ func TestValidateAction(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.errMsg)
 				}
-				if got := err.Error(); !contains(got, tt.errMsg) {
+				if got := err.Error(); !strings.Contains(got, tt.errMsg) {
 					t.Fatalf("error %q does not contain %q", got, tt.errMsg)
 				}
 			} else if err != nil {
@@ -152,7 +183,7 @@ func TestValidateAction_UnknownType(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unknown action type")
 	}
-	if got := err.Error(); !contains(got, "unknown action type") {
+	if got := err.Error(); !strings.Contains(got, "unknown action type") {
 		t.Fatalf("error %q does not mention unknown action type", got)
 	}
 }
@@ -162,7 +193,7 @@ func TestValidateAction_InvalidTaskID(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid task ID")
 	}
-	if got := err.Error(); !contains(got, "unknown task_id") {
+	if got := err.Error(); !strings.Contains(got, "unknown task_id") {
 		t.Fatalf("error %q does not mention unknown task_id", got)
 	}
 }
@@ -180,6 +211,8 @@ func TestRiskForAction(t *testing.T) {
 		{ActionCloseWave, RiskMedium},
 		{ActionCreateSubtasks, RiskMedium},
 		{ActionPromoteKnowledge, RiskMedium},
+		{ActionRequestMaintenance, RiskMedium},
+		{ActionReply, RiskLow},
 		{"unknown", RiskHigh},
 	}
 
@@ -203,8 +236,10 @@ func TestIsIdempotent(t *testing.T) {
 		{ActionUpdateVoice, true},
 		{ActionDispatch, false},
 		{ActionCloseWave, false},
+		{ActionReply, true},
 		{ActionCreateSubtasks, false},
 		{ActionPromoteKnowledge, false},
+		{ActionRequestMaintenance, false},
 	}
 
 	for _, tt := range tests {
@@ -221,14 +256,16 @@ func TestSchemaOnly(t *testing.T) {
 		action ActionType
 		want   bool
 	}{
-		{ActionCreateSubtasks, true},
 		{ActionPromoteKnowledge, true},
+		{ActionCreateSubtasks, false},
 		{ActionDispatch, false},
 		{ActionSkip, false},
 		{ActionComment, false},
 		{ActionUpdateVoice, false},
 		{ActionRequestApproval, false},
 		{ActionCloseWave, false},
+		{ActionReply, false},
+		{ActionRequestMaintenance, false},
 	}
 
 	for _, tt := range tests {
@@ -238,17 +275,4 @@ func TestSchemaOnly(t *testing.T) {
 			}
 		})
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
