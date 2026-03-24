@@ -28,7 +28,7 @@ These are the source of truth for what to build and how.
 - **WORKFLOW.md location**: Per-project, typically `./WORKFLOW.md` in repo root
 - **Global state root**: `~/.anthem/` for all global state (VOICE.md, constraints.yaml, state.json, voice-changelog.md). Resolves via `os.UserHomeDir()` on all platforms.
 - **GitHub auth**: `GITHUB_TOKEN` env var as primary, fallback to `gh auth token` CLI command. No custom credential storage -- no tokens in `~/.anthem/`.
-- **Dashboard**: Deferred to Phase 3b (tech choice TBD between HTMX and SPA)
+- **Dashboard**: Deferred to Phase 4 (tech choice TBD between HTMX and SPA)
 - **Voice changelog**: Log all VOICE.md changes with reasons to `~/.anthem/voice-changelog.md`. Wired in Phase 3a via the `update_voice` contract action.
 - **Testing**: Interface-based mocks (no mocking framework -- just simple structs satisfying interfaces), table-driven tests, `//go:build integration` tagged tests for external services, `testdata/` fixtures, CI from day 1
 - **Logging**: Use `log/slog` (Go stdlib) for structured logging
@@ -45,6 +45,9 @@ These are the source of truth for what to build and how.
 - **SQLite audit log (Phase 3a)**: `modernc.org/sqlite` (pure Go, no CGo) for the canonical audit log. Records dispatches, retries, cancellations, cost events, wave transitions, orchestrator actions, and voice updates.
 - **Wave model (Phase 3a)**: Orchestrator plans tasks in waves. Wave boundary = "current planned frontier exhausted" (all tasks terminal or non-runnable). Daemon detects exhaustion and prompts orchestrator to replan.
 - **Task lifecycle state machine (Phase 3a)**: Formalized states replacing the loose string enum: queued, planned, running, blocked, retryQueued, needsApproval, completed, failed, canceled, skipped. Explicit `Transition(from, to)` validation enforced by the daemon. `StatusToLabel()` / `LabelToStatus()` mapping layer between internal states and tracker labels. `Transition()` validates daemon-initiated changes only; external tracker changes (user moves kanban card) are reconciled directly.
+- **Modular channel system (Phase 3b)**: Two-way communication between orchestrator and user via pluggable channel adapters. `Channel` interface (`Kind`, `Start`, `Send`, `Incoming`, `Close`) mirrors the `IssueTracker` adapter pattern. Global credentials in `~/.anthem/channels.yaml`, per-project channel targets in WORKFLOW.md `channels:` block. Slack (Socket Mode) ships first; WhatsApp deferred to Phase 4 (needs dashboard HTTP server for webhooks).
+- **Multi-format task decomposition (Phase 3b)**: User sends feature descriptions through channels as plain text prompts, markdown files, mermaid flowcharts, diagrams, or images. The orchestrator agent decomposes into GitHub issues via the `create_subtasks` contract action. Claude's multimodal capabilities handle image-based inputs.
+- **Audit-log maintenance signals (Phase 3b)**: Periodic scanner queries `audit.db` for health signals (repeated failures, stale tasks, budget anomalies, drift). Notifies user via channel with approval gate. Configurable auto-approve per maintenance type in WORKFLOW.md `maintenance:` block.
 
 ## Coding Standards
 
@@ -94,7 +97,16 @@ These are the source of truth for what to build and how.
 - New files: `internal/orchestrator/contract.go`, `internal/orchestrator/orchagent.go`, `internal/orchestrator/integration_test.go`, `internal/orchestrator/voice_test.go`, `internal/audit/audit.go`, `internal/audit/schema.go`, `internal/audit/audit_test.go`.
 - New dependency: `modernc.org/sqlite`.
 
-**Phase 3b (next)**: Dashboard + status API + WebSocket, garbage collection from audit log, knowledge promotion to repo, DAG execution plans, drift detection, `require_plan` rule, task decomposition.
+**Phase 3b (next)** (Channels + Task Decomposition + Maintenance):
+- Two-way channel system: modular `Channel` interface, Channel Manager, EventBridge for outbound event notifications. Slack adapter via Socket Mode (no HTTP server needed).
+- Multi-format task decomposition: user sends prompts, markdown, flowcharts, or diagrams via channel; orchestrator decomposes into GitHub issues via `create_subtasks` (implements the currently schema-only action).
+- Audit-log maintenance signals: periodic scanner detects repeated failures, stale tasks, budget anomalies, drift; notifies user via channel with approval gate (configurable auto-approve per type).
+- `require_plan` folded into channel conversation flow (orchestrator proposes plan via reply, user approves, dispatch begins).
+- New contract actions: `ActionReply` (channel response), `ActionRequestMaintenance` (maintenance proposal with approval gate).
+- New packages: `internal/channel/`, `internal/channel/slack/`, `internal/maintenance/`.
+- New dependency: `github.com/slack-go/slack`.
+
+**Phase 4**: Dashboard + status API + WebSocket streaming via EventBus, knowledge promotion (`promote_knowledge` action), DAG execution plans, WhatsApp channel adapter, example templates, CONTRIBUTING.md, GoReleaser cross-platform binaries, code signing, demo video.
 
 Update this section as phases are completed.
 

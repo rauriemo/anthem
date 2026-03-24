@@ -10,7 +10,7 @@
 - **WORKFLOW.md location**: Per-project, typically `./WORKFLOW.md` in repo root
 - **Global state root**: `~/.anthem/` (VOICE.md, constraints.yaml, state.json, voice-changelog.md)
 - **GitHub auth**: `GITHUB_TOKEN` env var, fallback to `gh auth token` command. No custom credential storage.
-- **Dashboard**: Deferred to Phase 3b (tech choice TBD)
+- **Dashboard**: Deferred to Phase 4 (tech choice TBD)
 - **Voice changelog**: Changelog at `~/.anthem/voice-changelog.md`, wired in Phase 3a via `update_voice` contract action
 - **Testing**: Interface-based mocks (no mocking framework), table-driven tests, `//go:build integration` tagged tests for external services, `testdata/` fixtures, CI from day 1
 - **Logging**: Use `log/slog` (Go stdlib) for structured logging
@@ -71,9 +71,18 @@ anthem/
         process.go                   # ProcessManager interface (no build tags)
         process_windows.go           # //go:build windows -- Job Object implementation
         process_unix.go              # //go:build !windows -- Process group implementation
+    channel/
+      channel.go                     # Phase 3b: Channel interface, IncomingMessage, OutgoingMessage, File
+      manager.go                     # Phase 3b: Channel Manager (Register, Start, Broadcast, Incoming)
+      bridge.go                      # Phase 3b: EventBridge subscriber for outbound event routing
+      config.go                      # Phase 3b: channels.yaml loader
+      slack/
+        adapter.go                   # Phase 3b: Slack Socket Mode adapter
+    maintenance/
+      scanner.go                     # Phase 3b: audit-log health signal scanner
     dashboard/
-      server.go                      # HTTP server skeleton (Phase 3b)
-      api.go                         # REST API route definitions (Phase 3b)
+      server.go                      # HTTP server skeleton (Phase 4)
+      api.go                         # REST API route definitions (Phase 4)
     logging/
       logger.go                      # Structured JSON logger (slog wrapper)
     cost/
@@ -188,23 +197,30 @@ Intelligence layer built using orchestrator-as-allocator architecture. Daemon is
 8. **Voice self-evolution** (`orchestrator.go`) -- executeUpdateVoice: voice.LoadFile -> voice.Merge -> write -> voice.AppendChangelog -> audit event. Updates in-memory voiceContent on Orchestrator and OrchestratorAgent via SetVoiceContent.
 9. **Documentation** -- CLAUDE.md, architecture.md, implementation.md, README.md all updated.
 
-### Phase 3b: Dashboard + Advanced Features
+### Phase 3b: Channels + Task Decomposition + Maintenance
 
-1. Garbage collection from audit log (repeated failures, doc staleness, architecture violations)
-2. Knowledge promotion to `docs/exec-plans/completed/`
-3. Plans as DAG artifacts with dependency edges
-4. Dashboard + status API + WebSocket streaming via EventBus
-5. `require_plan` rule with pause/resume flow
-6. Drift detection from audit log queries
-7. Task decomposition (user describes feature, orchestrator breaks into subtasks)
+1. Channel interface + Manager -- define `Channel` (Kind, Start, Send, Incoming, Close), `IncomingMessage`, `OutgoingMessage`, `File` types. Implement Channel Manager with Register, Start, Broadcast, Incoming, Close
+2. Channel config -- `~/.anthem/channels.yaml` loader for global credentials, `channels:` block in WORKFLOW.md for per-project targets + event filters
+3. EventBridge -- subscriber that routes EventBus events to channels, configurable event type filter, EventFormatter for human-readable messages
+4. New contract actions -- `ActionReply` (channel response, low risk, idempotent), `ActionRequestMaintenance` (maintenance proposal with approval gate, medium risk). Wire into `executeActions`
+5. Slack adapter -- Socket Mode via `github.com/slack-go/slack`, inbound text + file handling (md, txt, images), outbound markdown messages
+6. `create_subtasks` implementation -- implement the currently schema-only action to create GitHub issues via tracker. Add `CreateIssue` to `IssueTracker` interface
+7. HandleUserMessage -- new orchestrator method for inbound channel messages. Builds state snapshot with user message + file contents, consults orchestrator agent, executes actions, routes replies back through Channel Manager
+8. Audit-log maintenance scanner -- periodic queries on `audit.db` for repeated failures (3+ retries), stale tasks (queued/planned > N hours), budget anomalies (2x avg cost), drift (re-opened completed tasks). Emits `maintenance.suggested` events. WORKFLOW.md `maintenance:` config block with scan_interval_ms, auto_approve list, failure_threshold, stale_threshold_hours, cost_anomaly_multiplier
+9. Orchestrator agent prompt -- extend system prompt for channel messages, multi-format input understanding (prompts, markdown, flowcharts, diagrams, images), reply actions, task decomposition, maintenance approval
+10. main.go wiring -- Channel Manager, Slack adapter, EventBridge, maintenance scanner, graceful channel shutdown
+11. Documentation -- update CLAUDE.md, architecture.md, implementation.md, README.md
 
-### Phase 4: Polish + Community
+### Phase 4: Dashboard + Polish + Community
 
-1. Example WORKFLOW.md + VOICE.md templates
-2. README, CONTRIBUTING.md
-3. CI/CD pipeline, cross-platform release binaries via GoReleaser (Windows/macOS/Linux)
-4. Code sign Windows release binaries in GitHub Actions (SignPath.io -- free for OSS, or Azure Trusted Signing)
-5. Demo video
+1. Dashboard + status API + WebSocket streaming via EventBus (embedded HTTP server)
+2. Knowledge promotion -- `promote_knowledge` action implementation, write execution summaries to `docs/exec-plans/completed/`
+3. Plans as first-class DAG artifacts with dependency edges
+4. WhatsApp channel adapter (uses dashboard HTTP server for inbound webhooks)
+5. Example WORKFLOW.md + VOICE.md templates
+6. CONTRIBUTING.md
+7. Cross-platform release binaries via GoReleaser (Windows/macOS/Linux), Windows code signing (SignPath.io or Azure Trusted Signing)
+8. Demo video
 
 ### Future Enhancements (Post Phase 4)
 
@@ -226,6 +242,9 @@ Added in Phase 2:
 
 Added in Phase 3a:
 - `modernc.org/sqlite` -- Pure Go SQLite for canonical audit log (no CGo, cross-platform)
+
+Added in Phase 3b:
+- `github.com/slack-go/slack` -- Slack API client with Socket Mode support for two-way channel communication
 
 ## Testing Strategy
 

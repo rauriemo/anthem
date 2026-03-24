@@ -12,7 +12,7 @@ An open-source alternative to OpenAI Symphony, built in Go, designed for Claude 
 - **WORKFLOW.md location**: Per-project, typically `./WORKFLOW.md` in repo root
 - **Global state root**: `~/.anthem/` (VOICE.md, constraints.yaml, state.json, voice-changelog.md)
 - **GitHub auth**: `GITHUB_TOKEN` env var, fallback to `gh auth token` command. No custom credential storage.
-- **Dashboard**: Deferred to Phase 3b (tech choice TBD between HTMX and SPA)
+- **Dashboard**: Deferred to Phase 4 (tech choice TBD between HTMX and SPA)
 - **Voice changelog**: Changelog file at `~/.anthem/voice-changelog.md`, wired in Phase 3a via the `update_voice` contract action
 - **Testing**: Interface-based mocks (no mocking framework), table-driven tests, `//go:build integration` tagged tests for external services, `testdata/` fixtures, CI from day 1
 - **Logging**: Use `log/slog` (stdlib) for structured logging
@@ -22,6 +22,9 @@ An open-source alternative to OpenAI Symphony, built in Go, designed for Claude 
 - **SQLite audit log (Phase 3a)**: `modernc.org/sqlite` (pure Go, no CGo). Records dispatches, retries, cancellations, cost events, wave transitions, orchestrator actions, voice updates.
 - **Wave model (Phase 3a)**: Orchestrator plans tasks in waves. Wave boundary = current planned frontier exhausted (all tasks terminal or non-runnable). Daemon detects exhaustion, prompts orchestrator to replan.
 - **Task lifecycle state machine (Phase 3a)**: Formalized states: queued, planned, running, blocked, retryQueued, needsApproval, completed, failed, canceled, skipped. Explicit `Transition(from, to)` validation enforced by daemon. `StatusToLabel()` / `LabelToStatus()` mapping between internal states and tracker labels.
+- **Modular channel system (Phase 3b)**: Two-way communication between orchestrator agent and user via pluggable channel adapters. `Channel` interface (`Kind`, `Start`, `Send`, `Incoming`, `Close`) mirrors the `IssueTracker` adapter pattern. Global credentials in `~/.anthem/channels.yaml`, per-project channel targets in WORKFLOW.md `channels:` block. One conversation per project (chat history scoped to repo). Slack (Socket Mode) ships first; WhatsApp deferred to Phase 4 (needs HTTP server for webhooks).
+- **Multi-format task decomposition (Phase 3b)**: User sends feature descriptions through channels as plain text prompts, markdown files, mermaid flowcharts, diagrams, or images. The orchestrator agent decomposes into GitHub issues via the `create_subtasks` contract action. Claude's multimodal capabilities handle image-based inputs.
+- **Audit-log maintenance signals (Phase 3b)**: Periodic scanner queries `audit.db` for health signals (repeated failures, stale tasks, budget anomalies, drift). Notifies user via channel with approval gate. Configurable auto-approve per maintenance type in WORKFLOW.md `maintenance:` block.
 
 ## Architecture Overview
 
@@ -741,21 +744,31 @@ All 9 steps completed:
 8. **Voice self-evolution** -- update_voice action triggers voice.Merge + changelog + audit event. Updates in-memory voiceContent on Orchestrator and OrchestratorAgent.
 9. **Documentation** -- all docs updated to reflect Phase 3a completion.
 
-### Phase 3b: Dashboard + Advanced Features
+### Phase 3b: Channels + Task Decomposition + Maintenance
 
-Harness multipliers built on Phase 3a's foundation:
+Two-way communication between the orchestrator agent and the user, plus audit-driven maintenance:
 
-1. Garbage collection -- drift signals from audit log (repeated failures, doc staleness), generating maintenance tasks
-2. Knowledge promotion -- write execution summaries to `docs/exec-plans/completed/` as repo-resident reasoning memory
+1. **Channel system** -- modular `Channel` interface (Kind, Start, Send, Incoming, Close), Channel Manager (Register, Start, Broadcast, Incoming, Close), EventBridge subscriber for outbound event-to-channel routing with configurable event filters and EventFormatter
+2. **Slack adapter** -- Socket Mode (pure WebSocket, no HTTP server). Inbound message + file handling, outbound markdown messages. Scopes: `chat:write`, `channels:history`, `channels:read`, `files:read`, `app_mentions:read`
+3. **Multi-format task decomposition** -- user sends feature descriptions through channels as prompts, markdown, flowcharts, mermaid diagrams, or images. Orchestrator decomposes into GitHub issues via `create_subtasks` (implements the currently schema-only action). `CreateIssue` added to `IssueTracker` interface
+4. **Audit-log maintenance scanner** -- periodic queries on `audit.db` for repeated failures (3+ retries), stale tasks (queued/planned > N hours), budget anomalies (2x avg cost), drift (re-opened completed tasks). Emits `maintenance.suggested` events, routed to channels with user approval gate. Configurable auto-approve per maintenance type
+5. **`require_plan` via channel conversation** -- orchestrator proposes plan via `ActionReply`, user approves or adjusts through channel, then dispatch begins. No separate rule mechanism needed
+6. **New contract actions** -- `ActionReply` (channel response to user, low risk, idempotent), `ActionRequestMaintenance` (maintenance proposal with approval gate, medium risk)
+7. **Configuration** -- global credentials in `~/.anthem/channels.yaml`, per-project channel targets + event filters in WORKFLOW.md `channels:` block, maintenance thresholds in WORKFLOW.md `maintenance:` block
+8. **Orchestrator integration** -- `HandleUserMessage` method on Orchestrator for inbound channel messages, extended system prompt for multi-format understanding and reply actions
+9. **New packages**: `internal/channel/` (interface, manager, bridge, config), `internal/channel/slack/` (adapter), `internal/maintenance/` (scanner)
+10. **New dependency**: `github.com/slack-go/slack`
+
+### Phase 4: Dashboard + Polish + Community
+
+1. Dashboard + status API + WebSocket streaming via EventBus (embedded HTTP server)
+2. Knowledge promotion -- `promote_knowledge` action implementation, write execution summaries to `docs/exec-plans/completed/`
 3. Plans as first-class DAG artifacts with dependency edges
-4. Dashboard + status API + WebSocket streaming via EventBus
-5. `require_plan` rule -- orchestrator produces plan, pauses for human approval
-6. Drift detection -- scheduled queries against audit log
-7. Task decomposition -- user describes feature, orchestrator breaks into subtasks
-
-### Phase 4: Polish + Community
-
-Example workflows and VOICE.md templates, comprehensive README, CONTRIBUTING.md, CI/CD pipeline, cross-platform release binaries via GoReleaser (Windows/macOS/Linux), code signing for Windows (SignPath.io or Azure Trusted Signing), and demo video.
+4. WhatsApp channel adapter (uses dashboard HTTP server for inbound webhooks)
+5. Example WORKFLOW.md + VOICE.md templates
+6. CONTRIBUTING.md
+7. Cross-platform release binaries via GoReleaser (Windows/macOS/Linux), code signing for Windows (SignPath.io or Azure Trusted Signing)
+8. Demo video
 
 ## Future Enhancements (Post Phase 4)
 

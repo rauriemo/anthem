@@ -350,8 +350,8 @@ See [docs/plans/architecture.md](docs/plans/architecture.md) for the full system
 **Phase 3a** (complete): Contract-first tool surface (8 action types with risk classification and validation), SQLite audit log, formalized task lifecycle state machine (10 states), orchestrator agent session manager (Start/Consult/Refresh with repair loop), wave-aware tick loop with dirty-snapshot gating and mechanical fallback, voice self-evolution wiring, driver permission fixes.
 
 Upcoming:
-- **Phase 3b**: Web dashboard + status API + WebSocket, garbage collection from audit log, knowledge promotion to repo, DAG execution plans, drift detection, task decomposition
-- **Phase 4**: Example templates, CONTRIBUTING.md, cross-platform release binaries via GoReleaser, code signing
+- **Phase 3b**: Two-way channel system (Slack first, WhatsApp in Phase 4), multi-format task decomposition (user sends prompts/markdown/flowcharts/diagrams via Slack, orchestrator decomposes into GitHub issues), audit-log maintenance signals with user approval gate, `require_plan` via channel conversation flow
+- **Phase 4**: Web dashboard + status API + WebSocket, knowledge promotion to repo, DAG execution plans, WhatsApp adapter, example templates, CONTRIBUTING.md, GoReleaser cross-platform binaries, code signing
 
 ## License
 
