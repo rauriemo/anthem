@@ -4,11 +4,11 @@
 [![Go](https://img.shields.io/badge/Go-1.26.1+-00ADD8?logo=go)](https://go.dev/dl/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Anthem** is a hybrid orchestrator for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that turns labeled GitHub issues into isolated workspaces and runs coding agents with guardrails.
+**Anthem** is an agentic loop orchestrator for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It runs two layers: an **intelligence layer** (an AI orchestrator that plans, decomposes features, and communicates in your chosen voice) and a **harness layer** (headless Claude Code workers that execute tasks inside isolated workspaces with constraints and guardrails).
 
-Think "conductor + metronome": Anthem's Go daemon handles reliability (polling, processes, retries, state), while an optional AI orchestrator plans work in waves and communicates in your chosen voice.
+Describe a feature -- by voice, Slack message, or GitHub issue -- and Anthem breaks it into tasks, dispatches concurrent coding agents, tracks cost and progress, retries failures, and closes issues when done. The orchestrator makes the decisions; the daemon enforces the rules.
 
-[Design docs](docs/plans/architecture.md) | [Build plan](docs/plans/implementation.md) | [WORKFLOW.md schema](#configuration-reference)
+[Design docs](docs/plans/architecture.md) | [Build plan](docs/plans/implementation.md) | [WORKFLOW.md schema](#configuration-reference) | [Dispatch](https://github.com/rauriemo/dispatch) (voice-first client)
 
 > **Safety note:** Anthem runs a coding agent that can edit files and execute commands. Start in a trusted repo, keep `permission_mode: dontAsk` (the default) until you're comfortable, and use [constraints](#constraints) to define non-negotiables. See the [safety model](#permission-model) below.
 
@@ -57,24 +57,25 @@ Press `Ctrl+C` to stop. Anthem drains active agents (up to 10s), releases all cl
 
 ```mermaid
 flowchart LR
-  U["You\n(Slack / GitHub)"] -->|describe feature| OA["Orchestrator agent\n(Claude + VOICE.md)"]
+  U["You\n(Voice / Slack / GitHub)"] -->|describe feature| OA["Orchestrator agent\n(Claude + VOICE.md)"]
   OA -->|create issues| GH["GitHub Issues"]
   GH -->|poll| D["Anthem daemon\n(Go)"]
   D -->|dispatch| W[Workspace per task]
-  W -->|run| EA["Executor agent\n(Claude Code)"]
+  W -->|run| EA["Executor agents\n(Claude Code)"]
   EA -->|"result + cost"| D
   D -->|"label + close"| GH
   D -->|events| AUD["audit.db"]
+  D -->|notifications| U
 ```
 
-1. You describe a feature or goal -- via Slack message or by creating a GitHub issue with a label (e.g. `todo`)
-2. The orchestrator agent decomposes it into tasks, creates GitHub issues, and plans dispatch in waves
+1. You describe a feature or goal -- by voice command, Slack message, or GitHub issue with a label (e.g. `todo`)
+2. The orchestrator agent (intelligence layer) decomposes it into tasks, creates GitHub issues, and plans dispatch in waves
 3. Anthem's Go daemon polls for labeled issues, builds a state snapshot, and validates the orchestrator's proposed actions against a typed contract
-4. For each dispatched task: create an isolated workspace, run hooks, render the prompt with constraints, spawn Claude Code
+4. For each dispatched task: create an isolated workspace, run hooks, render the prompt with constraints, spawn a headless Claude Code worker (harness layer)
 5. Claude Code runs autonomously. Anthem streams output, tracks cost, and detects stalls
 6. On success: labels updated, issue closed, retry state cleared
 7. On failure: exponential backoff, retry comment posted
-8. Everything is recorded in the SQLite audit log
+8. Everything is recorded in the SQLite audit log. Events pushed to connected channels (voice, Slack)
 
 If the orchestrator is disabled or fails, Anthem falls back to mechanical dispatch -- every eligible issue gets dispatched directly.
 
@@ -117,8 +118,9 @@ On Windows, if Smart App Control blocks `go run`, build and run the binary direc
 
 - **GitHub issue-driven**: poll by label, claim, dispatch, update status, close on completion
 - **AI orchestrator agent**: persistent Claude session that plans dispatch in waves, proposes actions via a validated contract, falls back to mechanical dispatch on failure
+- **Voice commands via [Dispatch](https://github.com/rauriemo/dispatch)**: say "hey anthem, build a login page" -- the orchestrator decomposes and dispatches, responds aloud
 - **Two-way Slack integration**: send feature requests, commands, and approvals; orchestrator decomposes into subtasks and replies in-thread
-- **Multi-format input**: plain text, markdown specs, mermaid diagrams, or images via Slack -- decomposed into GitHub issues
+- **Multi-format input**: plain text, markdown specs, mermaid diagrams, or images -- decomposed into GitHub issues
 - **Concurrent agents**: configurable global and per-label concurrency
 - **Rules engine**: label/title matching, approval gates, auto-assign, budget caps
 - **Two-tier constraints**: user-level + project-level safety rules injected into every prompt, protected by a meta-constraint agents cannot remove
@@ -234,26 +236,50 @@ orchestrator:
 
 When enabled, the orchestrator agent (a persistent Claude session) plans task dispatch in waves. When disabled or on failure, Anthem falls back to mechanical dispatch.
 
-### Channels (Slack)
+### Channels
 
-Two-way communication with the orchestrator. Global credentials in `~/.anthem/channels.yaml`:
+Two-way communication with the orchestrator via pluggable channel adapters. Global credentials live in `~/.anthem/channels.yaml`; per-project channel targets go in WORKFLOW.md.
 
+#### Dispatch (voice)
+
+[Dispatch](https://github.com/rauriemo/dispatch) is a voice-first command channel that connects to Anthem over WebSocket. Say "hey anthem" followed by a command -- the orchestrator processes it and speaks the response aloud.
+
+Anthem acts as the server; Dispatch connects in and authenticates with a shared token.
+
+`~/.anthem/channels.yaml`:
+```yaml
+dispatch:
+  token: "your-shared-secret"
+```
+
+WORKFLOW.md:
+```yaml
+channels:
+  - kind: dispatch
+    target: "localhost:8081"     # Address Anthem listens on
+    events: [task.completed, task.failed, maintenance.suggested]
+```
+
+#### Slack
+
+`~/.anthem/channels.yaml`:
 ```yaml
 slack:
   bot_token: "xoxb-your-bot-token"
   app_token: "xapp-your-app-token"
 ```
 
-Per-project targets in WORKFLOW.md:
-
+WORKFLOW.md:
 ```yaml
 channels:
   - kind: slack
-    target: "C0123456789"
-    events: ["task.completed", "task.failed", "maintenance.suggested"]
+    target: "C0123456789"       # Channel ID
+    events: [task.completed, task.failed, maintenance.suggested]
 ```
 
-Requires a Slack app with Socket Mode enabled, `message.channels` event subscription, and bot scopes: `channels:history`, `channels:read`, `chat:write`, `files:read`. Run `anthem init` to generate a `channels.yaml` template with setup instructions.
+Requires a Slack app with Socket Mode enabled, `message.channels` event subscription, and bot scopes: `channels:history`, `channels:read`, `chat:write`, `files:read`.
+
+Run `anthem init` to generate a `channels.yaml` template with setup instructions for both adapters.
 
 ### Maintenance
 
@@ -330,7 +356,7 @@ The orchestrator evolves VOICE.md via the `update_voice` action as it learns pre
 |------|---------|
 | `~/.anthem/VOICE.md` | Orchestrator personality |
 | `~/.anthem/constraints.yaml` | User-level safety rules |
-| `~/.anthem/channels.yaml` | Channel credentials (Slack tokens) |
+| `~/.anthem/channels.yaml` | Channel credentials (Slack tokens, Dispatch shared secret) |
 | `~/.anthem/state.json` | Persisted retry queue and cost data |
 | `~/.anthem/audit.db` | SQLite audit log |
 | `~/.anthem/voice-changelog.md` | Log of VOICE.md changes |
@@ -346,6 +372,7 @@ The orchestrator evolves VOICE.md via the `update_voice` action as it learns pre
 | Agent can't run a command | Add the command pattern to `allowed_tools` in WORKFLOW.md |
 | GitHub auth fails | Check `gh auth status` or verify `GITHUB_TOKEN` has `repo` scope |
 | Slack not connecting | Verify Socket Mode is enabled on your Slack app and `app_token` starts with `xapp-` |
+| Dispatch not connecting | Check that Anthem is running first (it's the server), tokens match in both `channels.yaml` files, and the `target` address/port is reachable |
 
 ## Architecture
 
@@ -353,7 +380,7 @@ Anthem uses a **hybrid architecture** inspired by [OpenAI Symphony](https://gith
 
 - **Go daemon** (Phases 1-2): polling, process management, workspace isolation, retry, state persistence, config hot-reload. Validates and executes actions -- never makes judgment calls.
 - **Orchestrator agent** (Phase 3a): a stateless allocator -- a Claude session with VOICE.md that receives state snapshots (including the project file tree and key docs) and proposes actions. If it fails, the daemon falls back to mechanical dispatch.
-- **Channel system** (Phase 3b): two-way communication via pluggable adapters (Slack shipped). Users send feature requests; orchestrator decomposes into subtasks.
+- **Channel system** (Phase 3b): two-way communication via pluggable adapters (Slack and [Dispatch](https://github.com/rauriemo/dispatch) voice channel shipped). Users send feature requests by text or voice; orchestrator decomposes into subtasks.
 - **Executor agents**: headless Claude Code workers. They get WORKFLOW.md templates and constraints -- harnesses, not personality.
 - **Audit log + maintenance**: append-only SQLite at `~/.anthem/audit.db`. Scanner detects health signals and notifies via channels.
 
@@ -366,8 +393,8 @@ See [architecture.md](docs/plans/architecture.md) for the full system design wit
 | **1** | Complete | Core loop, GitHub tracker, Claude Code driver, CLI, ETag caching, constraints |
 | **2** | Complete | Rules engine, workspace manager, retry/backoff, shutdown, state persistence, hot-reload |
 | **3a** | Complete | Contract actions (10 types), SQLite audit, task state machine, orchestrator agent, wave dispatch |
-| **3b** | Complete | Slack channels, task decomposition, maintenance scanner, project context for orchestrator |
-| **4** | Next | Dashboard, knowledge promotion, DAG plans, WhatsApp, GoReleaser binaries |
+| **3b** | Complete | Slack + Dispatch (voice) channels, task decomposition, maintenance scanner, project context for orchestrator |
+| **4** | Next | Dashboard, knowledge promotion, DAG plans, GoReleaser binaries |
 
 ## Development
 
