@@ -89,24 +89,31 @@ func TestHandleUserMessage_ConsultsAndReplies(t *testing.T) {
 	})
 
 	sent := ch.sentMessages()
-	if len(sent) == 0 {
-		t.Fatal("expected at least one reply message")
+	if len(sent) < 2 {
+		t.Fatalf("expected at least 2 messages (ack + reply), got %d: %+v", len(sent), sent)
 	}
 
+	// First message should be the immediate acknowledgment with ThreadID.
+	ack := sent[0]
+	if ack.ThreadID != "thread-123" {
+		t.Errorf("ack ThreadID = %q, want thread-123", ack.ThreadID)
+	}
+	if ack.Text != "Let me think about that..." {
+		t.Errorf("ack Text = %q, want 'Let me think about that...'", ack.Text)
+	}
+
+	// The real reply arrives as a follow-up event (no ThreadID).
 	found := false
-	for _, msg := range sent {
+	for _, msg := range sent[1:] {
 		if msg.Text == "There is 1 task queued." {
 			found = true
-			if msg.ThreadID != "thread-123" {
-				t.Errorf("ThreadID = %q, want thread-123", msg.ThreadID)
-			}
-			if !msg.Markdown {
-				t.Error("expected Markdown = true")
+			if msg.EventType != "channel.followup" {
+				t.Errorf("reply EventType = %q, want channel.followup", msg.EventType)
 			}
 		}
 	}
 	if !found {
-		t.Errorf("expected reply 'There is 1 task queued.' in sent messages: %+v", sent)
+		t.Errorf("expected follow-up reply 'There is 1 task queued.' in sent messages: %+v", sent)
 	}
 }
 

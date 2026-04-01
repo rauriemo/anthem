@@ -1049,10 +1049,18 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		"file_count", len(msg.Files),
 	)
 
+	// Send immediate acknowledgment so the caller doesn't time out waiting for Claude.
+	if o.channelMgr != nil {
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			Text:     "Let me think about that...",
+			ThreadID: msg.ThreadID,
+		})
+	}
+
 	tasks, err := o.tracker.ListActive(ctx)
 	if err != nil {
 		o.logger.Error("failed to fetch tasks for user message", "error", err)
-		o.sendErrorReply(ctx, msg.ThreadID, "Failed to fetch current tasks.")
+		o.sendFollowUp(ctx, msg, "Failed to fetch current tasks.")
 		return
 	}
 
@@ -1060,33 +1068,28 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	snap.UserMessage = buildUserMessageContext(msg)
 
 	if o.orchAgent == nil {
-		o.sendErrorReply(ctx, msg.ThreadID, "Orchestrator agent is not enabled.")
+		o.sendFollowUp(ctx, msg, "Orchestrator agent is not enabled.")
 		return
 	}
+
+	o.logger.Debug("consulting orchestrator agent for user message")
 
 	actions, err := o.orchAgent.ConsultWithRepair(ctx, snap)
 	if err != nil {
 		o.logger.Warn("orchestrator consultation failed for user message", "error", err)
-		o.sendErrorReply(ctx, msg.ThreadID, "I couldn't process your message. The orchestrator encountered an error.")
+		o.sendFollowUp(ctx, msg, "I couldn't process your message. The orchestrator encountered an error.")
 		return
 	}
 
 	if actions == nil {
-		o.sendErrorReply(ctx, msg.ThreadID, "I couldn't understand your request. Please try again.")
+		o.sendFollowUp(ctx, msg, "I couldn't understand your request. Please try again.")
 		return
 	}
 
-	// Execute actions, using thread ID for any replies
+	// Execute actions -- replies are sent as follow-up notifications
 	for i := range actions {
 		if actions[i].Type == ActionReply && o.channelMgr != nil {
-			replyMsg := channel.OutgoingMessage{
-				Text:     actions[i].Body,
-				ThreadID: msg.ThreadID,
-				Markdown: true,
-			}
-			if err := o.channelMgr.Broadcast(ctx, replyMsg); err != nil {
-				o.logger.Warn("failed to send channel reply", "error", err)
-			}
+			o.sendFollowUp(ctx, msg, actions[i].Body)
 			o.recordAudit(ctx, "channel.reply_sent", "", strPtr("reply"))
 		}
 	}
@@ -1103,14 +1106,16 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	o.recordAudit(ctx, "channel.user_message", "", strPtr("handle_user_message"))
 }
 
-func (o *Orchestrator) sendErrorReply(ctx context.Context, threadID string, text string) {
+// sendFollowUp sends a follow-up message after the initial acknowledgment.
+// It uses an event frame (no ThreadID) so the channel delivers it as a
+// push notification rather than trying to correlate with the original request.
+func (o *Orchestrator) sendFollowUp(ctx context.Context, original channel.IncomingMessage, text string) {
 	if o.channelMgr == nil {
 		return
 	}
 	_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
-		Text:     text,
-		ThreadID: threadID,
-		Markdown: false,
+		Text:      text,
+		EventType: "channel.followup",
 	})
 }
 
