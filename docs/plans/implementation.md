@@ -78,6 +78,8 @@ anthem/
       config.go                      # Phase 3b: channels.yaml loader
       slack/
         adapter.go                   # Phase 3b: Slack Socket Mode adapter
+      dispatch/
+        adapter.go                   # Post-3b: Dispatch WebSocket server adapter
     maintenance/
       scanner.go                     # Phase 3b: audit-log health signal scanner
     dashboard/
@@ -213,6 +215,16 @@ All 11 steps completed:
 10. **main.go wiring** (`cmd/anthem/main.go`) -- channel credentials, Channel Manager, Slack adapter registration, EventBridge, maintenance scanner, StartChannelListener. All with deferred Close.
 11. **Documentation** -- all four docs updated.
 12. **Project context enrichment** -- `ProjectContext` struct added to `StateSnapshot` with `file_tree`, `architecture`, `implementation`, `project_summary`. `loadProjectContext()` called at startup and on hot-reload. `generateFileTree()` walks workspace root (depth 6, excluded dirs/files, 8KB cap). Doc files read from project root with 8KB truncation. Static between ticks (excluded from `snapshotHash`). System prompt updated with `## Project Context` section. Tests in `context_test.go`.
+13. **Dispatch adapter** (`internal/channel/dispatch/adapter.go`) -- WebSocket server adapter for [Dispatch](https://github.com/rauriemo/dispatch) voice-first command channel. Implementation steps:
+    - Add `EventType string` field to `OutgoingMessage` in `channel.go`. Set it from `ev.Type` in EventBridge's `run()`. Slack adapter ignores it (harmless).
+    - Add `DispatchCredentials` struct (with `Token string`) to `config.go`. Add `Dispatch *DispatchCredentials` field to `ChannelsConfig`.
+    - Implement adapter: `Kind()` returns `"dispatch"`. `Start(ctx)` launches `net/http` server with WebSocket upgrade handler on configured listen address. `Send(ctx, msg)` routes by ThreadID: if set, find connection owning that thread and send `{"type":"res","id":"<ThreadID>","text":"..."}` frame; if empty, broadcast `{"type":"event","event":"<EventType>","text":"..."}` to all. `Incoming()` returns buffered channel (size 64). `Close()` shuts down HTTP server and closes all connections.
+    - Connection lifecycle: upgrade -> first frame must be `{"type":"auth","token":"...","client":"..."}` validated against configured token -> `{"type":"auth_ok"}` -> add to `conns` map -> read loop parses `{"type":"req","id":"...","text":"..."}` frames into `IncomingMessage{ChannelKind:"dispatch", SenderID:"dispatch", ThreadID:id}` -> register `id -> conn` in threads map -> cleanup both maps on disconnect.
+    - Wire in `main.go`: add `case "dispatch":` in channel registration loop, check `channelCreds.Dispatch`, create and register adapter.
+    - Update `~/.anthem/channels.yaml` template and scaffold to include `dispatch:` section.
+    - Tests: auth success/failure, request-response correlation, event broadcast to multiple clients, connection cleanup, concurrent connections. Use `net/http/httptest` + `gorilla/websocket.Dialer`.
+    - Dispatch client reference: `github.com/rauriemo/dispatch/dispatch/agents/anthem.py` -- auth timeout 10s, send timeout 120s, auto-reconnect with exponential backoff (1s to 30s), multiple concurrent requests with unique UUIDs.
+    - New dependency: `github.com/gorilla/websocket` (promoted from indirect to direct).
 
 ### Phase 4: Dashboard + Polish + Community
 
@@ -248,6 +260,7 @@ Added in Phase 3a:
 
 Added in Phase 3b:
 - `github.com/slack-go/slack` -- Slack API client with Socket Mode support for two-way channel communication
+- `github.com/gorilla/websocket` -- WebSocket server for Dispatch voice channel adapter (promoted from indirect)
 
 ## Testing Strategy
 

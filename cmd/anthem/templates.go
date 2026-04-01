@@ -91,6 +91,20 @@ const defaultChannels = `# Slack credentials for Anthem channel integration.
 slack:
   bot_token: ""
   app_token: ""
+
+# Dispatch credentials for voice-first command channel.
+# Anthem listens as a WebSocket server; Dispatch connects in.
+#
+# Set a shared secret token. Dispatch clients authenticate with this token.
+#
+# Then add a channels: block to your project WORKFLOW.md:
+#   channels:
+#     - kind: dispatch
+#       target: "localhost:8081"   # Address for Anthem to listen on
+#       events: [task.completed, task.failed, maintenance.suggested]
+
+dispatch:
+  token: ""
 `
 
 const defaultConstraints = `constraints:

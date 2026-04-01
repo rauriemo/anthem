@@ -45,6 +45,12 @@ channels:
       - task.budget_exceeded
       - maintenance.suggested
       - wave.completed
+  - kind: dispatch
+    target: "localhost:8081"
+    events:
+      - task.completed
+      - task.failed
+      - maintenance.suggested
 
 server:
   port: 8080

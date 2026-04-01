@@ -9,7 +9,12 @@ import (
 )
 
 type ChannelsConfig struct {
-	Slack *SlackCredentials `yaml:"slack,omitempty"`
+	Slack    *SlackCredentials    `yaml:"slack,omitempty"`
+	Dispatch *DispatchCredentials `yaml:"dispatch,omitempty"`
+}
+
+type DispatchCredentials struct {
+	Token string `yaml:"token"`
 }
 
 type SlackCredentials struct {

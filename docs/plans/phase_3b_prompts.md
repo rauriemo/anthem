@@ -1,4 +1,4 @@
-# Phase 3b Execution Prompts
+ # Phase 3b Execution Prompts
 
 These are self-contained prompts for Claude Code CLI, one per implementation step. Run them in order (1 through 11). Each prompt includes all the context Claude Code needs.
 

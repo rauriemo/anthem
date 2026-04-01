@@ -50,8 +50,9 @@ func (b *EventBridge) run(ctx context.Context) {
 				continue
 			}
 			msg := OutgoingMessage{
-				Text:     FormatEvent(ev),
-				Markdown: true,
+				Text:      FormatEvent(ev),
+				Markdown:  true,
+				EventType: ev.Type,
 			}
 			if err := b.manager.Broadcast(ctx, msg); err != nil {
 				b.logger.Warn("event bridge broadcast failed", "event_type", ev.Type, "error", err)

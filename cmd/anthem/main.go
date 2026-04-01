@@ -13,6 +13,7 @@ import (
 	"github.com/rauriemo/anthem/internal/agent/claude"
 	"github.com/rauriemo/anthem/internal/audit"
 	"github.com/rauriemo/anthem/internal/channel"
+	dispatchch "github.com/rauriemo/anthem/internal/channel/dispatch"
 	slackch "github.com/rauriemo/anthem/internal/channel/slack"
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/constraints"
@@ -146,9 +147,11 @@ func runCmd() *cobra.Command {
 
 			// Create channel manager and register adapters
 			chanManager := channel.NewManager(logger)
-			if channelCreds != nil && channelCreds.Slack != nil && len(cfg.Channels) > 0 {
+			if channelCreds != nil && len(cfg.Channels) > 0 {
 				for _, chCfg := range cfg.Channels {
-					if chCfg.Kind == "slack" {
+					switch chCfg.Kind {
+				case "slack":
+					if channelCreds.Slack != nil {
 						slackAdapter := slackch.NewAdapter(
 							channelCreds.Slack.BotToken,
 							channelCreds.Slack.AppToken,
@@ -157,7 +160,24 @@ func runCmd() *cobra.Command {
 						)
 						chanManager.Register(slackAdapter)
 						logger.Info("registered slack channel", "target", chCfg.Target)
+					} else {
+						logger.Warn("slack channel configured but no credentials found in channels.yaml")
 					}
+				case "dispatch":
+					if channelCreds.Dispatch != nil {
+						dispatchAdapter := dispatchch.NewAdapter(
+							channelCreds.Dispatch.Token,
+							chCfg.Target,
+							logger,
+						)
+						chanManager.Register(dispatchAdapter)
+						logger.Info("registered dispatch channel", "addr", chCfg.Target)
+					} else {
+						logger.Warn("dispatch channel configured but no credentials found in channels.yaml")
+					}
+				default:
+					logger.Warn("unknown channel kind, skipping", "kind", chCfg.Kind)
+				}
 				}
 			}
 

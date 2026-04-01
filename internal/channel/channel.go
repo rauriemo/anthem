@@ -22,9 +22,10 @@ type File struct {
 }
 
 type OutgoingMessage struct {
-	Text     string
-	ThreadID string
-	Markdown bool
+	Text      string
+	ThreadID  string
+	Markdown  bool
+	EventType string
 }
 
 type Channel interface {
