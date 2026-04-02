@@ -22,12 +22,14 @@ type File struct {
 }
 
 type OutgoingMessage struct {
-	Text      string
-	ThreadID  string
-	Markdown  bool
-	EventType string
-	Ack       bool
-	Display   any `json:"display,omitempty"`
+	Text        string
+	ThreadID    string
+	Markdown    bool
+	EventType   string
+	Ack         bool
+	Display     any    `json:"display,omitempty"`
+	StreamDelta string `json:"stream_delta,omitempty"`
+	StreamDone  bool   `json:"stream_done,omitempty"`
 }
 
 type Channel interface {

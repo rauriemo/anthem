@@ -127,6 +127,9 @@ func (a *Adapter) handleEventsAPI(ctx context.Context, event slackevents.EventsA
 }
 
 func (a *Adapter) Send(ctx context.Context, msg channel.OutgoingMessage) error {
+	if msg.StreamDelta != "" || msg.StreamDone {
+		return nil
+	}
 	opts := []slackapi.MsgOption{
 		slackapi.MsgOptionText(msg.Text, false),
 	}

@@ -1118,7 +1118,23 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 
 	o.logger.Debug("consulting orchestrator agent for user message")
 
-	actions, err := o.orchAgent.ConsultWithRepair(ctx, snap)
+	onStream := func(delta string) {
+		if o.channelMgr != nil {
+			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+				StreamDelta: delta,
+				ThreadID:    msg.ThreadID,
+			})
+		}
+	}
+	actions, err := o.orchAgent.ConsultWithRepairStreaming(ctx, snap, onStream)
+
+	if o.channelMgr != nil {
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			StreamDone: true,
+			ThreadID:   msg.ThreadID,
+		})
+	}
+
 	if err != nil {
 		o.logger.Warn("orchestrator consultation failed for user message", "error", err)
 		o.sendFollowUp(ctx, msg, "I couldn't process your message. The orchestrator encountered an error.")

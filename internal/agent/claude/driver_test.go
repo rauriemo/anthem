@@ -53,7 +53,7 @@ func TestParseStdoutExtractsResult(t *testing.T) {
 		strings.NewReader(resultLine+"\n"),
 		time.Now(),
 		5*time.Minute,
-		nil, nil,
+		nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -87,7 +87,7 @@ func TestParseStdoutErrorResult(t *testing.T) {
 		strings.NewReader(resultLine+"\n"),
 		time.Now(),
 		5*time.Minute,
-		nil, nil,
+		nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -104,7 +104,7 @@ func TestParseStdoutNoResult(t *testing.T) {
 		strings.NewReader("{\"type\":\"system\"}\n"),
 		time.Now(),
 		5*time.Minute,
-		nil, nil,
+		nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -124,7 +124,7 @@ func TestParseStdoutCallsOnResult(t *testing.T) {
 		strings.NewReader(resultLine+"\n"),
 		time.Now(),
 		5*time.Minute,
-		nil,
+		nil, nil,
 		func() { called = true },
 	)
 	if err != nil {
@@ -144,7 +144,7 @@ func TestParseStdoutSkipsMalformedLines(t *testing.T) {
 		strings.NewReader(input),
 		time.Now(),
 		5*time.Minute,
-		nil, nil,
+		nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -305,7 +305,7 @@ func TestExtractResultTextString(t *testing.T) {
 		strings.NewReader(resultLine+"\n"),
 		time.Now(),
 		5*time.Minute,
-		nil, nil,
+		nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -328,7 +328,7 @@ func TestExtractResultTextContentBlocks(t *testing.T) {
 		strings.NewReader(resultLine+"\n"),
 		time.Now(),
 		5*time.Minute,
-		nil, nil,
+		nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -348,12 +348,71 @@ func TestExtractResultTextEmpty(t *testing.T) {
 		strings.NewReader(resultLine+"\n"),
 		time.Now(),
 		5*time.Minute,
-		nil, nil,
+		nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result.Output != "" {
 		t.Errorf("Output = %q, want empty", result.Output)
+	}
+}
+
+func TestParseStdoutCallsOnStream(t *testing.T) {
+	assistant1, _ := json.Marshal(map[string]any{"type": "assistant", "content": "Hello "})
+	assistant2, _ := json.Marshal(map[string]any{"type": "assistant", "content": "world"})
+	assistantEmpty, _ := json.Marshal(map[string]any{"type": "assistant", "content": ""})
+	resultLine := makeResultJSON("sess-stream", 0.01, 1, false)
+
+	input := string(assistant1) + "\n" + string(assistantEmpty) + "\n" + string(assistant2) + "\n" + resultLine + "\n"
+
+	var deltas []string
+	onStream := func(delta string) {
+		deltas = append(deltas, delta)
+	}
+
+	d := NewDriver(nil, nil)
+	result, err := d.parseStdout(
+		context.Background(),
+		strings.NewReader(input),
+		time.Now(),
+		5*time.Minute,
+		nil, onStream, nil,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(deltas) != 2 {
+		t.Fatalf("expected 2 stream deltas, got %d: %v", len(deltas), deltas)
+	}
+	if deltas[0] != "Hello " {
+		t.Errorf("delta[0] = %q, want %q", deltas[0], "Hello ")
+	}
+	if deltas[1] != "world" {
+		t.Errorf("delta[1] = %q, want %q", deltas[1], "world")
+	}
+}
+
+func TestParseStdoutOnStreamNilSafe(t *testing.T) {
+	assistant1, _ := json.Marshal(map[string]any{"type": "assistant", "content": "Hello"})
+	resultLine := makeResultJSON("sess-nil", 0.01, 1, false)
+	input := string(assistant1) + "\n" + resultLine + "\n"
+
+	d := NewDriver(nil, nil)
+	result, err := d.parseStdout(
+		context.Background(),
+		strings.NewReader(input),
+		time.Now(),
+		5*time.Minute,
+		nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
 	}
 }

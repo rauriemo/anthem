@@ -78,7 +78,10 @@ func (d *Driver) Continue(ctx context.Context, sessionID string, prompt string, 
 			args = append(args, "--allowedTools", tool)
 		}
 	}
-	return d.execute(ctx, opts.WorkspacePath, args, types.RunOpts{StallTimeoutMS: opts.StallTimeoutMS})
+	return d.execute(ctx, opts.WorkspacePath, args, types.RunOpts{
+		StallTimeoutMS: opts.StallTimeoutMS,
+		OnStream:       opts.OnStream,
+	})
 }
 
 func (d *Driver) Kill(pid int) error {
@@ -145,7 +148,7 @@ func (d *Driver) execute(ctx context.Context, workDir string, args []string, opt
 		mu.Unlock()
 	}
 
-	result, scanErr := d.parseStdout(ctx, stdout, start, stallTimeout, onActivity, func() {
+	result, scanErr := d.parseStdout(ctx, stdout, start, stallTimeout, onActivity, opts.OnStream, func() {
 		go func() {
 			time.Sleep(postResultTimeout)
 			_ = d.pm.Terminate(cmd)
@@ -174,7 +177,7 @@ func (d *Driver) execute(ctx context.Context, workDir string, args []string, opt
 // parseStdout reads stream-json lines from r and extracts the result event.
 // onActivity is called on each line read. onResult is called when a result event is found.
 // Returns the parsed result (or nil) and any scanner error.
-func (d *Driver) parseStdout(ctx context.Context, r io.Reader, start time.Time, stallTimeout time.Duration, onActivity func(), onResult func()) (*types.RunResult, error) {
+func (d *Driver) parseStdout(ctx context.Context, r io.Reader, start time.Time, stallTimeout time.Duration, onActivity func(), onStream func(string), onResult func()) (*types.RunResult, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 
@@ -193,6 +196,10 @@ func (d *Driver) parseStdout(ctx context.Context, r io.Reader, start time.Time, 
 		}
 		if event == nil {
 			continue
+		}
+
+		if event.Type == "assistant" && event.Content != "" && onStream != nil {
+			onStream(event.Content)
 		}
 
 		if event.Type == "result" {

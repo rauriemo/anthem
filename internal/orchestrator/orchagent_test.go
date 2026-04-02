@@ -275,3 +275,87 @@ func TestConsultWithRepair_BothFail(t *testing.T) {
 		t.Errorf("expected nil actions for fallback, got: %+v", actions)
 	}
 }
+
+func TestConsultWithRepairStreaming_PassesCallback(t *testing.T) {
+	output := `{"reasoning": "streaming test", "actions": [{"type": "reply", "body": "hello"}]}`
+
+	var capturedOnStream func(string)
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		capturedOnStream = opts.OnStream
+		if opts.OnStream != nil {
+			opts.OnStream("delta1")
+			opts.OnStream("delta2")
+		}
+		return &types.RunResult{
+			SessionID: "orch-stream-1",
+			ExitCode:  0,
+			Output:    output,
+			TokensIn:  50,
+			TokensOut: 30,
+			Duration:  time.Millisecond,
+		}, nil
+	}
+
+	var deltas []string
+	onStream := func(delta string) {
+		deltas = append(deltas, delta)
+	}
+
+	oa := NewOrchestratorAgent(runner, "", 10000, testLogger())
+	actions, err := oa.ConsultWithRepairStreaming(context.Background(), StateSnapshot{
+		Tasks: []TaskSummary{{ID: "1", Title: "T1", Status: "queued"}},
+	}, onStream)
+	if err != nil {
+		t.Fatalf("ConsultWithRepairStreaming() error: %v", err)
+	}
+	if capturedOnStream == nil {
+		t.Fatal("OnStream callback was not passed to runner")
+	}
+	if len(deltas) != 2 {
+		t.Fatalf("expected 2 deltas, got %d", len(deltas))
+	}
+	if deltas[0] != "delta1" || deltas[1] != "delta2" {
+		t.Errorf("unexpected deltas: %v", deltas)
+	}
+	if len(actions) != 1 || actions[0].Type != ActionReply {
+		t.Errorf("unexpected actions: %+v", actions)
+	}
+}
+
+func TestConsultStreaming_ContinuesSession(t *testing.T) {
+	output := `{"reasoning": "continuing", "actions": [{"type": "dispatch", "task_id": "3"}]}`
+
+	var capturedOnStream func(string)
+	runner := agent.NewMockRunner()
+	runner.ContinueFunc = func(_ context.Context, _ string, _ string, opts types.ContinueOpts) (*types.RunResult, error) {
+		capturedOnStream = opts.OnStream
+		return &types.RunResult{
+			SessionID: "orch-sess-1",
+			ExitCode:  0,
+			Output:    output,
+			TokensIn:  20,
+			TokensOut: 10,
+			Duration:  time.Millisecond,
+		}, nil
+	}
+
+	onStream := func(_ string) {}
+
+	oa := NewOrchestratorAgent(runner, "", 10000, testLogger())
+	oa.sessionID = "orch-sess-1"
+	oa.totalTokens = 50
+
+	actions, err := oa.ConsultStreaming(context.Background(), StateSnapshot{
+		Tasks: []TaskSummary{{ID: "3", Title: "T3", Status: "queued"}},
+	}, onStream)
+	if err != nil {
+		t.Fatalf("ConsultStreaming() error: %v", err)
+	}
+	if capturedOnStream == nil {
+		t.Fatal("OnStream callback was not passed through ContinueOpts")
+	}
+	if len(actions) != 1 || actions[0].TaskID != "3" {
+		t.Errorf("unexpected actions: %+v", actions)
+	}
+}

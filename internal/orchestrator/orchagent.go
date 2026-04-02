@@ -299,6 +299,94 @@ func parseActions(output string) ([]Action, error) {
 
 const repairPrompt = `Your previous response was not valid JSON. Respond with ONLY a JSON object: {"reasoning": "...", "actions": [...]}`
 
+func (o *OrchestratorAgent) StartStreaming(ctx context.Context, state StateSnapshot, onStream func(string)) ([]Action, error) {
+	prompt := buildSystemPrompt(o.voiceContent) + "\n\n## Current State\n\n" + state.Serialize()
+
+	result, err := o.runner.Run(ctx, types.RunOpts{
+		Prompt:         prompt,
+		PermissionMode: "bypassPermissions",
+		OnStream:       onStream,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator start: %w", err)
+	}
+
+	o.sessionID = result.SessionID
+	o.totalTokens += result.TokensIn + result.TokensOut
+
+	actions, err := parseActions(result.Output)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator start: parsing actions: %w", err)
+	}
+
+	return actions, nil
+}
+
+func (o *OrchestratorAgent) ConsultStreaming(ctx context.Context, state StateSnapshot, onStream func(string)) ([]Action, error) {
+	if o.sessionID == "" {
+		return o.StartStreaming(ctx, state, onStream)
+	}
+
+	if o.totalTokens > o.maxContextTokens {
+		if err := o.Refresh(ctx, state); err != nil {
+			return nil, err
+		}
+		return o.StartStreaming(ctx, state, onStream)
+	}
+
+	snapshot := state.Serialize()
+
+	result, err := o.runner.Continue(ctx, o.sessionID, "## Updated State\n\n"+snapshot, types.ContinueOpts{
+		PermissionMode: "bypassPermissions",
+		OnStream:       onStream,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator consult: %w", err)
+	}
+
+	o.sessionID = result.SessionID
+	o.totalTokens += result.TokensIn + result.TokensOut
+
+	actions, err := parseActions(result.Output)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator consult: parsing actions: %w", err)
+	}
+
+	return actions, nil
+}
+
+func (o *OrchestratorAgent) ConsultWithRepairStreaming(ctx context.Context, state StateSnapshot, onStream func(string)) ([]Action, error) {
+	actions, err := o.ConsultStreaming(ctx, state, onStream)
+	if err == nil {
+		return actions, nil
+	}
+
+	o.logger.Warn("orchestrator response parse failed, attempting repair", "error", err)
+
+	if o.sessionID == "" {
+		o.logger.Warn("no session to repair, falling back to mechanical dispatch")
+		return nil, nil
+	}
+
+	result, repairErr := o.runner.Continue(ctx, o.sessionID, repairPrompt, types.ContinueOpts{
+		PermissionMode: "bypassPermissions",
+	})
+	if repairErr != nil {
+		o.logger.Warn("repair continue failed, falling back to mechanical dispatch", "error", repairErr)
+		return nil, nil
+	}
+
+	o.totalTokens += result.TokensIn + result.TokensOut
+
+	actions, err = parseActions(result.Output)
+	if err != nil {
+		o.logger.Warn("repair parse also failed, falling back to mechanical dispatch", "error", err)
+		return nil, nil
+	}
+
+	return actions, nil
+}
+
 func (o *OrchestratorAgent) ConsultWithRepair(ctx context.Context, state StateSnapshot) ([]Action, error) {
 	actions, err := o.Consult(ctx, state)
 	if err == nil {

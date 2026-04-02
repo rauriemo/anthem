@@ -34,6 +34,7 @@ type frame struct {
 	Ack       bool   `json:"ack,omitempty"`
 	Thread    string `json:"thread,omitempty"`
 	Component any    `json:"component,omitempty"`
+	Done      bool   `json:"done,omitempty"`
 }
 
 type connEntry struct {
@@ -227,6 +228,10 @@ func (a *Adapter) removeConn(entry *connEntry) {
 }
 
 func (a *Adapter) Send(_ context.Context, msg channel.OutgoingMessage) error {
+	if msg.StreamDelta != "" || msg.StreamDone {
+		return a.sendStream(msg)
+	}
+
 	if msg.Display != nil {
 		if err := a.sendDisplay(msg); err != nil {
 			a.logger.Warn("prism display send failed", "error", err)
@@ -302,6 +307,34 @@ func (a *Adapter) sendDisplay(msg channel.OutgoingMessage) error {
 	for _, e := range entries {
 		if err := e.writeJSON(f); err != nil && firstErr == nil {
 			firstErr = fmt.Errorf("prism display broadcast: %w", err)
+		}
+	}
+	return firstErr
+}
+
+func (a *Adapter) sendStream(msg channel.OutgoingMessage) error {
+	f := frame{Type: "stream", Text: msg.StreamDelta, Thread: msg.ThreadID, Done: msg.StreamDone}
+
+	if msg.ThreadID != "" {
+		a.mu.RLock()
+		entry, ok := a.threads[msg.ThreadID]
+		a.mu.RUnlock()
+		if ok {
+			return entry.writeJSON(f)
+		}
+	}
+
+	a.mu.RLock()
+	entries := make([]*connEntry, 0, len(a.conns))
+	for e := range a.conns {
+		entries = append(entries, e)
+	}
+	a.mu.RUnlock()
+
+	var firstErr error
+	for _, e := range entries {
+		if err := e.writeJSON(f); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("prism stream broadcast: %w", err)
 		}
 	}
 	return firstErr

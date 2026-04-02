@@ -114,9 +114,28 @@ These are the source of truth for what to build and how.
 - New files: `internal/channel/channel.go`, `internal/channel/manager.go`, `internal/channel/config.go`, `internal/channel/bridge.go`, `internal/channel/slack/adapter.go`, `internal/channel/dispatch/adapter.go`, `internal/maintenance/scanner.go`, `internal/orchestrator/context_test.go`, plus test files.
 - New dependencies: `github.com/slack-go/slack`, `github.com/gorilla/websocket` (promoted from indirect to direct for Dispatch adapter).
 
+**Phase C completed** (Prism LLM Token Streaming):
+- Callback-based streaming: `OnStream func(delta string)` added to `RunOpts` and `ContinueOpts`. Claude driver calls it for each `assistant` stream event's content. Optional (nil = no streaming), no interface change.
+- Driver integration: `parseStdout` handles `assistant` events before the `result` check, forwarding content deltas via the callback. `Continue()` passes `OnStream` through to `execute()`.
+- Channel types: `OutgoingMessage` extended with `StreamDelta` (string) and `StreamDone` (bool) fields for stream frame routing.
+- Prism adapter: new `stream` frame type (`{"type":"stream","text":"...","thread":"...","done":bool}`). `sendStream()` method routes to thread connection or broadcasts. `Send()` checks for stream messages before existing display/text logic. `frame` struct extended with `Done` field.
+- Other adapters: Dispatch and Slack `Send()` methods early-return nil for stream messages (no streaming support needed).
+- Orchestrator streaming: `StartStreaming`, `ConsultStreaming`, `ConsultWithRepairStreaming` methods on `OrchestratorAgent` mirror non-streaming variants but accept `onStream` callback and pass through `RunOpts`/`ContinueOpts`. Existing non-streaming methods unchanged (used by `tick()`).
+- HandleUserMessage: replaced `ConsultWithRepair` with `ConsultWithRepairStreaming`, broadcasting `StreamDelta` messages during consult and `StreamDone` after completion. Final `res`/`display` frames still sent as before for chat history.
+- Tests: driver streaming callback test, Prism stream frame format test, orchestrator agent streaming passthrough test, HandleUserMessage streaming integration test.
+
 **Phase 4 (next)**: Dashboard + status API + WebSocket streaming via EventBus, knowledge promotion (`promote_knowledge` action), DAG execution plans, WhatsApp channel adapter, example templates, CONTRIBUTING.md, GoReleaser cross-platform binaries, code signing, demo video.
 
 Update this section as phases are completed.
+
+## Reference: Prism Channel Protocol
+
+Prism uses the same WebSocket JSON frame protocol as Dispatch, extended with:
+- `display` frames: `{"type":"display","component":{...},"thread":"<id>"}` for A2UI structured visual content
+- `stream` frames (Phase C): `{"type":"stream","text":"<delta>","thread":"<id>","done":false}` for incremental LLM output
+- When `done: true`, Prism knows the stream is complete and can finalize the message
+
+The Prism adapter at `internal/channel/prism/adapter.go` handles `Send()` for `res`, `event`, and `display` frame types. Phase C adds `stream` frame support.
 
 ## Reference: OpenAI Symphony
 

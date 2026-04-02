@@ -256,3 +256,84 @@ func TestHandleUserMessage_JSONFileIncluded(t *testing.T) {
 		t.Errorf("file = %q, want JSON content", umc.Files[0])
 	}
 }
+
+func TestHandleUserMessage_StreamsDeltasAndDone(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Title: "Task 1", Status: types.StatusQueued, Labels: []string{"todo"}, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	orchRunner := agent.NewMockRunner()
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		// Simulate streaming deltas during Run
+		if opts.OnStream != nil {
+			opts.OnStream("Hello ")
+			opts.OnStream("there.")
+		}
+		return &types.RunResult{
+			SessionID: "orch-s1",
+			Output:    `{"reasoning": "greeting", "actions": [{"type": "reply", "body": "Hello there."}]}`,
+			TokensIn:  10, TokensOut: 5,
+		}, nil
+	}
+
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, testLogger())
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "{{.issue.title}}",
+		Tracker:        trk,
+		Runner:         agent.NewMockRunner(),
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		OrchAgent:      orchAgent,
+		ChannelManager: mgr,
+	})
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		SenderID:    "user-1",
+		ThreadID:    "thread-stream",
+		Text:        "Hi",
+		Timestamp:   time.Now(),
+	})
+
+	sent := ch.sentMessages()
+
+	// Expect: ack, stream delta "Hello ", stream delta "there.", stream done, follow-up reply
+	var streamDeltas []string
+	streamDoneCount := 0
+	for _, msg := range sent {
+		if msg.StreamDelta != "" {
+			streamDeltas = append(streamDeltas, msg.StreamDelta)
+			if msg.ThreadID != "thread-stream" {
+				t.Errorf("stream delta ThreadID = %q, want thread-stream", msg.ThreadID)
+			}
+		}
+		if msg.StreamDone {
+			streamDoneCount++
+			if msg.ThreadID != "thread-stream" {
+				t.Errorf("stream done ThreadID = %q, want thread-stream", msg.ThreadID)
+			}
+		}
+	}
+
+	if len(streamDeltas) != 2 {
+		t.Fatalf("expected 2 stream deltas, got %d: %v", len(streamDeltas), streamDeltas)
+	}
+	if streamDeltas[0] != "Hello " || streamDeltas[1] != "there." {
+		t.Errorf("unexpected deltas: %v", streamDeltas)
+	}
+	if streamDoneCount != 1 {
+		t.Errorf("expected 1 stream done, got %d", streamDoneCount)
+	}
+}

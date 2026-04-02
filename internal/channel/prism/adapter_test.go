@@ -271,3 +271,77 @@ func TestEventBroadcast(t *testing.T) {
 		t.Fatalf("unexpected text: %s", evFrame.Text)
 	}
 }
+
+func TestStreamFrames(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	// Send a request to register the thread
+	reqFrame := frame{Type: "req", ID: "stream-1", Text: "hello"}
+	data, _ := json.Marshal(reqFrame)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Send stream deltas
+	if err := a.Send(context.Background(), channel.OutgoingMessage{
+		StreamDelta: "Hello ",
+		ThreadID:    "stream-1",
+	}); err != nil {
+		t.Fatalf("send stream delta: %v", err)
+	}
+
+	if err := a.Send(context.Background(), channel.OutgoingMessage{
+		StreamDelta: "world",
+		ThreadID:    "stream-1",
+	}); err != nil {
+		t.Fatalf("send stream delta 2: %v", err)
+	}
+
+	// Send stream done
+	if err := a.Send(context.Background(), channel.OutgoingMessage{
+		StreamDone: true,
+		ThreadID:   "stream-1",
+	}); err != nil {
+		t.Fatalf("send stream done: %v", err)
+	}
+
+	// Read first delta
+	f1 := readFrame(t, conn)
+	if f1.Type != "stream" {
+		t.Fatalf("expected stream frame, got %s", f1.Type)
+	}
+	if f1.Text != "Hello " {
+		t.Fatalf("expected 'Hello ', got %q", f1.Text)
+	}
+	if f1.Thread != "stream-1" {
+		t.Fatalf("expected thread stream-1, got %s", f1.Thread)
+	}
+	if f1.Done {
+		t.Fatal("expected done=false for first delta")
+	}
+
+	// Read second delta
+	f2 := readFrame(t, conn)
+	if f2.Type != "stream" || f2.Text != "world" {
+		t.Fatalf("unexpected second delta: %+v", f2)
+	}
+
+	// Read done frame
+	f3 := readFrame(t, conn)
+	if f3.Type != "stream" {
+		t.Fatalf("expected stream frame for done, got %s", f3.Type)
+	}
+	if !f3.Done {
+		t.Fatal("expected done=true for final stream frame")
+	}
+	if f3.Thread != "stream-1" {
+		t.Fatalf("expected thread stream-1, got %s", f3.Thread)
+	}
+}

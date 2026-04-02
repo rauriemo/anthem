@@ -119,6 +119,7 @@ type RunOpts struct {
 	StallTimeoutMS int
 	PermissionMode string
 	DeniedTools    []string
+	OnStream       func(delta string)
 }
 
 type ContinueOpts struct {
@@ -126,6 +127,7 @@ type ContinueOpts struct {
 	StallTimeoutMS int
 	AllowedTools   []string
 	PermissionMode string
+	OnStream       func(delta string)
 }
 
 type RunResult struct {

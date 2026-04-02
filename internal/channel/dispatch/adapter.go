@@ -229,6 +229,9 @@ func (a *Adapter) removeConn(entry *connEntry) {
 }
 
 func (a *Adapter) Send(_ context.Context, msg channel.OutgoingMessage) error {
+	if msg.StreamDelta != "" || msg.StreamDone {
+		return nil
+	}
 	if msg.EventType != "" {
 		return a.broadcastEvent(msg)
 	}
