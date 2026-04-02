@@ -179,6 +179,19 @@ func (s *Scanner) checkStaleTasks(ctx context.Context) []Signal {
 		}
 	}
 
+	skipped, err := s.audit.Query(ctx, audit.QueryFilter{
+		EventType: "task.skipped",
+	})
+	if err != nil {
+		s.logger.Warn("maintenance: failed to query skipped tasks", "error", err)
+		return nil
+	}
+	for _, ev := range skipped {
+		if ev.TaskID != nil {
+			delete(dispatchedIDs, *ev.TaskID)
+		}
+	}
+
 	var signals []Signal
 	for taskID, dispatchTime := range dispatchedIDs {
 		hours := int(time.Since(dispatchTime).Hours())

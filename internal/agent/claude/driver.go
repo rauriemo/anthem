@@ -56,6 +56,9 @@ func (d *Driver) Run(ctx context.Context, opts types.RunOpts) (*types.RunResult,
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
+	for _, dir := range opts.AdditionalDirs {
+		args = append(args, "--add-dir", dir)
+	}
 
 	return d.execute(ctx, opts.WorkspacePath, args, opts)
 }
@@ -77,6 +80,9 @@ func (d *Driver) Continue(ctx context.Context, sessionID string, prompt string, 
 		for _, tool := range opts.AllowedTools {
 			args = append(args, "--allowedTools", tool)
 		}
+	}
+	for _, dir := range opts.AdditionalDirs {
+		args = append(args, "--add-dir", dir)
 	}
 	return d.execute(ctx, opts.WorkspacePath, args, types.RunOpts{
 		StallTimeoutMS: opts.StallTimeoutMS,

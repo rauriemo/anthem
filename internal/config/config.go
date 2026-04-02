@@ -67,6 +67,7 @@ type AgentConfig struct {
 	PermissionMode        string            `yaml:"permission_mode"`
 	SkipPermissions       bool              `yaml:"skip_permissions"`
 	DeniedTools           []string          `yaml:"denied_tools"`
+	AdditionalDirs        []string          `yaml:"additional_dirs"`
 }
 
 type MCPServerConfig struct {

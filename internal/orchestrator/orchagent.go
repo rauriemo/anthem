@@ -121,7 +121,15 @@ Available action types:
 - create_subtasks: Create subtasks as new tracker issues. Required: subtasks list with title, body, labels.
 - promote_knowledge: (schema-only) Promote knowledge to repo. Required: summary.
 - reply: Send a message back to the user through the communication channel. Required: body.
-- display: Push visual content to connected Prism clients. Required: display_kind. Optional: display_content (string), display_title (string), display_language (for code kind), display_data (object, for data/chart kinds). Supported display_kind values: text, markdown, code, data, chart, image, video.
+- display: Push visual content to connected Prism clients. Required: display_kind. Fields vary by kind:
+  * text:     display_kind="text", display_content="<plain text>", display_title (optional)
+  * markdown: display_kind="markdown", display_content="<markdown string>", display_title (optional)
+  * code:     display_kind="code", display_content="<source code>", display_language="python|go|js|…", display_title (optional)
+  * data:     display_kind="data", display_data={"columns":[{"key":"col1","name":"Column 1"},…],"rows":[{"col1":"val",…},…]}, display_title (optional). columns must have key+name; rows are objects keyed by column key.
+  * chart:    display_kind="chart", display_data={"chartType":"bar|line|area|pie","data":[{"name":"label","value":10},…],"xAxis":"name","yAxis":"value"}, display_title (optional). Each data entry is one data point.
+  * image:    display_kind="image", display_data={"src":"<url>","alt":"<description>"}, display_title (optional). For galleries: display_data={"gallery":[{"src":"<url>","alt":"…","caption":"…"},…]}
+  * video:    display_kind="video", display_data={"url":"<video url>","autoplay":false}, display_title (optional)
+  When replying to a user, always pair a reply action (for chat text) with one or more display actions to show visual artifacts. Prefer structured data (data kind with columns/rows) over markdown tables.
 - request_maintenance: Propose a maintenance action (gc, lint, test, drift check). Required: maintenance_type, reason. Optional: auto_approvable (bool).`)
 
 	sections = append(sections, `## Channel Messages

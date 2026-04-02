@@ -546,7 +546,13 @@ func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, a
 					component["language"] = action.DisplayLanguage
 				}
 				if action.DisplayData != nil {
-					component["data"] = action.DisplayData
+					if m, ok := action.DisplayData.(map[string]any); ok {
+						for k, v := range m {
+							component[k] = v
+						}
+					} else {
+						component["data"] = action.DisplayData
+					}
 				}
 				displayMsg := channel.OutgoingMessage{
 					Display: component,
@@ -852,6 +858,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 		StallTimeoutMS: cfg.Agent.StallTimeoutMS,
 		PermissionMode: permMode,
 		DeniedTools:    cfg.Agent.DeniedTools,
+		AdditionalDirs: cfg.Agent.AdditionalDirs,
 	})
 
 	o.release(task.ID)
@@ -1164,7 +1171,13 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 				component["language"] = actions[i].DisplayLanguage
 			}
 			if actions[i].DisplayData != nil {
-				component["data"] = actions[i].DisplayData
+				if m, ok := actions[i].DisplayData.(map[string]any); ok {
+					for k, v := range m {
+						component[k] = v
+					}
+				} else {
+					component["data"] = actions[i].DisplayData
+				}
 			}
 			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
 				Display:  component,
