@@ -185,6 +185,8 @@ func TestEventBroadcast(t *testing.T) {
 		t.Fatalf("auth2 failed: %s", f.Type)
 	}
 
+	time.Sleep(50 * time.Millisecond)
+
 	err := adapter.Send(context.Background(), channel.OutgoingMessage{
 		Text:      "task completed",
 		EventType: "task.completed",
