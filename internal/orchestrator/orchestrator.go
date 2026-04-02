@@ -531,6 +531,32 @@ func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, a
 			}
 			o.recordAudit(ctx, "channel.reply_sent", "", strPtr("reply"))
 
+		case ActionDisplay:
+			if o.channelMgr != nil {
+				component := map[string]any{
+					"kind": action.DisplayKind,
+				}
+				if action.DisplayContent != "" {
+					component["content"] = action.DisplayContent
+				}
+				if action.DisplayTitle != "" {
+					component["title"] = action.DisplayTitle
+				}
+				if action.DisplayLanguage != "" {
+					component["language"] = action.DisplayLanguage
+				}
+				if action.DisplayData != nil {
+					component["data"] = action.DisplayData
+				}
+				displayMsg := channel.OutgoingMessage{
+					Display: component,
+				}
+				if err := o.channelMgr.Broadcast(ctx, displayMsg); err != nil {
+					o.logger.Warn("failed to send display payload", "error", err)
+				}
+			}
+			o.recordAudit(ctx, "channel.display_sent", "", strPtr("display"))
+
 		case ActionRequestMaintenance:
 			if o.channelMgr != nil {
 				notify := channel.OutgoingMessage{
@@ -1104,22 +1130,42 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		return
 	}
 
-	// Execute actions -- replies are sent as follow-up notifications
+	// Execute actions -- replies and display frames are sent as follow-up notifications
 	for i := range actions {
 		if actions[i].Type == ActionReply && o.channelMgr != nil {
 			o.sendFollowUp(ctx, msg, actions[i].Body)
 			o.recordAudit(ctx, "channel.reply_sent", "", strPtr("reply"))
 		}
-	}
-
-	// Execute non-reply actions via the standard path
-	var nonReplyActions []Action
-	for _, a := range actions {
-		if a.Type != ActionReply {
-			nonReplyActions = append(nonReplyActions, a)
+		if actions[i].Type == ActionDisplay && o.channelMgr != nil {
+			component := map[string]any{"kind": actions[i].DisplayKind}
+			if actions[i].DisplayContent != "" {
+				component["content"] = actions[i].DisplayContent
+			}
+			if actions[i].DisplayTitle != "" {
+				component["title"] = actions[i].DisplayTitle
+			}
+			if actions[i].DisplayLanguage != "" {
+				component["language"] = actions[i].DisplayLanguage
+			}
+			if actions[i].DisplayData != nil {
+				component["data"] = actions[i].DisplayData
+			}
+			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+				Display:  component,
+				ThreadID: msg.ThreadID,
+			})
+			o.recordAudit(ctx, "channel.display_sent", "", strPtr("display"))
 		}
 	}
-	o.executeActions(ctx, tasks, nonReplyActions)
+
+	// Execute non-reply/non-display actions via the standard path
+	var otherActions []Action
+	for _, a := range actions {
+		if a.Type != ActionReply && a.Type != ActionDisplay {
+			otherActions = append(otherActions, a)
+		}
+	}
+	o.executeActions(ctx, tasks, otherActions)
 
 	o.recordAudit(ctx, "channel.user_message", "", strPtr("handle_user_message"))
 }

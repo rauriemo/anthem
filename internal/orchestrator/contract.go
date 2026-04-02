@@ -28,6 +28,7 @@ const (
 	ActionCreateSubtasks     ActionType = "create_subtasks"
 	ActionPromoteKnowledge   ActionType = "promote_knowledge"
 	ActionReply              ActionType = "reply"
+	ActionDisplay            ActionType = "display"
 	ActionRequestMaintenance ActionType = "request_maintenance"
 )
 
@@ -42,6 +43,7 @@ var allActionTypes = []ActionType{
 	ActionCreateSubtasks,
 	ActionPromoteKnowledge,
 	ActionReply,
+	ActionDisplay,
 	ActionRequestMaintenance,
 }
 
@@ -65,6 +67,11 @@ type Action struct {
 	ArtifactPath    string       `json:"artifact_path,omitempty"`
 	MaintenanceType string       `json:"maintenance_type,omitempty"`
 	AutoApprovable  bool         `json:"auto_approvable,omitempty"`
+	DisplayKind     string       `json:"display_kind,omitempty"`
+	DisplayContent  string       `json:"display_content,omitempty"`
+	DisplayTitle    string       `json:"display_title,omitempty"`
+	DisplayLanguage string       `json:"display_language,omitempty"`
+	DisplayData     any          `json:"display_data,omitempty"`
 }
 
 // OrchestratorResponse is the full JSON response parsed from the orchestrator agent.
@@ -79,7 +86,7 @@ var ErrNotImplemented = errors.New("action not implemented in this phase")
 // RiskForAction returns the risk level for a given action type.
 func RiskForAction(actionType ActionType) RiskLevel {
 	switch actionType {
-	case ActionDispatch, ActionSkip, ActionComment, ActionUpdateVoice, ActionRequestApproval, ActionReply:
+	case ActionDispatch, ActionSkip, ActionComment, ActionUpdateVoice, ActionRequestApproval, ActionReply, ActionDisplay:
 		return RiskLow
 	case ActionCloseWave, ActionCreateSubtasks, ActionPromoteKnowledge, ActionRequestMaintenance:
 		return RiskMedium
@@ -150,6 +157,11 @@ func ValidateAction(action Action, validTaskIDs []string) error {
 			return fmt.Errorf("reply action requires body")
 		}
 
+	case ActionDisplay:
+		if action.DisplayKind == "" {
+			return fmt.Errorf("display action requires display_kind")
+		}
+
 	case ActionRequestMaintenance:
 		if action.MaintenanceType == "" {
 			return fmt.Errorf("request_maintenance action requires maintenance_type")
@@ -165,7 +177,7 @@ func ValidateAction(action Action, validTaskIDs []string) error {
 // IsIdempotent reports whether repeating the action produces the same outcome.
 func IsIdempotent(actionType ActionType) bool {
 	switch actionType {
-	case ActionComment, ActionSkip, ActionRequestApproval, ActionUpdateVoice, ActionReply:
+	case ActionComment, ActionSkip, ActionRequestApproval, ActionUpdateVoice, ActionReply, ActionDisplay:
 		return true
 	default:
 		return false

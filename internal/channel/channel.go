@@ -27,6 +27,7 @@ type OutgoingMessage struct {
 	Markdown  bool
 	EventType string
 	Ack       bool
+	Display   any `json:"display,omitempty"`
 }
 
 type Channel interface {

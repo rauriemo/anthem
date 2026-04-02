@@ -121,6 +121,7 @@ Available action types:
 - create_subtasks: Create subtasks as new tracker issues. Required: subtasks list with title, body, labels.
 - promote_knowledge: (schema-only) Promote knowledge to repo. Required: summary.
 - reply: Send a message back to the user through the communication channel. Required: body.
+- display: Push visual content to connected Prism clients. Required: display_kind. Optional: display_content (string), display_title (string), display_language (for code kind), display_data (object, for data/chart kinds). Supported display_kind values: text, markdown, code, data, chart, image, video.
 - request_maintenance: Propose a maintenance action (gc, lint, test, drift check). Required: maintenance_type, reason. Optional: auto_approvable (bool).`)
 
 	sections = append(sections, `## Channel Messages

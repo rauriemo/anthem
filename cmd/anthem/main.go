@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -14,9 +17,11 @@ import (
 	"github.com/rauriemo/anthem/internal/audit"
 	"github.com/rauriemo/anthem/internal/channel"
 	dispatchch "github.com/rauriemo/anthem/internal/channel/dispatch"
+	prismch "github.com/rauriemo/anthem/internal/channel/prism"
 	slackch "github.com/rauriemo/anthem/internal/channel/slack"
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/constraints"
+	"github.com/rauriemo/anthem/internal/discovery"
 	"github.com/rauriemo/anthem/internal/logging"
 	"github.com/rauriemo/anthem/internal/maintenance"
 	"github.com/rauriemo/anthem/internal/orchestrator"
@@ -147,6 +152,7 @@ func runCmd() *cobra.Command {
 
 			// Create channel manager and register adapters
 			chanManager := channel.NewManager(logger)
+			var prismTarget string
 			if channelCreds != nil && len(cfg.Channels) > 0 {
 				for _, chCfg := range cfg.Channels {
 					switch chCfg.Kind {
@@ -163,19 +169,32 @@ func runCmd() *cobra.Command {
 						} else {
 							logger.Warn("slack channel configured but no credentials found in channels.yaml")
 						}
-					case "dispatch":
-						if channelCreds.Dispatch != nil {
-							dispatchAdapter := dispatchch.NewAdapter(
-								channelCreds.Dispatch.Token,
-								chCfg.Target,
-								logger,
-							)
-							chanManager.Register(dispatchAdapter)
-							logger.Info("registered dispatch channel", "addr", chCfg.Target)
-						} else {
-							logger.Warn("dispatch channel configured but no credentials found in channels.yaml")
-						}
-					default:
+				case "dispatch":
+					if channelCreds.Dispatch != nil {
+						dispatchAdapter := dispatchch.NewAdapter(
+							channelCreds.Dispatch.Token,
+							chCfg.Target,
+							logger,
+						)
+						chanManager.Register(dispatchAdapter)
+						logger.Info("registered dispatch channel", "addr", chCfg.Target)
+					} else {
+						logger.Warn("dispatch channel configured but no credentials found in channels.yaml")
+					}
+				case "prism":
+					if channelCreds.Prism != nil {
+						prismAdapter := prismch.NewAdapter(
+							channelCreds.Prism.Token,
+							chCfg.Target,
+							logger,
+						)
+						chanManager.Register(prismAdapter)
+						prismTarget = chCfg.Target
+						logger.Info("registered prism channel", "addr", chCfg.Target)
+					} else {
+						logger.Warn("prism channel configured but no credentials found in channels.yaml")
+					}
+				default:
 						logger.Warn("unknown channel kind, skipping", "kind", chCfg.Kind)
 					}
 				}
@@ -243,6 +262,32 @@ func runCmd() *cobra.Command {
 
 			// Start channel listener for inbound messages
 			orch.StartChannelListener(ctx)
+
+			// Start mDNS advertisement for Prism discovery
+			project := cfg.Tracker.Repo
+			if parts := strings.SplitN(project, "/", 2); len(parts) == 2 {
+				project = parts[1]
+			}
+			mdnsPort := 0
+			if prismTarget != "" {
+				if _, portStr, err := net.SplitHostPort(prismTarget); err == nil {
+					if p, err := strconv.Atoi(portStr); err == nil {
+						mdnsPort = p
+					}
+				}
+			}
+			if mdnsPort == 0 {
+				mdnsPort = cfg.Server.Port
+			}
+			if mdnsPort == 0 {
+				mdnsPort = 8080
+			}
+			advertiser := discovery.NewAdvertiser(project, mdnsPort, cfg.Tracker.Repo, logger)
+			if err := advertiser.Start(); err != nil {
+				logger.Warn("mDNS advertisement failed to start, Prism auto-discovery disabled", "error", err)
+			} else {
+				defer advertiser.Stop()
+			}
 
 			logger.Info("starting anthem",
 				"workflow", workflowPath,

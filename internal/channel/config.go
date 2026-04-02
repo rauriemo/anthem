@@ -11,6 +11,7 @@ import (
 type ChannelsConfig struct {
 	Slack    *SlackCredentials    `yaml:"slack,omitempty"`
 	Dispatch *DispatchCredentials `yaml:"dispatch,omitempty"`
+	Prism    *PrismCredentials    `yaml:"prism,omitempty"`
 }
 
 type DispatchCredentials struct {
@@ -20,6 +21,10 @@ type DispatchCredentials struct {
 type SlackCredentials struct {
 	BotToken string `yaml:"bot_token"`
 	AppToken string `yaml:"app_token"`
+}
+
+type PrismCredentials struct {
+	Token string `yaml:"token"`
 }
 
 func LoadCredentials(path string) (*ChannelsConfig, error) {

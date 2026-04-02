@@ -51,6 +51,12 @@ channels:
       - task.completed
       - task.failed
       - maintenance.suggested
+  - kind: prism
+    target: "localhost:3105"
+    events:
+      - task.completed
+      - task.failed
+      - maintenance.suggested
 
 server:
   port: 8080

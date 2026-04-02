@@ -105,6 +105,20 @@ slack:
 
 dispatch:
   token: ""
+
+# Prism credentials for visual workstation channel.
+# Anthem listens as a WebSocket server; Prism connects in.
+#
+# Set a shared secret token. Prism clients authenticate with this token.
+#
+# Then add a channels: block to your project WORKFLOW.md:
+#   channels:
+#     - kind: prism
+#       target: "localhost:3101"   # Address for Anthem to listen on
+#       events: [task.completed, task.failed, maintenance.suggested]
+
+prism:
+  token: ""
 `
 
 const defaultConstraints = `constraints:
