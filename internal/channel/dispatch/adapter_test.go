@@ -185,7 +185,7 @@ func TestEventBroadcast(t *testing.T) {
 		t.Fatalf("auth2 failed: %s", f.Type)
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	err := adapter.Send(context.Background(), channel.OutgoingMessage{
 		Text:      "task completed",
@@ -358,7 +358,7 @@ func TestEventWithThreadID(t *testing.T) {
 	}
 
 	// Allow the server goroutine to register the connection before broadcasting.
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	err := adapter.Send(context.Background(), channel.OutgoingMessage{
 		Text:      "follow-up reply",

@@ -169,32 +169,32 @@ func runCmd() *cobra.Command {
 						} else {
 							logger.Warn("slack channel configured but no credentials found in channels.yaml")
 						}
-				case "dispatch":
-					if channelCreds.Dispatch != nil {
-						dispatchAdapter := dispatchch.NewAdapter(
-							channelCreds.Dispatch.Token,
-							chCfg.Target,
-							logger,
-						)
-						chanManager.Register(dispatchAdapter)
-						logger.Info("registered dispatch channel", "addr", chCfg.Target)
-					} else {
-						logger.Warn("dispatch channel configured but no credentials found in channels.yaml")
-					}
-				case "prism":
-					if channelCreds.Prism != nil {
-						prismAdapter := prismch.NewAdapter(
-							channelCreds.Prism.Token,
-							chCfg.Target,
-							logger,
-						)
-						chanManager.Register(prismAdapter)
-						prismTarget = chCfg.Target
-						logger.Info("registered prism channel", "addr", chCfg.Target)
-					} else {
-						logger.Warn("prism channel configured but no credentials found in channels.yaml")
-					}
-				default:
+					case "dispatch":
+						if channelCreds.Dispatch != nil {
+							dispatchAdapter := dispatchch.NewAdapter(
+								channelCreds.Dispatch.Token,
+								chCfg.Target,
+								logger,
+							)
+							chanManager.Register(dispatchAdapter)
+							logger.Info("registered dispatch channel", "addr", chCfg.Target)
+						} else {
+							logger.Warn("dispatch channel configured but no credentials found in channels.yaml")
+						}
+					case "prism":
+						if channelCreds.Prism != nil {
+							prismAdapter := prismch.NewAdapter(
+								channelCreds.Prism.Token,
+								chCfg.Target,
+								logger,
+							)
+							chanManager.Register(prismAdapter)
+							prismTarget = chCfg.Target
+							logger.Info("registered prism channel", "addr", chCfg.Target)
+						} else {
+							logger.Warn("prism channel configured but no credentials found in channels.yaml")
+						}
+					default:
 						logger.Warn("unknown channel kind, skipping", "kind", chCfg.Kind)
 					}
 				}

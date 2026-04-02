@@ -81,7 +81,9 @@ func (a *Advertiser) Start() error {
 // Stop deregisters the mDNS advertisement.
 func (a *Advertiser) Stop() {
 	if a.server != nil {
-		a.server.Shutdown()
+		if err := a.server.Shutdown(); err != nil {
+			a.logger.Warn("mDNS shutdown error", "error", err)
+		}
 		a.logger.Info("mDNS advertisement stopped", "project", a.project)
 	}
 }
