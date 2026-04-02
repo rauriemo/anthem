@@ -858,6 +858,23 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 		return
 	}
 
+	if result.ExitCode != 0 {
+		exitErr := fmt.Errorf("claude exited with code %d", result.ExitCode)
+		o.recordFailure(task.ID, exitErr)
+		ri := o.retryInfo(task.ID)
+		o.logger.Error("agent exited non-zero",
+			"task_id", task.ID,
+			"exit_code", result.ExitCode,
+			"attempt", ri.Attempts,
+			"next_retry_at", ri.NextRetryAt,
+		)
+		_ = o.tracker.AddComment(ctx, task.ID,
+			fmt.Sprintf("Claude exited with code %d. Retry attempt %d, next at %s.",
+				result.ExitCode, ri.Attempts, ri.NextRetryAt.Format(time.RFC3339)))
+		o.publish(types.Event{Type: "task.failed", TaskID: task.ID, Data: exitErr.Error()})
+		return
+	}
+
 	o.clearRetry(task.ID)
 
 	o.logger.Info("task completed",
@@ -1049,10 +1066,11 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		"file_count", len(msg.Files),
 	)
 
-	// Send immediate acknowledgment so the caller doesn't time out waiting for Claude.
+	// Send a protocol-level ack so the caller can reset its timeout without
+	// surfacing any text to the user. The real reply follows as a channel.followup event.
 	if o.channelMgr != nil {
 		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
-			Text:     "Let me think about that...",
+			Ack:      true,
 			ThreadID: msg.ThreadID,
 		})
 	}
@@ -1106,15 +1124,16 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	o.recordAudit(ctx, "channel.user_message", "", strPtr("handle_user_message"))
 }
 
-// sendFollowUp sends a follow-up message after the initial acknowledgment.
-// It uses an event frame (no ThreadID) so the channel delivers it as a
-// push notification rather than trying to correlate with the original request.
+// sendFollowUp sends a follow-up message after the initial protocol ack.
+// It carries the original ThreadID so the channel client can correlate the
+// follow-up with the pending request and resolve it as the real response.
 func (o *Orchestrator) sendFollowUp(ctx context.Context, original channel.IncomingMessage, text string) {
 	if o.channelMgr == nil {
 		return
 	}
 	_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
 		Text:      text,
+		ThreadID:  original.ThreadID,
 		EventType: "channel.followup",
 	})
 }

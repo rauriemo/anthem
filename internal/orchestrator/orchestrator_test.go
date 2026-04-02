@@ -1087,3 +1087,112 @@ func TestReconcileDoesNotReleaseRecentRun(t *testing.T) {
 		t.Errorf("active count = %d, want 1 (recent run should not be released)", orch.activeCount())
 	}
 }
+
+func TestNonZeroExitCodeTriggersRetry(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Identifier: "GH-1", Title: "Bad exit", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{SessionID: "s1", ExitCode: 1, Duration: time.Millisecond}, nil
+	}
+
+	ws := workspace.NewMockWorkspaceManager()
+	events := NewMockEventBus()
+	logger := testLogger()
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 200
+	cfg.Agent.MaxRetryBackoffMS = 300000
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       runner,
+		Workspace:    ws,
+		EventBus:     events,
+		Logger:       logger,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	_ = orch.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	comments := trk.Comments["1"]
+	found := false
+	for _, c := range comments {
+		if strings.Contains(c, "Claude exited with code 1") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected exit code comment, got: %v", comments)
+	}
+
+	// Task should NOT be marked completed
+	task, _ := trk.GetTask(context.Background(), "1")
+	if task.Status == types.StatusCompleted {
+		t.Error("task should not be completed after non-zero exit")
+	}
+}
+
+func TestNoResultEventTriggersRetry(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Identifier: "GH-1", Title: "No result", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{SessionID: "s1", ExitCode: -1, Duration: time.Millisecond}, nil
+	}
+
+	ws := workspace.NewMockWorkspaceManager()
+	events := NewMockEventBus()
+	logger := testLogger()
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 200
+	cfg.Agent.MaxRetryBackoffMS = 300000
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       runner,
+		Workspace:    ws,
+		EventBus:     events,
+		Logger:       logger,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	_ = orch.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	comments := trk.Comments["1"]
+	found := false
+	for _, c := range comments {
+		if strings.Contains(c, "Claude exited with code -1") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected exit code -1 comment, got: %v", comments)
+	}
+
+	task, _ := trk.GetTask(context.Background(), "1")
+	if task.Status == types.StatusCompleted {
+		t.Error("task should not be completed when no result event was produced")
+	}
+}

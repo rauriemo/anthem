@@ -26,6 +26,7 @@ type OutgoingMessage struct {
 	ThreadID  string
 	Markdown  bool
 	EventType string
+	Ack       bool
 }
 
 type Channel interface {

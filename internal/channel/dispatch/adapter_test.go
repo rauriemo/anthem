@@ -305,4 +305,81 @@ func TestConcurrentReplyRouting(t *testing.T) {
 	}
 }
 
+func TestAckFrameSendsAckField(t *testing.T) {
+	adapter, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed: %s", f.Type)
+	}
+
+	reqID := "ack-test-id-0000000000000000000"
+	data, _ := json.Marshal(frame{Type: "req", ID: reqID, Text: "hello"})
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+	select {
+	case <-adapter.Incoming():
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	err := adapter.Send(context.Background(), channel.OutgoingMessage{
+		ThreadID: reqID,
+		Ack:      true,
+	})
+	if err != nil {
+		t.Fatalf("send ack: %v", err)
+	}
+
+	resp := readFrame(t, conn)
+	if resp.Type != "res" {
+		t.Fatalf("expected res, got %s", resp.Type)
+	}
+	if !resp.Ack {
+		t.Error("expected ack=true in frame")
+	}
+	if resp.Text != "" {
+		t.Errorf("expected empty text for ack, got %q", resp.Text)
+	}
+	if resp.ID != reqID {
+		t.Errorf("expected ID %s, got %s", reqID, resp.ID)
+	}
+}
+
+func TestEventWithThreadID(t *testing.T) {
+	adapter, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed: %s", f.Type)
+	}
+
+	// Allow the server goroutine to register the connection before broadcasting.
+	time.Sleep(50 * time.Millisecond)
+
+	err := adapter.Send(context.Background(), channel.OutgoingMessage{
+		Text:      "follow-up reply",
+		ThreadID:  "original-thread-id",
+		EventType: "channel.followup",
+	})
+	if err != nil {
+		t.Fatalf("send event: %v", err)
+	}
+
+	resp := readFrame(t, conn)
+	if resp.Type != "event" {
+		t.Fatalf("expected event frame, got %s", resp.Type)
+	}
+	if resp.Event != "channel.followup" {
+		t.Errorf("expected event type channel.followup, got %s", resp.Event)
+	}
+	if resp.Thread != "original-thread-id" {
+		t.Errorf("expected thread=original-thread-id, got %q", resp.Thread)
+	}
+	if resp.Text != "follow-up reply" {
+		t.Errorf("expected text 'follow-up reply', got %q", resp.Text)
+	}
+}
+
 var _ channel.Channel = (*Adapter)(nil)

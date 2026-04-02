@@ -93,22 +93,28 @@ func TestHandleUserMessage_ConsultsAndReplies(t *testing.T) {
 		t.Fatalf("expected at least 2 messages (ack + reply), got %d: %+v", len(sent), sent)
 	}
 
-	// First message should be the immediate acknowledgment with ThreadID.
+	// First message should be a protocol-level ack with ThreadID and no text.
 	ack := sent[0]
 	if ack.ThreadID != "thread-123" {
 		t.Errorf("ack ThreadID = %q, want thread-123", ack.ThreadID)
 	}
-	if ack.Text != "Let me think about that..." {
-		t.Errorf("ack Text = %q, want 'Let me think about that...'", ack.Text)
+	if !ack.Ack {
+		t.Error("ack.Ack = false, want true")
+	}
+	if ack.Text != "" {
+		t.Errorf("ack Text = %q, want empty", ack.Text)
 	}
 
-	// The real reply arrives as a follow-up event (no ThreadID).
+	// The real reply arrives as a channel.followup event carrying the original ThreadID.
 	found := false
 	for _, msg := range sent[1:] {
 		if msg.Text == "There is 1 task queued." {
 			found = true
 			if msg.EventType != "channel.followup" {
 				t.Errorf("reply EventType = %q, want channel.followup", msg.EventType)
+			}
+			if msg.ThreadID != "thread-123" {
+				t.Errorf("reply ThreadID = %q, want thread-123", msg.ThreadID)
 			}
 		}
 	}

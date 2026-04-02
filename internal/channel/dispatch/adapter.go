@@ -31,6 +31,8 @@ type frame struct {
 	Text   string `json:"text,omitempty"`
 	Event  string `json:"event,omitempty"`
 	Error  string `json:"error,omitempty"`
+	Ack    bool   `json:"ack,omitempty"`
+	Thread string `json:"thread,omitempty"`
 }
 
 // connEntry wraps a WebSocket connection with a per-connection write mutex.
@@ -227,6 +229,9 @@ func (a *Adapter) removeConn(entry *connEntry) {
 }
 
 func (a *Adapter) Send(_ context.Context, msg channel.OutgoingMessage) error {
+	if msg.EventType != "" {
+		return a.broadcastEvent(msg)
+	}
 	if msg.ThreadID != "" {
 		return a.sendReply(msg)
 	}
@@ -242,11 +247,11 @@ func (a *Adapter) sendReply(msg channel.OutgoingMessage) error {
 		return fmt.Errorf("dispatch: no connection for thread %s", msg.ThreadID)
 	}
 
-	return entry.writeJSON(frame{Type: "res", ID: msg.ThreadID, Text: msg.Text})
+	return entry.writeJSON(frame{Type: "res", ID: msg.ThreadID, Text: msg.Text, Ack: msg.Ack})
 }
 
 func (a *Adapter) broadcastEvent(msg channel.OutgoingMessage) error {
-	f := frame{Type: "event", Event: msg.EventType, Text: msg.Text}
+	f := frame{Type: "event", Event: msg.EventType, Text: msg.Text, Thread: msg.ThreadID}
 
 	a.mu.RLock()
 	entries := make([]*connEntry, 0, len(a.conns))
