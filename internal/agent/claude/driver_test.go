@@ -238,11 +238,11 @@ func TestRunDeniedTools(t *testing.T) {
 		})
 	})
 
-	if !containsArgPair(args, "--deniedTools", "Bash") {
-		t.Error("should include --deniedTools Bash")
+	if !containsArgPair(args, "--disallowedTools", "Bash") {
+		t.Error("should include --disallowedTools Bash")
 	}
-	if !containsArgPair(args, "--deniedTools", "Write") {
-		t.Error("should include --deniedTools Write")
+	if !containsArgPair(args, "--disallowedTools", "Write") {
+		t.Error("should include --disallowedTools Write")
 	}
 }
 

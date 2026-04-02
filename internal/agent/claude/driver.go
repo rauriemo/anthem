@@ -43,7 +43,7 @@ func (d *Driver) Run(ctx context.Context, opts types.RunOpts) (*types.RunResult,
 		args = append(args, "--permission-mode", "dontAsk")
 	}
 	for _, tool := range opts.DeniedTools {
-		args = append(args, "--deniedTools", tool)
+		args = append(args, "--disallowedTools", tool)
 	}
 	if opts.MaxTurns > 0 {
 		args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
