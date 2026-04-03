@@ -129,6 +129,7 @@ Available action types:
   * chart:    display_kind="chart", display_data={"chartType":"bar|line|area|pie","data":[{"name":"label","value":10},…],"xAxis":"name","yAxis":"value"}, display_title (optional). Each data entry is one data point.
   * image:    display_kind="image", display_data={"src":"<url>","alt":"<description>"}, display_title (optional). For galleries: display_data={"gallery":[{"src":"<url>","alt":"…","caption":"…"},…]}
   * video:    display_kind="video", display_data={"url":"<video url>","autoplay":false}, display_title (optional)
+  * html:     display_kind="html", display_content="<full self-contained html>", display_title (optional). Use for custom interactive visualizations, canvas graphics, styled layouts, or anything that doesn't fit other kinds. HTML must be fully self-contained with all CSS/JS inline -- no external script/stylesheet/image URLs.
   When replying to a user, always pair a reply action (for chat text) with one or more display actions to show visual artifacts. Prefer structured data (data kind with columns/rows) over markdown tables.
 - request_maintenance: Propose a maintenance action (gc, lint, test, drift check). Required: maintenance_type, reason. Optional: auto_approvable (bool).`)
 
