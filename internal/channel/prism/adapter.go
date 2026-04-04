@@ -257,10 +257,30 @@ func (a *Adapter) sendReply(msg channel.OutgoingMessage) error {
 	a.mu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("prism: no connection for thread %s", msg.ThreadID)
+		a.logger.Warn("prism sendReply: thread not registered, broadcasting res to all prism clients",
+			"thread", msg.ThreadID)
+		return a.broadcastRes(msg)
 	}
 
 	return entry.writeJSON(frame{Type: "res", ID: msg.ThreadID, Text: msg.Text, Ack: msg.Ack})
+}
+
+func (a *Adapter) broadcastRes(msg channel.OutgoingMessage) error {
+	f := frame{Type: "res", ID: msg.ThreadID, Text: msg.Text, Ack: msg.Ack}
+	a.mu.RLock()
+	entries := make([]*connEntry, 0, len(a.conns))
+	for e := range a.conns {
+		entries = append(entries, e)
+	}
+	a.mu.RUnlock()
+
+	var firstErr error
+	for _, e := range entries {
+		if err := e.writeJSON(f); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("prism res broadcast: %w", err)
+		}
+	}
+	return firstErr
 }
 
 func (a *Adapter) broadcastEvent(msg channel.OutgoingMessage) error {

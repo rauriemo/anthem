@@ -4,6 +4,28 @@ import (
 	"testing"
 )
 
+func TestStreamEventStreamingPayload(t *testing.T) {
+	textEv, err := ParseStreamEvent([]byte(
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := StreamEventStreamingPayload(textEv); got != "hi" {
+		t.Errorf("text_delta: got %q", got)
+	}
+
+	jsonEv, err := ParseStreamEvent([]byte(
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"a\""}}}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := StreamEventStreamingPayload(jsonEv); got != `{"a"` {
+		t.Errorf("partial_json: got %q", got)
+	}
+}
+
 func TestParseStreamEvent(t *testing.T) {
 	tests := []struct {
 		name      string

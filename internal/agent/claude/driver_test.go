@@ -358,6 +358,58 @@ func TestExtractResultTextEmpty(t *testing.T) {
 	}
 }
 
+func TestMergeOutputFromStreamBuffer(t *testing.T) {
+	t.Parallel()
+	r := &types.RunResult{Output: "keep"}
+	mergeOutputFromStreamBuffer(r, `{"x":1}`)
+	if r.Output != "keep" {
+		t.Errorf("expected non-empty Output unchanged, got %q", r.Output)
+	}
+	r2 := &types.RunResult{Output: "  \n"}
+	mergeOutputFromStreamBuffer(r2, `{"reasoning":"ok","actions":[]}`)
+	if r2.Output != `{"reasoning":"ok","actions":[]}` {
+		t.Errorf("expected stream fallback, got %q", r2.Output)
+	}
+	mergeOutputFromStreamBuffer(nil, "x")
+}
+
+func TestParseStdoutEmptyResultUsesStreamMerge(t *testing.T) {
+	jsonOut := `{"reasoning":"ok","actions":[]}`
+	ev, _ := json.Marshal(map[string]any{
+		"type": "stream_event",
+		"event": map[string]any{
+			"delta": map[string]any{"type": "text_delta", "text": jsonOut},
+		},
+	})
+	resultLine := makeResultJSON("sess-fb", 0.01, 1, false)
+	input := string(ev) + "\n" + resultLine + "\n"
+
+	var acc strings.Builder
+	d := NewDriver(nil, nil)
+	result, err := d.parseStdout(
+		context.Background(),
+		strings.NewReader(input),
+		time.Now(),
+		5*time.Minute,
+		nil,
+		func(s string) { acc.WriteString(s) },
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil {
+		t.Fatal("expected result")
+	}
+	if result.Output != "" {
+		t.Fatalf("expected empty Output before merge, got %q", result.Output)
+	}
+	mergeOutputFromStreamBuffer(result, acc.String())
+	if result.Output != jsonOut {
+		t.Fatalf("after merge Output = %q, want %q", result.Output, jsonOut)
+	}
+}
+
 func TestParseStdoutCallsOnStream(t *testing.T) {
 	assistant1, _ := json.Marshal(map[string]any{"type": "assistant", "content": "Hello "})
 	assistant2, _ := json.Marshal(map[string]any{"type": "assistant", "content": "world"})
@@ -393,6 +445,46 @@ func TestParseStdoutCallsOnStream(t *testing.T) {
 	}
 	if deltas[1] != "world" {
 		t.Errorf("delta[1] = %q, want %q", deltas[1], "world")
+	}
+}
+
+func TestParseStdoutCallsOnStreamForStreamEventTextDelta(t *testing.T) {
+	ev1, _ := json.Marshal(map[string]any{
+		"type": "stream_event",
+		"event": map[string]any{
+			"delta": map[string]any{"type": "text_delta", "text": "Hi"},
+		},
+	})
+	ev2, _ := json.Marshal(map[string]any{
+		"type": "stream_event",
+		"event": map[string]any{
+			"delta": map[string]any{"type": "text_delta", "text": " there"},
+		},
+	})
+	resultLine := makeResultJSON("sess-stream2", 0.01, 1, false)
+	input := string(ev1) + "\n" + string(ev2) + "\n" + resultLine + "\n"
+
+	var deltas []string
+	onStream := func(delta string) {
+		deltas = append(deltas, delta)
+	}
+
+	d := NewDriver(nil, nil)
+	result, err := d.parseStdout(
+		context.Background(),
+		strings.NewReader(input),
+		time.Now(),
+		5*time.Minute,
+		nil, onStream, nil,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(deltas) != 2 || deltas[0] != "Hi" || deltas[1] != " there" {
+		t.Fatalf("deltas = %v, want [Hi  there]", deltas)
 	}
 }
 

@@ -35,6 +35,7 @@ func (d *Driver) Run(ctx context.Context, opts types.RunOpts) (*types.RunResult,
 		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
+		"--include-partial-messages",
 	}
 	switch opts.PermissionMode {
 	case "bypassPermissions":
@@ -68,6 +69,7 @@ func (d *Driver) Continue(ctx context.Context, sessionID string, prompt string, 
 		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
+		"--include-partial-messages",
 		"--resume", sessionID,
 	}
 	switch opts.PermissionMode {
@@ -155,7 +157,15 @@ func (d *Driver) execute(ctx context.Context, workDir string, args []string, opt
 		mu.Unlock()
 	}
 
-	result, scanErr := d.parseStdout(ctx, stdout, start, stallTimeout, onActivity, opts.OnStream, func() {
+	var streamAccum strings.Builder
+	onStreamHook := func(s string) {
+		streamAccum.WriteString(s)
+		if opts.OnStream != nil {
+			opts.OnStream(s)
+		}
+	}
+
+	result, scanErr := d.parseStdout(ctx, stdout, start, stallTimeout, onActivity, onStreamHook, func() {
 		go func() {
 			time.Sleep(postResultTimeout)
 			_ = d.pm.Terminate(cmd)
@@ -165,6 +175,7 @@ func (d *Driver) execute(ctx context.Context, workDir string, args []string, opt
 	waitErr := cmd.Wait()
 
 	if result != nil {
+		mergeOutputFromStreamBuffer(result, streamAccum.String())
 		result.Duration = time.Since(start)
 		return result, nil
 	}
@@ -179,6 +190,18 @@ func (d *Driver) execute(ctx context.Context, workDir string, args []string, opt
 		ExitCode: -1,
 		Duration: time.Since(start),
 	}, nil
+}
+
+// mergeOutputFromStreamBuffer fills empty RunResult.Output from streamed deltas.
+// With --include-partial-messages, some Claude Code builds omit duplicate text in the
+// final "result" event; the orchestrator JSON then exists only in accumulated stream chunks.
+func mergeOutputFromStreamBuffer(result *types.RunResult, streamAccum string) {
+	if result == nil || strings.TrimSpace(result.Output) != "" {
+		return
+	}
+	if acc := strings.TrimSpace(streamAccum); acc != "" {
+		result.Output = acc
+	}
 }
 
 // parseStdout reads stream-json lines from r and extracts the result event.
@@ -205,8 +228,12 @@ func (d *Driver) parseStdout(ctx context.Context, r io.Reader, start time.Time, 
 			continue
 		}
 
-		if event.Type == "assistant" && event.Content != "" && onStream != nil {
-			onStream(event.Content)
+		if onStream != nil {
+			if event.Type == "assistant" && event.Content != "" {
+				onStream(event.Content)
+			} else if chunk := StreamEventStreamingPayload(event); chunk != "" {
+				onStream(chunk)
+			}
 		}
 
 		if event.Type == "result" {

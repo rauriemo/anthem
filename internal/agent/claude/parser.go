@@ -11,6 +11,15 @@ type StreamEvent struct {
 	SessionID string          `json:"session_id,omitempty"`
 	Message   json.RawMessage `json:"message,omitempty"`
 	Content   string          `json:"content,omitempty"`
+	// Event is set for type "stream_event" when using --include-partial-messages.
+	Event *struct {
+		Type  string `json:"type,omitempty"` // e.g. content_block_delta
+		Delta *struct {
+			Type         string `json:"type"`
+			Text         string `json:"text,omitempty"`
+			PartialJSON  string `json:"partial_json,omitempty"`
+		} `json:"delta,omitempty"`
+	} `json:"event,omitempty"`
 
 	// Result event fields (present when type == "result")
 	IsError    bool            `json:"is_error,omitempty"`
@@ -42,6 +51,22 @@ func ParseStreamEvent(line []byte) (*StreamEvent, error) {
 		return nil, err
 	}
 	return &event, nil
+}
+
+// StreamEventStreamingPayload returns incremental assistant text from a stream_event line, if any.
+// Matches content_block_delta + text_delta and input_json_delta + partial_json shapes from stream-json.
+func StreamEventStreamingPayload(e *StreamEvent) string {
+	if e == nil || e.Type != "stream_event" || e.Event == nil || e.Event.Delta == nil {
+		return ""
+	}
+	d := e.Event.Delta
+	if d.Text != "" {
+		return d.Text
+	}
+	if d.PartialJSON != "" {
+		return d.PartialJSON
+	}
+	return ""
 }
 
 func trimBOM(b []byte) []byte {
