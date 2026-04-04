@@ -32,7 +32,7 @@ func NewDriver(pm ProcessManager, logger *slog.Logger) *Driver {
 
 func (d *Driver) Run(ctx context.Context, opts types.RunOpts) (*types.RunResult, error) {
 	args := []string{
-		"-p", opts.Prompt,
+		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
 	}
@@ -60,12 +60,12 @@ func (d *Driver) Run(ctx context.Context, opts types.RunOpts) (*types.RunResult,
 		args = append(args, "--add-dir", dir)
 	}
 
-	return d.execute(ctx, opts.WorkspacePath, args, opts)
+	return d.execute(ctx, opts.WorkspacePath, args, opts, opts.Prompt)
 }
 
 func (d *Driver) Continue(ctx context.Context, sessionID string, prompt string, opts types.ContinueOpts) (*types.RunResult, error) {
 	args := []string{
-		"-p", prompt,
+		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--resume", sessionID,
@@ -87,7 +87,7 @@ func (d *Driver) Continue(ctx context.Context, sessionID string, prompt string, 
 	return d.execute(ctx, opts.WorkspacePath, args, types.RunOpts{
 		StallTimeoutMS: opts.StallTimeoutMS,
 		OnStream:       opts.OnStream,
-	})
+	}, prompt)
 }
 
 func (d *Driver) Kill(pid int) error {
@@ -97,11 +97,12 @@ func (d *Driver) Kill(pid int) error {
 	return fmt.Errorf("direct pid kill not supported, use context cancellation")
 }
 
-func (d *Driver) execute(ctx context.Context, workDir string, args []string, opts types.RunOpts) (*types.RunResult, error) {
+func (d *Driver) execute(ctx context.Context, workDir string, args []string, opts types.RunOpts, stdinPrompt string) (*types.RunResult, error) {
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
+	cmd.Stdin = strings.NewReader(stdinPrompt)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
