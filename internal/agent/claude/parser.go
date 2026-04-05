@@ -15,9 +15,9 @@ type StreamEvent struct {
 	Event *struct {
 		Type  string `json:"type,omitempty"` // e.g. content_block_delta
 		Delta *struct {
-			Type         string `json:"type"`
-			Text         string `json:"text,omitempty"`
-			PartialJSON  string `json:"partial_json,omitempty"`
+			Type        string `json:"type"`
+			Text        string `json:"text,omitempty"`
+			PartialJSON string `json:"partial_json,omitempty"`
 		} `json:"delta,omitempty"`
 	} `json:"event,omitempty"`
 

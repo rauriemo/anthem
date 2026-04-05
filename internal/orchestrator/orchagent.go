@@ -58,14 +58,14 @@ type ProjectContext struct {
 }
 
 type StateSnapshot struct {
-	Tasks          []TaskSummary       `json:"tasks"`
-	RetryQueue     []RetrySummary      `json:"retry_queue,omitempty"`
-	Budget         BudgetSummary       `json:"budget"`
-	Wave           *WaveSummary        `json:"wave,omitempty"`
-	RecentEvents   []EventSummary      `json:"recent_events,omitempty"`
-	UserMessage    *UserMessageContext `json:"user_message,omitempty"`
-	Project        *ProjectContext     `json:"project,omitempty"`
-	SourceChannel  string              `json:"source_channel,omitempty"`
+	Tasks         []TaskSummary       `json:"tasks"`
+	RetryQueue    []RetrySummary      `json:"retry_queue,omitempty"`
+	Budget        BudgetSummary       `json:"budget"`
+	Wave          *WaveSummary        `json:"wave,omitempty"`
+	RecentEvents  []EventSummary      `json:"recent_events,omitempty"`
+	UserMessage   *UserMessageContext `json:"user_message,omitempty"`
+	Project       *ProjectContext     `json:"project,omitempty"`
+	SourceChannel string              `json:"source_channel,omitempty"`
 }
 
 func (s StateSnapshot) Serialize() string {

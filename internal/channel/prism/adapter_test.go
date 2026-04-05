@@ -45,6 +45,7 @@ func authenticate(t *testing.T, conn *websocket.Conn, token string) frame {
 	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		t.Fatalf("write auth: %v", err)
 	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, resp, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read auth response: %v", err)
@@ -105,6 +106,7 @@ func TestRequestResponse(t *testing.T) {
 		t.Fatalf("send reply: %v", err)
 	}
 
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, resp, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read response: %v", err)
@@ -138,6 +140,7 @@ func TestDisplayBroadcast(t *testing.T) {
 		t.Fatalf("send display: %v", err)
 	}
 
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, resp, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read display: %v", err)
