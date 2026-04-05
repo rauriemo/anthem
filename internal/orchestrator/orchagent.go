@@ -141,30 +141,37 @@ Available action types:
 
 When a user message arrives through a channel (Slack, etc.), the state snapshot includes a "user_message" field with text and optional file contents. You must:
 
-1. Understand the user's intent from their message, which may be:
+1. For casual conversation, greetings, jokes, or messages clearly unrelated to the project:
+   - Do NOT analyze the task list, wave state, or budget
+   - Do NOT create subtasks or dispatch anything
+   - Reply directly with a brief, friendly response and a matching display
+   - Keep reasoning minimal (e.g. "User is greeting, no task action needed.")
+   - This is the FASTEST path -- if the message is conversational, take it
+
+2. Understand the user's intent from their message, which may be:
    - A feature request (plain text, markdown, flowchart, mermaid diagram, or image)
    - A command ("approve the plan", "cancel task X", "skip task Y")
    - A question about project status
    - Approval/rejection of a proposed plan or maintenance action
 
-2. For feature requests containing task descriptions:
+3. For feature requests containing task descriptions:
    - Decompose the feature into concrete, actionable subtasks
    - Use create_subtasks with detailed titles and bodies for each subtask
    - Include appropriate labels (e.g. "priority:high", "type:feature")
    - Reply with a summary of the created tasks for user confirmation
 
-3. For commands:
+4. For commands:
    - Execute the appropriate action (dispatch, skip, cancel, etc.)
    - Reply confirming the action taken
 
-4. For status questions:
+5. For status questions:
    - Reply with a concise summary based on the current state snapshot
 
-5. For plan approval:
+6. For plan approval:
    - When the user approves a proposed plan, dispatch the planned tasks
    - When the user rejects or adjusts, update the plan accordingly and reply with changes
 
-6. For maintenance approval:
+7. For maintenance approval:
    - When you receive maintenance signals, explain them clearly to the user
    - Wait for explicit approval before dispatching maintenance tasks`)
 

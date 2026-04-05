@@ -2,6 +2,7 @@ package prism
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -24,17 +25,24 @@ var upgrader = websocket.Upgrader{
 }
 
 type frame struct {
-	Type      string `json:"type"`
-	Token     string `json:"token,omitempty"`
-	Client    string `json:"client,omitempty"`
-	ID        string `json:"id,omitempty"`
-	Text      string `json:"text,omitempty"`
-	Event     string `json:"event,omitempty"`
-	Error     string `json:"error,omitempty"`
-	Ack       bool   `json:"ack,omitempty"`
-	Thread    string `json:"thread,omitempty"`
-	Component any    `json:"component,omitempty"`
-	Done      bool   `json:"done,omitempty"`
+	Type      string      `json:"type"`
+	Token     string      `json:"token,omitempty"`
+	Client    string      `json:"client,omitempty"`
+	ID        string      `json:"id,omitempty"`
+	Text      string      `json:"text,omitempty"`
+	Event     string      `json:"event,omitempty"`
+	Error     string      `json:"error,omitempty"`
+	Ack       bool        `json:"ack,omitempty"`
+	Thread    string      `json:"thread,omitempty"`
+	Component any         `json:"component,omitempty"`
+	Done      bool        `json:"done,omitempty"`
+	Files     []frameFile `json:"files,omitempty"`
+}
+
+type frameFile struct {
+	Name     string `json:"name"`
+	Content  string `json:"content"`
+	MimeType string `json:"mime_type"`
 }
 
 type connEntry struct {
@@ -204,6 +212,19 @@ func (a *Adapter) readLoop(entry *connEntry) {
 			ThreadID:    f.ID,
 			Text:        f.Text,
 			Timestamp:   time.Now(),
+		}
+
+		for _, ff := range f.Files {
+			raw, err := base64.StdEncoding.DecodeString(ff.Content)
+			if err != nil {
+				a.logger.Warn("prism file decode error", "name", ff.Name, "error", err)
+				continue
+			}
+			msg.Files = append(msg.Files, channel.File{
+				Name:     ff.Name,
+				Content:  raw,
+				MimeType: ff.MimeType,
+			})
 		}
 
 		select {
