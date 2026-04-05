@@ -2,7 +2,9 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -564,16 +566,17 @@ func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, a
 						component["data"] = action.DisplayData
 					}
 				}
-				displayMsg := channel.OutgoingMessage{
-					Display: component,
-				}
-				if err := o.channelMgr.Broadcast(ctx, displayMsg); err != nil {
-					o.logger.Warn("failed to send display payload", "error", err)
-				}
+			displayMsg := channel.OutgoingMessage{
+				Display:   component,
+				DisplayID: newDisplayID(),
 			}
-			o.recordAudit(ctx, "channel.display_sent", "", strPtr("display"))
+			if err := o.channelMgr.Broadcast(ctx, displayMsg); err != nil {
+				o.logger.Warn("failed to send display payload", "error", err)
+			}
+		}
+		o.recordAudit(ctx, "channel.display_sent", "", strPtr("display"))
 
-		case ActionRequestMaintenance:
+	case ActionRequestMaintenance:
 			if o.channelMgr != nil {
 				notify := channel.OutgoingMessage{
 					Text:     fmt.Sprintf("**Maintenance proposal** (%s): %s", action.MaintenanceType, action.Reason),
@@ -633,6 +636,12 @@ func (o *Orchestrator) recordAudit(ctx context.Context, eventType string, taskID
 }
 
 func strPtr(s string) *string { return &s }
+
+func newDisplayID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return "dsp-" + hex.EncodeToString(b)
+}
 
 func (o *Orchestrator) executeUpdateVoice(ctx context.Context, action Action) error {
 	home := o.homeDir
@@ -1198,8 +1207,9 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 				}
 			}
 			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
-				Display:  component,
-				ThreadID: msg.ThreadID,
+				Display:   component,
+				DisplayID: newDisplayID(),
+				ThreadID:  msg.ThreadID,
 			})
 			o.recordAudit(ctx, "channel.display_sent", "", strPtr("display"))
 		}

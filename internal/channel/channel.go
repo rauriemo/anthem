@@ -28,6 +28,7 @@ type OutgoingMessage struct {
 	EventType   string
 	Ack         bool
 	Display     any    `json:"display,omitempty"`
+	DisplayID   string `json:"display_id,omitempty"`
 	StreamDelta string `json:"stream_delta,omitempty"`
 	StreamDone  bool   `json:"stream_done,omitempty"`
 }
