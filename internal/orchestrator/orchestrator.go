@@ -567,17 +567,17 @@ func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, a
 						component["data"] = action.DisplayData
 					}
 				}
-			displayMsg := channel.OutgoingMessage{
-				Display:   component,
-				DisplayID: newDisplayID(),
+				displayMsg := channel.OutgoingMessage{
+					Display:   component,
+					DisplayID: newDisplayID(),
+				}
+				if err := o.channelMgr.Broadcast(ctx, displayMsg); err != nil {
+					o.logger.Warn("failed to send display payload", "error", err)
+				}
 			}
-			if err := o.channelMgr.Broadcast(ctx, displayMsg); err != nil {
-				o.logger.Warn("failed to send display payload", "error", err)
-			}
-		}
-		o.recordAudit(ctx, "channel.display_sent", "", strPtr("display"))
+			o.recordAudit(ctx, "channel.display_sent", "", strPtr("display"))
 
-	case ActionRequestMaintenance:
+		case ActionRequestMaintenance:
 			if o.channelMgr != nil {
 				notify := channel.OutgoingMessage{
 					Text:     fmt.Sprintf("**Maintenance proposal** (%s): %s", action.MaintenanceType, action.Reason),

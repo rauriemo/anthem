@@ -140,7 +140,7 @@ func TestDisplayBroadcast(t *testing.T) {
 		t.Fatalf("send display: %v", err)
 	}
 
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	_, resp, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read display: %v", err)

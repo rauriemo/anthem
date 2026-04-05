@@ -1,6 +1,9 @@
 package cost
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // Tracker aggregates token usage and cost across agent sessions.
 type Tracker struct {
@@ -15,6 +18,7 @@ type SessionCost struct {
 	TokensOut int
 	CostUSD   float64
 	TurnsUsed int
+	Timestamp time.Time
 }
 
 func NewTracker() *Tracker {
@@ -24,6 +28,9 @@ func NewTracker() *Tracker {
 func (t *Tracker) Record(sc SessionCost) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if sc.Timestamp.IsZero() {
+		sc.Timestamp = time.Now()
+	}
 	t.sessions[sc.SessionID] = &sc
 }
 
