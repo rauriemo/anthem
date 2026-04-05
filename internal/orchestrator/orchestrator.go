@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1117,6 +1118,7 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 
 	snap := o.buildStateSnapshot(tasks)
 	snap.UserMessage = buildUserMessageContext(msg)
+	snap.SourceChannel = msg.ChannelKind
 
 	if o.orchAgent == nil {
 		o.sendFollowUp(ctx, msg, "Orchestrator agent is not enabled.")
@@ -1153,9 +1155,16 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		return
 	}
 
+	prismSuppressReplyChat := msg.ChannelKind == "prism" && slices.ContainsFunc(actions, func(a Action) bool {
+		return a.Type == ActionDisplay
+	})
+
 	// Execute actions -- replies and display frames are sent as follow-up notifications
 	for i := range actions {
 		if actions[i].Type == ActionReply && o.channelMgr != nil {
+			if prismSuppressReplyChat {
+				continue
+			}
 			o.sendFollowUp(ctx, msg, actions[i].Body)
 			o.recordAudit(ctx, "channel.reply_sent", "", strPtr("reply"))
 		}

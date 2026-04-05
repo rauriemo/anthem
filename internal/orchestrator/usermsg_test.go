@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -120,6 +121,74 @@ func TestHandleUserMessage_ConsultsAndReplies(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected follow-up reply 'There is 1 task queued.' in sent messages: %+v", sent)
+	}
+}
+
+func TestHandleUserMessage_PrismSkipsReplyWhenDisplayPresent(t *testing.T) {
+	tasks := []types.Task{}
+	trk := tracker.NewMockTracker(tasks)
+
+	orchRunner := agent.NewMockRunner()
+	orchRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{
+			SessionID: "orch-s1",
+			Output: `{"reasoning": "idle", "actions": [
+				{"type": "reply", "body": "No tasks — chat should not show this."},
+				{"type": "display", "display_kind": "html", "display_content": "<p>visual only</p>"}
+			]}`,
+			TokensIn: 10, TokensOut: 5,
+		}, nil
+	}
+
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, testLogger())
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "{{.issue.title}}",
+		Tracker:        trk,
+		Runner:         agent.NewMockRunner(),
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		OrchAgent:      orchAgent,
+		ChannelManager: mgr,
+	})
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "prism",
+		SenderID:    "prism",
+		ThreadID:    "thread-prism-1",
+		Text:        "status?",
+		Timestamp:   time.Now(),
+	})
+
+	sent := ch.sentMessages()
+	for _, msg := range sent {
+		if msg.EventType == "channel.followup" && strings.Contains(msg.Text, "chat should not show") {
+			t.Fatalf("prism chat should not get reply when display is present: %+v", msg)
+		}
+	}
+
+	var sawDisplay bool
+	for _, msg := range sent {
+		if msg.Display != nil {
+			sawDisplay = true
+			m, ok := msg.Display.(map[string]any)
+			if !ok || m["kind"] != "html" {
+				t.Fatalf("expected html display map, got %#v", msg.Display)
+			}
+		}
+	}
+	if !sawDisplay {
+		t.Fatalf("expected a display message in sent: %+v", sent)
 	}
 }
 

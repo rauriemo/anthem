@@ -58,13 +58,14 @@ type ProjectContext struct {
 }
 
 type StateSnapshot struct {
-	Tasks        []TaskSummary       `json:"tasks"`
-	RetryQueue   []RetrySummary      `json:"retry_queue,omitempty"`
-	Budget       BudgetSummary       `json:"budget"`
-	Wave         *WaveSummary        `json:"wave,omitempty"`
-	RecentEvents []EventSummary      `json:"recent_events,omitempty"`
-	UserMessage  *UserMessageContext `json:"user_message,omitempty"`
-	Project      *ProjectContext     `json:"project,omitempty"`
+	Tasks          []TaskSummary       `json:"tasks"`
+	RetryQueue     []RetrySummary      `json:"retry_queue,omitempty"`
+	Budget         BudgetSummary       `json:"budget"`
+	Wave           *WaveSummary        `json:"wave,omitempty"`
+	RecentEvents   []EventSummary      `json:"recent_events,omitempty"`
+	UserMessage    *UserMessageContext `json:"user_message,omitempty"`
+	Project        *ProjectContext     `json:"project,omitempty"`
+	SourceChannel  string              `json:"source_channel,omitempty"`
 }
 
 func (s StateSnapshot) Serialize() string {
@@ -131,6 +132,7 @@ Available action types:
   * video:    display_kind="video", display_data={"url":"<video url>","autoplay":false}, display_title (optional)
   * html:     display_kind="html", display_content="<full self-contained html>", display_title (optional). Use for custom interactive visualizations, canvas graphics, styled layouts, or anything that doesn't fit other kinds. HTML must be fully self-contained with all CSS/JS inline -- no external script/stylesheet/image URLs.
   EVERY reply MUST include at least one display action. Never reply without a visual. Default to html kind -- create a well-designed, visually rich HTML page. Only use a specialized kind when it is clearly the best fit: code for source code snippets, data for tabular/spreadsheet data, chart for numeric visualizations, image/video for media, markdown for long-form documents. When in doubt, use html.
+  When the state snapshot includes "source_channel":"prism", put all user-visible prose in the display (especially html). Set every reply action body to "" (empty string) so Prism chat stays clean — the visual pane is the primary surface.
   When the answer has obvious visual context (code, data, diagrams, explanations), render that context beautifully with styled layouts, headings, lists, color, and spacing.
   When there is NO obvious visual context (greetings, short answers, acknowledgments, confusion, humor), use the html display to express personality and emotion through creative visuals -- animated SVGs, CSS art, expressive characters, playful typography, emoji-scale illustrations. Examples: a friendly animated wave or smiley for "hello", a small bewildered creature with "huh?" when confused, a thumbs-up animation for confirmations, a thinking face with floating question marks when pondering. Be creative, expressive, and consistent in your visual personality. The visual display is your face -- always show something.
 - request_maintenance: Propose a maintenance action (gc, lint, test, drift check). Required: maintenance_type, reason. Optional: auto_approvable (bool).`)
