@@ -356,7 +356,16 @@ func (o *Orchestrator) tick(ctx context.Context) {
 			o.logger.Debug("orchestrator returned nil actions, falling back to mechanical dispatch")
 			o.mechanicalDispatch(ctx, tasks)
 		} else {
-			o.executeActions(ctx, tasks, actions)
+			// Filter out reply/display actions from the polling cycle --
+			// these are only meaningful for user-initiated interactions
+			// and would duplicate frames already sent by HandleUserMessage.
+			var cycleActions []Action
+			for _, a := range actions {
+				if a.Type != ActionReply && a.Type != ActionDisplay {
+					cycleActions = append(cycleActions, a)
+				}
+			}
+			o.executeActions(ctx, tasks, cycleActions)
 		}
 	} else {
 		o.mechanicalDispatch(ctx, tasks)
@@ -1155,14 +1164,14 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		return
 	}
 
-	prismSuppressReplyChat := msg.ChannelKind == "prism" && slices.ContainsFunc(actions, func(a Action) bool {
+	hasDisplay := msg.ChannelKind == "prism" && slices.ContainsFunc(actions, func(a Action) bool {
 		return a.Type == ActionDisplay
 	})
 
 	// Execute actions -- replies and display frames are sent as follow-up notifications
 	for i := range actions {
 		if actions[i].Type == ActionReply && o.channelMgr != nil {
-			if prismSuppressReplyChat {
+			if hasDisplay && strings.TrimSpace(actions[i].Body) == "" {
 				continue
 			}
 			o.sendFollowUp(ctx, msg, actions[i].Body)

@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -133,7 +132,7 @@ func TestHandleUserMessage_PrismSkipsReplyWhenDisplayPresent(t *testing.T) {
 		return &types.RunResult{
 			SessionID: "orch-s1",
 			Output: `{"reasoning": "idle", "actions": [
-				{"type": "reply", "body": "No tasks — chat should not show this."},
+				{"type": "reply", "body": ""},
 				{"type": "display", "display_kind": "html", "display_content": "<p>visual only</p>"}
 			]}`,
 			TokensIn: 10, TokensOut: 5,
@@ -172,8 +171,8 @@ func TestHandleUserMessage_PrismSkipsReplyWhenDisplayPresent(t *testing.T) {
 
 	sent := ch.sentMessages()
 	for _, msg := range sent {
-		if msg.EventType == "channel.followup" && strings.Contains(msg.Text, "chat should not show") {
-			t.Fatalf("prism chat should not get reply when display is present: %+v", msg)
+		if msg.EventType == "channel.followup" && msg.Text != "" {
+			t.Fatalf("prism chat should not get non-empty reply when display is present with empty body: %+v", msg)
 		}
 	}
 

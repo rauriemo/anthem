@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/rauriemo/anthem/internal/agent"
+	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/tracker"
 	"github.com/rauriemo/anthem/internal/types"
@@ -107,6 +108,68 @@ func TestTick_DirtySnapshotGating(t *testing.T) {
 
 	if consultCalls != firstCalls {
 		t.Errorf("orchestrator consulted %d times on unchanged snapshot, expected %d", consultCalls, firstCalls)
+	}
+}
+
+func TestTick_FiltersReplyAndDisplayFromPollingCycle(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Identifier: "GH-1", Title: "T1", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	orchRunner := agent.NewMockRunner()
+	orchRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{
+			SessionID: "orch-s1",
+			Output: `{"reasoning": "greet and show", "actions": [
+				{"type": "dispatch", "task_id": "1"},
+				{"type": "reply", "body": "Hello from polling"},
+				{"type": "display", "display_kind": "html", "display_content": "<p>hi</p>"}
+			]}`,
+			TokensIn: 10, TokensOut: 5,
+			Duration: time.Millisecond,
+		}, nil
+	}
+
+	execRunner := agent.NewMockRunner()
+	execRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{SessionID: "exec-s1", ExitCode: 0, Duration: time.Millisecond}, nil
+	}
+
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 100
+
+	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, testLogger())
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "{{.issue.title}}",
+		Tracker:        trk,
+		Runner:         execRunner,
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		OrchAgent:      orchAgent,
+		ChannelManager: mgr,
+	})
+
+	orch.tick(context.Background())
+	time.Sleep(100 * time.Millisecond)
+
+	sent := ch.sentMessages()
+	for _, msg := range sent {
+		if msg.Text == "Hello from polling" {
+			t.Error("reply action from polling cycle should have been filtered out")
+		}
+		if msg.Display != nil {
+			t.Error("display action from polling cycle should have been filtered out")
+		}
 	}
 }
 
