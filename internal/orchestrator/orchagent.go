@@ -79,6 +79,7 @@ type OrchestratorAgent struct {
 	logger           *slog.Logger
 	sessionID        string
 	totalTokens      int
+	totalCostUSD     float64
 	maxContextTokens int
 }
 
@@ -226,8 +227,7 @@ func (o *OrchestratorAgent) Start(ctx context.Context, state StateSnapshot) ([]A
 		return nil, fmt.Errorf("orchestrator start: %w", err)
 	}
 
-	o.sessionID = result.SessionID
-	o.totalTokens += result.TokensIn + result.TokensOut
+	o.recordResult(result)
 
 	actions, err := parseActions(result.Output)
 	if err != nil {
@@ -258,8 +258,7 @@ func (o *OrchestratorAgent) Consult(ctx context.Context, state StateSnapshot) ([
 		return nil, fmt.Errorf("orchestrator consult: %w", err)
 	}
 
-	o.sessionID = result.SessionID
-	o.totalTokens += result.TokensIn + result.TokensOut
+	o.recordResult(result)
 
 	actions, err := parseActions(result.Output)
 	if err != nil {
@@ -274,6 +273,19 @@ func (o *OrchestratorAgent) Refresh(ctx context.Context, state StateSnapshot) er
 	o.sessionID = ""
 	o.totalTokens = 0
 	return nil
+}
+
+// DrainCost returns the cost accumulated since the last drain and resets it.
+func (o *OrchestratorAgent) DrainCost() (tokensIn int, tokensOut int, costUSD float64) {
+	t := o.totalCostUSD
+	o.totalCostUSD = 0
+	return 0, 0, t
+}
+
+func (o *OrchestratorAgent) recordResult(result *types.RunResult) {
+	o.sessionID = result.SessionID
+	o.totalTokens += result.TokensIn + result.TokensOut
+	o.totalCostUSD += result.CostUSD
 }
 
 func parseActions(output string) ([]Action, error) {
@@ -332,8 +344,7 @@ func (o *OrchestratorAgent) StartStreaming(ctx context.Context, state StateSnaps
 		return nil, fmt.Errorf("orchestrator start: %w", err)
 	}
 
-	o.sessionID = result.SessionID
-	o.totalTokens += result.TokensIn + result.TokensOut
+	o.recordResult(result)
 
 	actions, err := parseActions(result.Output)
 	if err != nil {
@@ -365,8 +376,7 @@ func (o *OrchestratorAgent) ConsultStreaming(ctx context.Context, state StateSna
 		return nil, fmt.Errorf("orchestrator consult: %w", err)
 	}
 
-	o.sessionID = result.SessionID
-	o.totalTokens += result.TokensIn + result.TokensOut
+	o.recordResult(result)
 
 	actions, err := parseActions(result.Output)
 	if err != nil {
@@ -397,7 +407,7 @@ func (o *OrchestratorAgent) ConsultWithRepairStreaming(ctx context.Context, stat
 		return nil, nil
 	}
 
-	o.totalTokens += result.TokensIn + result.TokensOut
+	o.recordResult(result)
 
 	actions, err = parseActions(result.Output)
 	if err != nil {
@@ -429,7 +439,7 @@ func (o *OrchestratorAgent) ConsultWithRepair(ctx context.Context, state StateSn
 		return nil, nil
 	}
 
-	o.totalTokens += result.TokensIn + result.TokensOut
+	o.recordResult(result)
 
 	actions, err = parseActions(result.Output)
 	if err != nil {

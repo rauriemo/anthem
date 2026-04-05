@@ -351,6 +351,7 @@ func (o *Orchestrator) tick(ctx context.Context) {
 	// 5. Orchestrator-driven dispatch or fallback
 	if o.orchAgent != nil {
 		actions, err := o.orchAgent.ConsultWithRepair(ctx, snapshot)
+		o.recordOrchCost()
 		if err != nil {
 			o.logger.Warn("orchestrator consult failed, falling back to mechanical dispatch", "error", err)
 			o.mechanicalDispatch(ctx, tasks)
@@ -613,6 +614,23 @@ func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, a
 			o.currentWave.FrontierTaskIDs = append(o.currentWave.FrontierTaskIDs, dispatchedIDs...)
 		}
 	}
+}
+
+const orchCostTaskID = "__orchestrator__"
+
+func (o *Orchestrator) recordOrchCost() {
+	if o.orchAgent == nil {
+		return
+	}
+	_, _, costUSD := o.orchAgent.DrainCost()
+	if costUSD <= 0 {
+		return
+	}
+	o.costTracker.Record(cost.SessionCost{
+		TaskID:    orchCostTaskID,
+		SessionID: fmt.Sprintf("orch-%d", time.Now().UnixMilli()),
+		CostUSD:   costUSD,
+	})
 }
 
 func (o *Orchestrator) recordAudit(ctx context.Context, eventType string, taskID string, actionName *string) {
@@ -1154,6 +1172,7 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		}
 	}
 	actions, err := o.orchAgent.ConsultWithRepairStreaming(ctx, snap, onStream)
+	o.recordOrchCost()
 
 	if o.channelMgr != nil {
 		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
