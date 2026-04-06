@@ -12,7 +12,7 @@ An open-source alternative to OpenAI Symphony, built in Go, designed for Claude 
 - **WORKFLOW.md location**: Per-project, typically `./WORKFLOW.md` in repo root
 - **Global state root**: `~/.anthem/` (VOICE.md, constraints.yaml, state.json, voice-changelog.md)
 - **GitHub auth**: `GITHUB_TOKEN` env var, fallback to `gh auth token` command. No custom credential storage.
-- **Dashboard**: Deferred to Phase 4 (tech choice TBD between HTMX and SPA)
+- **Dashboard**: Fulfilled by Prism (separate repo -- React frontend + FastAPI backend, A2UI component protocol, mDNS discovery). No embedded dashboard in the Anthem binary.
 - **Voice changelog**: Changelog file at `~/.anthem/voice-changelog.md`, wired in Phase 3a via the `update_voice` contract action
 - **Testing**: Interface-based mocks (no mocking framework), table-driven tests, `//go:build integration` tagged tests for external services, `testdata/` fixtures, CI from day 1
 - **Logging**: Use `log/slog` (stdlib) for structured logging
@@ -56,7 +56,7 @@ graph TD
   end
   subgraph observability [Observability Layer]
     LOG["Structured Logger - slog"]
-    DASH["Web Dashboard"]
+    PRISM["Prism Visual Workstation"]
     API["Status API"]
   end
 
@@ -318,7 +318,7 @@ flowchart TD
 
 **Event bus:**
 
-The orchestrator publishes events to an in-process event bus for dashboard/API consumption:
+The orchestrator publishes events to an in-process event bus for channel/API consumption:
 
 ```go
 type Event struct {
@@ -334,9 +334,9 @@ type EventBus interface {
 }
 ```
 
-Implementation is a simple fan-out channel -- no external message broker needed for a single-binary tool. The dashboard and API subscribe to the event bus for real-time updates.
+Implementation is a simple fan-out channel -- no external message broker needed for a single-binary tool. Channel adapters (Slack, Dispatch, Prism) and the API subscribe to the event bus for real-time updates.
 
-**Critical**: `Publish` must be **non-blocking**. The orchestrator loop calls `Publish` on every tick -- if a slow dashboard subscriber causes `Publish` to block, it stalls polling and dispatch. Implementation uses buffered channels per subscriber. If a subscriber's buffer is full, drop the oldest event and log a warning. The orchestrator's core loop must never be gated on observability consumers.
+**Critical**: `Publish` must be **non-blocking**. The orchestrator loop calls `Publish` on every tick -- if a slow channel subscriber causes `Publish` to block, it stalls polling and dispatch. Implementation uses buffered channels per subscriber. If a subscriber's buffer is full, drop the oldest event and log a warning. The orchestrator's core loop must never be gated on observability consumers.
 
 **Phase 3a changes to the orchestrator loop**: The `tick()` method is extended to optionally consult the orchestrator agent before dispatch. The flow becomes: reconcile -> fetch tasks -> build StateSnapshot -> check if snapshot changed (dirty-snapshot gating) -> if changed and orchestrator enabled, consult orchestrator -> validate returned actions against contract -> execute actions -> audit log. If the orchestrator is disabled, nil, or fails, the daemon falls back to Phase 2 mechanical dispatch (dispatch every eligible task). All dispatches (orchestrator-directed and fallback) are recorded in the audit log.
 
@@ -574,23 +574,23 @@ Multiple executor agents may attempt to edit shared files (e.g., `WORKFLOW.md`) 
 - If two agents both propose `WORKFLOW.md` changes, the second one is queued and re-diffed against the already-applied first change
 - `VOICE.md` is only modified by the orchestrator agent (Phase 3), which is a single session -- no concurrent write issues
 
-### 12. Web Dashboard + Status API (Observability Layer)
+### 12. Prism Visual Workstation (Observability Layer)
 
-Embedded Go HTTP server (no separate frontend build step):
+Dashboard functionality is fulfilled by **Prism** (separate repo), a visual workstation that connects to Anthem via the Prism WebSocket channel adapter. Prism provides:
 
-- `GET /` -- Dashboard (tech TBD in Phase 3 -- server-rendered HTML + HTMX or embedded SPA)
+- React frontend with A2UI component protocol for structured visual content
+- Real-time LLM token streaming from Anthem agents
+- Chat interface for user-orchestrator communication
+- TTS/STT integration for voice interaction
+- mDNS discovery for automatic Anthem connection
+- Auto-install of Go and Anthem dependencies
+
+Anthem exposes observability through:
+
 - `GET /api/v1/state` -- JSON snapshot: running tasks, queued, retry queue, token totals
 - `GET /api/v1/tasks/:id` -- Single task details + agent session history
 - `POST /api/v1/refresh` -- Force immediate poll tick
-- WebSocket `/ws` -- Real-time event stream (subscribes to the EventBus)
-
-Dashboard shows:
-
-- Active agents with live output streaming
-- Task queue with priorities and labels
-- Token usage and cost estimates
-- Retry queue with next attempt times
-- Historical runs with outcomes
+- Prism WebSocket channel -- real-time event stream, display frames, stream frames
 
 ### 13. Structured Logging
 
@@ -606,7 +606,7 @@ Claude Code's `--output-format json` returns native cost data per session. Anthe
 - Per-task: tokens in/out, cost USD, number of turns, duration
 - Per-session aggregate: total spend, average cost per task, cost by label/category
 - Budget enforcement: `max_cost` rule stops a task if its running total exceeds the budget
-- Dashboard displays running cost with estimates (based on average cost per turn x remaining turns)
+- Prism displays running cost with estimates (based on average cost per turn x remaining turns)
 - Optional: daily/weekly spend alerts via issue comments or webhook
 
 ### 15. MCP + Skills Integration
@@ -672,11 +672,9 @@ anthem/
     agent/              # AgentRunner interface
       claude/           # Claude Code driver (stream-json, session resume, cross-platform process mgmt)
     voice/              # VOICE.md parser, section merge logic, changelog
-    dashboard/          # Embedded HTTP server, templates, API, WebSocket
+    dashboard/          # HTTP server skeleton, status API
     logging/            # Structured logger (slog)
     cost/               # Token/cost tracking, budget enforcement
-  templates/
-    dashboard/          # HTML templates for dashboard
   testdata/             # Test fixtures (workflow.md, voice.md, tasks.json)
   WORKFLOW.md.example   # Example workflow file
   VOICE.md.example      # Example personality file
@@ -694,7 +692,7 @@ anthem/
 anthem init                   # Create starter WORKFLOW.md + bootstrap ~/.anthem/VOICE.md
 anthem run                    # Start orchestrator (default: ./WORKFLOW.md)
 anthem run -w /path/to.md     # Custom workflow file
-anthem run --port 8080        # Override dashboard port
+anthem run --port 8080        # Override API/server port
 anthem validate               # Validate WORKFLOW.md without starting
 anthem status                 # Query running orchestrator's /api/v1/state
 anthem version                # Print version
@@ -777,14 +775,13 @@ Competitive gap analysis against OpenHands, CrewAI, CC Mirror, SWE-agent, Aider,
 10. Specialist agent profiles -- `AgentProfile` struct with `PromptPrefix`/`PromptSuffix`/`AllowedTools`/`Model`/`MaxTurns`/`ReviewEnabled`. Default profiles: coder, architect, tester, debugger. Orchestrator selects via `profile` field on dispatch action
 11. Decision trace system -- `traces` table in audit DB captures every LLM interaction with prompt/response previews, tokens, cost, duration, linked task/wave/session IDs. Query methods for post-hoc debugging
 
-### Phase 5: Dashboard + Polish + Community
+### Phase 5: Polish + Community
 
-1. Dashboard + status API + WebSocket streaming via EventBus (embedded HTTP server)
-2. WhatsApp channel adapter (uses dashboard HTTP server for inbound webhooks)
-3. Example WORKFLOW.md + VOICE.md templates
-4. CONTRIBUTING.md
-5. Cross-platform release binaries via GoReleaser (Windows/macOS/Linux), code signing for Windows (SignPath.io or Azure Trusted Signing)
-6. Demo video
+1. WhatsApp channel adapter
+2. Example WORKFLOW.md + VOICE.md templates
+3. CONTRIBUTING.md
+4. Cross-platform release binaries via GoReleaser (Windows/macOS/Linux), code signing for Windows (SignPath.io or Azure Trusted Signing)
+5. Demo video
 
 ## Future Enhancements (Post Phase 5)
 

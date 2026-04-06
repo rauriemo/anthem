@@ -10,7 +10,7 @@
 - **WORKFLOW.md location**: Per-project, typically `./WORKFLOW.md` in repo root
 - **Global state root**: `~/.anthem/` (VOICE.md, constraints.yaml, state.json, voice-changelog.md)
 - **GitHub auth**: `GITHUB_TOKEN` env var, fallback to `gh auth token` command. No custom credential storage.
-- **Dashboard**: Deferred to Phase 5 (tech choice TBD)
+- **Dashboard**: Fulfilled by Prism (separate repo -- React + FastAPI visual workstation)
 - **Voice changelog**: Changelog at `~/.anthem/voice-changelog.md`, wired in Phase 3a via `update_voice` contract action
 - **Testing**: Interface-based mocks (no mocking framework), table-driven tests, `//go:build integration` tagged tests for external services, `testdata/` fixtures, CI from day 1
 - **Logging**: Use `log/slog` (Go stdlib) for structured logging
@@ -83,8 +83,8 @@ anthem/
     maintenance/
       scanner.go                     # Phase 3b: audit-log health signal scanner
     dashboard/
-      server.go                      # HTTP server skeleton (Phase 4)
-      api.go                         # REST API route definitions (Phase 4)
+      server.go                      # HTTP server skeleton, status API
+      api.go                         # REST API route definitions
     logging/
       logger.go                      # Structured JSON logger (slog wrapper)
     cost/
@@ -249,14 +249,13 @@ Execution order: 1a -> 1b -> 1c -> 2a -> 2c -> 2b -> 2d -> 2e -> 3c -> 3b -> 3a.
 10. **Agent profiles** (`config.go`, `contract.go`, `orchestrator.go`, `orchagent.go`) -- AgentProfile struct, default profiles, profile field on dispatch
 11. **Decision traces** (`audit/schema.go`, `audit/audit.go`, `orchestrator.go`) -- traces table, RecordTrace, query methods
 
-### Phase 5: Dashboard + Polish + Community
+### Phase 5: Polish + Community
 
-1. Dashboard + status API + WebSocket streaming via EventBus (embedded HTTP server)
-2. WhatsApp channel adapter (uses dashboard HTTP server for inbound webhooks)
-3. Example WORKFLOW.md + VOICE.md templates
-4. CONTRIBUTING.md
-5. Cross-platform release binaries via GoReleaser (Windows/macOS/Linux), Windows code signing (SignPath.io or Azure Trusted Signing)
-6. Demo video
+1. WhatsApp channel adapter
+2. Example WORKFLOW.md + VOICE.md templates
+3. CONTRIBUTING.md
+4. Cross-platform release binaries via GoReleaser (Windows/macOS/Linux), Windows code signing (SignPath.io or Azure Trusted Signing)
+5. Demo video
 
 ### Future Enhancements (Post Phase 5)
 

@@ -28,7 +28,7 @@ These are the source of truth for what to build and how.
 - **WORKFLOW.md location**: Per-project, typically `./WORKFLOW.md` in repo root
 - **Global state root**: `~/.anthem/` for all global state (VOICE.md, constraints.yaml, state.json, voice-changelog.md). Resolves via `os.UserHomeDir()` on all platforms.
 - **GitHub auth**: `GITHUB_TOKEN` env var as primary, fallback to `gh auth token` CLI command. No custom credential storage -- no tokens in `~/.anthem/`.
-- **Dashboard**: Deferred to Phase 4 (tech choice TBD between HTMX and SPA)
+- **Dashboard**: Fulfilled by Prism (separate repo, visual workstation with React frontend + FastAPI backend). No embedded dashboard needed in the Anthem binary.
 - **Voice changelog**: Log all VOICE.md changes with reasons to `~/.anthem/voice-changelog.md`. Wired in Phase 3a via the `update_voice` contract action.
 - **Testing**: Interface-based mocks (no mocking framework -- just simple structs satisfying interfaces), table-driven tests, `//go:build integration` tagged tests for external services, `testdata/` fixtures, CI from day 1
 - **Logging**: Use `log/slog` (Go stdlib) for structured logging
@@ -143,7 +143,7 @@ These are the source of truth for what to build and how.
 - Specialist agent profiles: `AgentProfile` struct (7 fields), 4 default profiles (coder/architect/tester/debugger), `profile` field on dispatch action, profile merge in dispatch (prompt prefix/suffix, tools, model, turns), debugger auto-select on review failure, WORKFLOW.md template example.
 - Orchestrator codebase awareness: role updated to "intelligent orchestrator with codebase access", built-in tools (Read/Grep/Glob) during planning, `OrchestratorMaxTurns` (default 10), `warnIfHighTokens` on all consult paths, `parseActions` handles tool-use interleaved output.
 
-**Phase 5 (future)**: Dashboard + status API, WhatsApp channel adapter, GoReleaser binaries, code signing, demo video.
+**Phase 5 (future)**: WhatsApp channel adapter, GoReleaser binaries, code signing, demo video.
 
 Update this section as phases are completed.
 

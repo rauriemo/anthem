@@ -394,7 +394,7 @@ See [architecture.md](docs/plans/architecture.md) for the full system design wit
 | **2** | Complete | Rules engine, workspace manager, retry/backoff, shutdown, state persistence, hot-reload |
 | **3a** | Complete | Contract actions (10 types), SQLite audit, task state machine, orchestrator agent, wave dispatch |
 | **3b** | Complete | Slack + Dispatch (voice) channels, task decomposition, maintenance scanner, project context for orchestrator |
-| **4** | Next | Dashboard, knowledge promotion, DAG plans, GoReleaser binaries |
+| **4** | Complete | Frontier -- audit fixes, multi-LLM driver, DAG edges, promote_knowledge, reviewer loop, agent profiles, decision traces, orchestrator codebase awareness |
 
 ## Development
 
