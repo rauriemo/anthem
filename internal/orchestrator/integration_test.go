@@ -2,12 +2,16 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/rauriemo/anthem/internal/agent"
+	"github.com/rauriemo/anthem/internal/audit"
 	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/config"
+	"github.com/rauriemo/anthem/internal/cost"
 	"github.com/rauriemo/anthem/internal/tracker"
 	"github.com/rauriemo/anthem/internal/types"
 	"github.com/rauriemo/anthem/internal/workspace"
@@ -324,4 +328,273 @@ func TestExecuteActions_CreateSubtasks(t *testing.T) {
 	if len(trk.Tasks[2].Labels) != 2 {
 		t.Errorf("subtask 2 labels = %v, want [todo bug]", trk.Tasks[2].Labels)
 	}
+}
+
+func newTestAuditLogger(t *testing.T) *audit.SQLiteAuditLogger {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "test-audit.db")
+	logger, err := audit.NewSQLiteAuditLogger(dbPath)
+	if err != nil {
+		t.Fatalf("creating audit logger: %v", err)
+	}
+	t.Cleanup(func() { logger.Close() })
+	return logger
+}
+
+func TestDispatch_AuditRecordOnCompletion(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Identifier: "GH-1", Title: "T1", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{SessionID: "s1", ExitCode: 0, CostUSD: 0.42, Duration: time.Millisecond}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 100000
+	eb := NewMockEventBus()
+
+	// Use a shared audit DB path — Shutdown closes it, so we reopen to query
+	dbPath := filepath.Join(t.TempDir(), "audit-completion.db")
+	auditLog, err := audit.NewSQLiteAuditLogger(dbPath)
+	if err != nil {
+		t.Fatalf("creating audit logger: %v", err)
+	}
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       runner,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     eb,
+		Logger:       testLogger(),
+		AuditLogger:  auditLog,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	_ = orch.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// Reopen DB to query (Shutdown closed it)
+	auditLog2, err := audit.NewSQLiteAuditLogger(dbPath)
+	if err != nil {
+		t.Fatalf("reopening audit logger: %v", err)
+	}
+	defer auditLog2.Close()
+
+	events, err := auditLog2.Query(context.Background(), audit.QueryFilter{EventType: "task.completed"})
+	if err != nil {
+		t.Fatalf("querying audit: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected task.completed audit record")
+	}
+	ev := events[0]
+	if ev.TaskID == nil || *ev.TaskID != "1" {
+		t.Errorf("task_id = %v, want '1'", ev.TaskID)
+	}
+	if ev.CostUSD == nil || *ev.CostUSD != 0.42 {
+		t.Errorf("cost_usd = %v, want 0.42", ev.CostUSD)
+	}
+}
+
+func TestDispatch_AuditRecordOnFailure(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "2", Identifier: "GH-2", Title: "Failing", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return nil, errors.New("boom")
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 100000
+
+	dbPath := filepath.Join(t.TempDir(), "audit-failure.db")
+	auditLog, err := audit.NewSQLiteAuditLogger(dbPath)
+	if err != nil {
+		t.Fatalf("creating audit logger: %v", err)
+	}
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       runner,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+		AuditLogger:  auditLog,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	_ = orch.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	auditLog2, err := audit.NewSQLiteAuditLogger(dbPath)
+	if err != nil {
+		t.Fatalf("reopening audit logger: %v", err)
+	}
+	defer auditLog2.Close()
+
+	events, err := auditLog2.Query(context.Background(), audit.QueryFilter{EventType: "task.failed"})
+	if err != nil {
+		t.Fatalf("querying audit: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected task.failed audit record")
+	}
+	ev := events[0]
+	if ev.TaskID == nil || *ev.TaskID != "2" {
+		t.Errorf("task_id = %v, want '2'", ev.TaskID)
+	}
+	if ev.Error == nil || *ev.Error != "boom" {
+		t.Errorf("error = %v, want 'boom'", ev.Error)
+	}
+}
+
+func TestDispatch_AuditRecordOnNonZeroExit(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "3", Identifier: "GH-3", Title: "BadExit", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{SessionID: "s1", ExitCode: 1, CostUSD: 0.10}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 100000
+
+	dbPath := filepath.Join(t.TempDir(), "audit-nzexit.db")
+	auditLog, err := audit.NewSQLiteAuditLogger(dbPath)
+	if err != nil {
+		t.Fatalf("creating audit logger: %v", err)
+	}
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       runner,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+		AuditLogger:  auditLog,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	_ = orch.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	auditLog2, err := audit.NewSQLiteAuditLogger(dbPath)
+	if err != nil {
+		t.Fatalf("reopening audit logger: %v", err)
+	}
+	defer auditLog2.Close()
+
+	events, err := auditLog2.Query(context.Background(), audit.QueryFilter{EventType: "task.failed"})
+	if err != nil {
+		t.Fatalf("querying audit: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected task.failed audit record for non-zero exit")
+	}
+	ev := events[0]
+	if ev.CostUSD == nil || *ev.CostUSD != 0.10 {
+		t.Errorf("cost_usd = %v, want 0.10", ev.CostUSD)
+	}
+}
+
+func TestBuildStateSnapshot_WaveSpentUSD(t *testing.T) {
+	cfg := config.DefaultConfig()
+	ct := cost.NewTracker()
+	ct.Record(cost.SessionCost{TaskID: "t1", SessionID: "s1", CostUSD: 0.50})
+	ct.Record(cost.SessionCost{TaskID: "t2", SessionID: "s2", CostUSD: 0.30})
+	ct.Record(cost.SessionCost{TaskID: "t3", SessionID: "s3", CostUSD: 1.00})
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "",
+		Tracker:      tracker.NewMockTracker(nil),
+		Runner:       newNoopRunner(),
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+		CostTracker:  ct,
+	})
+
+	orch.currentWave = &Wave{
+		ID:              "wave-1",
+		FrontierTaskIDs: []string{"t1", "t2"},
+		Status:          "active",
+	}
+
+	tasks := []types.Task{
+		{ID: "t1", Status: types.StatusRunning},
+		{ID: "t2", Status: types.StatusRunning},
+		{ID: "t3", Status: types.StatusCompleted},
+	}
+
+	snap := orch.buildStateSnapshot(tasks)
+
+	const epsilon = 0.001
+	if snap.Budget.WaveSpentUSD < 0.80-epsilon || snap.Budget.WaveSpentUSD > 0.80+epsilon {
+		t.Errorf("WaveSpentUSD = %f, want ~0.80", snap.Budget.WaveSpentUSD)
+	}
+}
+
+func TestBuildStateSnapshot_RecentEvents(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "recent-events.db")
+	auditLog, err := audit.NewSQLiteAuditLogger(dbPath)
+	if err != nil {
+		t.Fatalf("creating audit logger: %v", err)
+	}
+
+	ctx := context.Background()
+	for i := range 15 {
+		_ = auditLog.Record(ctx, audit.AuditEvent{
+			Timestamp: time.Date(2026, 1, 1, 0, 0, i, 0, time.UTC),
+			EventType: "task.dispatched",
+			TaskID:    strPtr("t1"),
+		})
+	}
+
+	cfg := config.DefaultConfig()
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "",
+		Tracker:      tracker.NewMockTracker(nil),
+		Runner:       newNoopRunner(),
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+		AuditLogger:  auditLog,
+	})
+
+	snap := orch.buildStateSnapshot(nil)
+
+	if len(snap.RecentEvents) != 10 {
+		t.Fatalf("expected 10 recent events, got %d", len(snap.RecentEvents))
+	}
+	if snap.RecentEvents[0].Type != "task.dispatched" {
+		t.Errorf("first event type = %q, want 'task.dispatched'", snap.RecentEvents[0].Type)
+	}
+
+	auditLog.Close()
 }

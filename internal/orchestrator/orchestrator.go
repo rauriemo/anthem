@@ -432,6 +432,27 @@ func (o *Orchestrator) buildStateSnapshot(tasks []types.Task) StateSnapshot {
 			FrontierTaskIDs: o.currentWave.FrontierTaskIDs,
 			Status:          o.currentWave.Status,
 		}
+		var waveSpent float64
+		for _, fid := range o.currentWave.FrontierTaskIDs {
+			waveSpent += o.costTracker.TaskCost(fid)
+		}
+		snap.Budget.WaveSpentUSD = waveSpent
+	}
+
+	if o.auditLogger != nil {
+		events, err := o.auditLogger.Query(context.Background(), audit.QueryFilter{Limit: 10})
+		if err == nil {
+			for _, ev := range events {
+				es := EventSummary{
+					Type:      ev.EventType,
+					Timestamp: ev.Timestamp.Format(time.RFC3339),
+				}
+				if ev.TaskID != nil {
+					es.TaskID = *ev.TaskID
+				}
+				snap.RecentEvents = append(snap.RecentEvents, es)
+			}
+		}
 	}
 
 	snap.Project = o.projectCtx
@@ -646,6 +667,10 @@ func (o *Orchestrator) recordOrchCost() {
 }
 
 func (o *Orchestrator) recordAudit(ctx context.Context, eventType string, taskID string, actionName *string) {
+	o.recordAuditWithCost(ctx, eventType, taskID, actionName, nil, nil)
+}
+
+func (o *Orchestrator) recordAuditWithCost(ctx context.Context, eventType string, taskID string, actionName *string, costUSD *float64, errMsg *string) {
 	if o.auditLogger == nil {
 		return
 	}
@@ -653,6 +678,8 @@ func (o *Orchestrator) recordAudit(ctx context.Context, eventType string, taskID
 		Timestamp:  time.Now(),
 		EventType:  eventType,
 		ActionName: actionName,
+		CostUSD:    costUSD,
+		Error:      errMsg,
 	}
 	if taskID != "" {
 		ev.TaskID = &taskID
@@ -841,6 +868,8 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 			"error", err,
 		)
 		o.release(task.ID)
+		errStr := err.Error()
+		o.recordAuditWithCost(ctx, "task.failed", task.ID, nil, nil, &errStr)
 		o.publish(types.Event{Type: "task.failed", TaskID: task.ID, Data: err.Error()})
 		return
 	}
@@ -853,6 +882,8 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 				"error", err,
 			)
 			o.release(task.ID)
+			errStr := err.Error()
+			o.recordAuditWithCost(ctx, "task.failed", task.ID, nil, nil, &errStr)
 			o.publish(types.Event{Type: "task.failed", TaskID: task.ID, Data: err.Error()})
 			return
 		}
@@ -936,6 +967,12 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 		_ = o.tracker.AddComment(ctx, task.ID,
 			fmt.Sprintf("Anthem agent failed: %s. Retry attempt %d, next retry at %s.",
 				err, ri.Attempts, ri.NextRetryAt.Format(time.RFC3339)))
+		errStr := err.Error()
+		var costPtr *float64
+		if result != nil && result.CostUSD > 0 {
+			costPtr = &result.CostUSD
+		}
+		o.recordAuditWithCost(ctx, "task.failed", task.ID, nil, costPtr, &errStr)
 		o.publish(types.Event{Type: "task.failed", TaskID: task.ID, Data: err.Error()})
 		return
 	}
@@ -953,6 +990,8 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 		_ = o.tracker.AddComment(ctx, task.ID,
 			fmt.Sprintf("Claude exited with code %d. Retry attempt %d, next at %s.",
 				result.ExitCode, ri.Attempts, ri.NextRetryAt.Format(time.RFC3339)))
+		errStr := exitErr.Error()
+		o.recordAuditWithCost(ctx, "task.failed", task.ID, nil, &result.CostUSD, &errStr)
 		o.publish(types.Event{Type: "task.failed", TaskID: task.ID, Data: exitErr.Error()})
 		return
 	}
@@ -978,6 +1017,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 	_ = o.tracker.RemoveLabel(ctx, task.ID, "in-progress")
 	_ = o.tracker.UpdateStatus(ctx, task.ID, string(types.StatusCompleted))
 
+	o.recordAuditWithCost(ctx, "task.completed", task.ID, nil, &result.CostUSD, nil)
 	o.publish(types.Event{
 		Type:   "task.completed",
 		TaskID: task.ID,
