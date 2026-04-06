@@ -24,6 +24,19 @@ agent:
   max_concurrent: 3
   stall_timeout_ms: 300000
   max_retry_backoff_ms: 300000
+  # review_enabled: true
+  # review_max_turns: 3
+  # review_max_retries: 1
+  # profiles:
+  #   coder:
+  #     prompt_prefix: "You are a coding agent. Write clean, tested code."
+  #   architect:
+  #     prompt_prefix: "You are an architect. Analyze and design only."
+  #     denied_tools: ["Write", "Edit", "Bash"]
+  #   tester:
+  #     prompt_prefix: "You are a testing agent. Write comprehensive tests."
+  #   debugger:
+  #     prompt_prefix: "Fix the issues from the prior review feedback."
 
 rules:
   - match:

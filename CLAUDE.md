@@ -34,7 +34,7 @@ These are the source of truth for what to build and how.
 - **Logging**: Use `log/slog` (Go stdlib) for structured logging
 - **Error handling**: Wrap errors with `fmt.Errorf("context: %w", err)`. Never swallow errors silently.
 - **No global state in code**: Pass dependencies via constructor injection.
-- **System guardrails**: The `system:` config block lives in WORKFLOW.md front matter (per-project policy). Safe defaults: `workflow_changes_require_approval: true`. Project-level constraints are defined as a `constraints` list in the `system:` block.
+- **System guardrails**: The `system:` config block lives in WORKFLOW.md front matter (per-project policy). Project-level constraints are defined as a `constraints` list in the `system:` block. `require_approval_for_risky_actions: true` gates medium/high-risk contract actions with an audit trail.
 - **Bootstrapping**: `~/.anthem/`, default VOICE.md, and default constraints.yaml are auto-created on first run. If VOICE.md is missing at runtime, warn and continue without personality. If constraints.yaml is missing, continue with empty user constraints.
 - **Template engine**: Use sprig (`github.com/Masterminds/sprig/v3`) function map for WORKFLOW.md body rendering -- provides `lower`, `upper`, `replace`, `default`, `join`, etc.
 - **EventBus**: `Publish` must be non-blocking. Buffered channels per subscriber, drop oldest on overflow. The orchestrator loop must never stall on slow observers.
@@ -49,6 +49,12 @@ These are the source of truth for what to build and how.
 - **Dispatch channel adapter**: WebSocket server adapter for the [Dispatch](https://github.com/rauriemo/dispatch) voice-first command channel. Anthem listens on a configured address; Dispatch connects and authenticates with a shared token. Protocol uses JSON text frames: auth handshake (`auth`/`auth_ok`/`auth_fail`), request-response chat correlated by UUID (`req`/`res` with `id` field), and server-push events (`event` with event type). `OutgoingMessage` carries an `EventType` field (set by EventBridge) so the adapter can include the event type in push frames. Multiple concurrent Dispatch clients supported; thread-to-connection mapping routes replies to the correct client.
 - **Multi-format task decomposition (Phase 3b)**: User sends feature descriptions through channels as plain text prompts, markdown files, mermaid flowcharts, diagrams, or images. The orchestrator agent decomposes into GitHub issues via the `create_subtasks` contract action. Claude's multimodal capabilities handle image-based inputs.
 - **Audit-log maintenance signals (Phase 3b)**: Periodic scanner queries `audit.db` for health signals (repeated failures, stale tasks, budget anomalies, drift). Notifies user via channel with approval gate. Configurable auto-approve per maintenance type in WORKFLOW.md `maintenance:` block.
+- **DAG edges inside waves (Phase 4)**: Tasks can declare `depends_on: ["task-id"]` in `create_subtasks`. The daemon enforces ordering -- tasks with unmet deps are not dispatched. Waves remain as planning horizons; edges add ordering within them. Backward-compatible (waves without edges work as before). Stored in `state.json` alongside retry state.
+- **Unified lean path (Phase 4)**: `handleLeanMessage` routes through the `AgentRunner` driver (same as executors) with `MaxTurns: 1`. No orchestrator session, no snapshot, no JSON contract. Costs tracked under synthetic task ID `__lean__`. Enables multi-LLM support and observability for the fast path.
+- **Executor-reviewer loop (Phase 4)**: After executor completion, an optional reviewer agent checks the output. If it flags issues, the task re-enters the retry queue with feedback. Opt-in via `review_enabled: true` in WORKFLOW.md `agent:` block. `review_max_turns` (default 3) gives the reviewer enough turns to read files and verify. `review_max_retries` (default 1) prevents infinite loops.
+- **Specialist agent profiles (Phase 4)**: Named profiles (architect, coder, tester, debugger) with different prompt templates, tool configs, and model settings. The orchestrator selects a profile when dispatching via `profile` field on the `dispatch` action. Reviewer-failed retries automatically use the `debugger` profile.
+- **Decision trace system (Phase 4)**: `traces` table in `audit.db` captures every LLM interaction (orchestrator consults, executor runs, reviewer judgments, lean messages) with prompt/response previews, token counts, cost, duration, and linked task/wave/session IDs. Query methods enable post-hoc debugging of agent decisions.
+- **Orchestrator codebase awareness (Phase 4)**: The orchestrator agent uses Claude Code's built-in tools (Read, Grep, Glob) during planning instead of working blind from static docs. The prompt role changes from "stateless allocator" to "intelligent orchestrator with codebase access." `orchestrator.max_turns` config (default 10) controls exploration depth.
 
 ## Coding Standards
 
@@ -61,7 +67,8 @@ These are the source of truth for what to build and how.
 
 ## Current Status
 
-**Phase**: Phase 3b — Channels + Task Decomposition + Maintenance (**complete**)
+**Phase**: Phase 4 — Frontier Implementation (**complete**)
+**Working plan**: `docs/plans/frontier-implementation.md` — completed checklist with detailed steps and file paths.
 **Scaffold**: Complete (all 11 steps done)
 **Phase 1**: Complete. All 10 steps implemented and verified with a live GitHub issue (pickup -> Claude Code execution -> issue closure -> label lifecycle).
 
@@ -124,7 +131,19 @@ These are the source of truth for what to build and how.
 - HandleUserMessage: replaced `ConsultWithRepair` with `ConsultWithRepairStreaming`, broadcasting `StreamDelta` messages during consult and `StreamDone` after completion. Final `res`/`display` frames still sent as before for chat history.
 - Tests: driver streaming callback test, Prism stream frame format test, orchestrator agent streaming passthrough test, HandleUserMessage streaming integration test.
 
-**Phase 4 (next)**: Dashboard + status API + WebSocket streaming via EventBus, knowledge promotion (`promote_knowledge` action), DAG execution plans, WhatsApp channel adapter, example templates, CONTRIBUTING.md, GoReleaser cross-platform binaries, code signing, demo video.
+**Phase 4 completed** (Frontier Implementation):
+- Audit log gaps: `task.completed`/`task.failed` now recorded to DB with `CostUSD`, `WaveSpentUSD` and `RecentEvents` populated in snapshot, SQL event type mismatch fixed in `SummaryForWave`.
+- Dead config cleanup: `require_plan` enforced in `mechanicalDispatch` (skip + `needs-plan` label + `task.needs_plan` event), `workflow_changes_require_approval` removed (never implemented), `linear` tracker kind removed, `RiskForAction` wired into `executeActions` with `require_approval_for_risky_actions` config flag and audit trail.
+- Multi-LLM driver abstraction: configurable `binary` field on Driver (default "claude"), `NewDriver(pm, logger, binary)`, `agent.command` config wired through.
+- DAG edges inside waves: `DependsOn` on `SubtaskDef`/`TaskSummary`, `taskDeps` map persisted in `state.json`, dispatch ordering enforced in `mechanicalDispatch` and `executeActions`, `isWaveExhausted` ignores dep-blocked tasks, prompt updated.
+- Unified lean path: `handleLeanMessage` routes through `AgentRunner.Run` with `MaxTurns: 1`, cost tracked under `__lean__`, raw `exec.CommandContext` removed.
+- promote_knowledge: file write to `docs/exec-plans/<date>-<summary>.md`, `loadKnowledge` scans recent 5 files (8KB cap), `ProjectContext.Knowledge` field, prompt guidance.
+- Executor-reviewer loop: `runReview` with configurable `ReviewMaxTurns` (default 3), JSON `{passed, feedback}` response, retry with `debugger` profile on failure, `review-skipped` label on max retries, `Previous Attempt Feedback` in retry prompt, costs under same task ID.
+- Decision trace system: `traces` table in audit DB (17 columns, 4 indexes), `RecordTrace`/`TracesForTask`/`TracesForWave`/`RecentTraces`/`GetTraceStats`, traces recorded for orchestrator/executor/reviewer/lean.
+- Specialist agent profiles: `AgentProfile` struct (7 fields), 4 default profiles (coder/architect/tester/debugger), `profile` field on dispatch action, profile merge in dispatch (prompt prefix/suffix, tools, model, turns), debugger auto-select on review failure, WORKFLOW.md template example.
+- Orchestrator codebase awareness: role updated to "intelligent orchestrator with codebase access", built-in tools (Read/Grep/Glob) during planning, `OrchestratorMaxTurns` (default 10), `warnIfHighTokens` on all consult paths, `parseActions` handles tool-use interleaved output.
+
+**Phase 5 (future)**: Dashboard + status API, WhatsApp channel adapter, GoReleaser binaries, code signing, demo video.
 
 Update this section as phases are completed.
 

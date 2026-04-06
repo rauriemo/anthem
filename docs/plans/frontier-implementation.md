@@ -81,7 +81,7 @@ Anthem's competitive gap analysis identified 11 improvements across three tiers.
 
 - [x] **2e. Executor-reviewer agent loop**
   - Files: `internal/orchestrator/orchestrator.go`, `internal/config/config.go`
-  - Add to `AgentConfig`: `ReviewEnabled bool`, `ReviewMaxTurns int` (default 1), `ReviewPrompt string`, `ReviewMaxRetries int` (default 1).
+  - Add to `AgentConfig`: `ReviewEnabled bool`, `ReviewMaxTurns int` (default 3), `ReviewPrompt string`, `ReviewMaxRetries int` (default 1).
   - In `dispatch` goroutine, after executor `Run` succeeds (ExitCode == 0) and before marking complete: if `ReviewEnabled`, call `o.runReview(ctx, task, result)`.
   - Implement `runReview`: build review prompt with task title/body + executor output summary (last 4KB of `result.Output`). Run via `o.runner.Run` with `MaxTurns: 1`, `PermissionMode: "bypassPermissions"`. Parse JSON response `{"passed": true/false, "feedback": "..."}`. Default to passed if parse fails.
   - If review fails: `recordFailure` with feedback as error, publish `task.review_failed`. Track `reviewRetries` count. If count > `ReviewMaxRetries`, complete anyway with `review-skipped` label.

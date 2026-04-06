@@ -128,7 +128,6 @@ rules:
     action: auto_assign
 
 system:
-  workflow_changes_require_approval: true   # default: true
   constraints:
     - "Follow the project existing code style and conventions"
     - "Run tests before opening a PR"
@@ -220,7 +219,7 @@ constraints:
 **Project-level constraints** (`system.constraints` in WORKFLOW.md):
 ```yaml
 system:
-  workflow_changes_require_approval: true
+  require_approval_for_risky_actions: false
   constraints:
     - "Follow the project existing code style and conventions"
     - "Run tests before opening a PR"
@@ -353,25 +352,14 @@ Evaluated per-task before dispatch:
 
 **System-level guardrail -- workflow self-modification:**
 
-Agents can add/modify rules by editing `WORKFLOW.md` (e.g., via a task like "add a rule requiring approval for architecture labels"). A built-in meta-rule protects this:
+Agents can add/modify rules by editing `WORKFLOW.md` (e.g., via a task like "add a rule requiring approval for architecture labels"). The meta-constraint protects constraint definitions from agent modification. Additionally, the `require_approval_for_risky_actions` flag in `system:` can gate medium/high-risk contract actions:
 
 ```yaml
 system:
-  workflow_changes_require_approval: true  # default: true
+  require_approval_for_risky_actions: true
 ```
 
-When `true` (default):
-
-- After an agent run completes, Anthem diffs the workspace `WORKFLOW.md` against the active config
-- If changed, Anthem posts the diff as an issue comment for human review
-- The new rules do NOT take effect until a human adds an approval label (e.g., `rule-approved`)
-- On approval, Anthem applies the changes and hot-reloads
-
-When `false` (user opt-in):
-
-- Changes to `WORKFLOW.md` by agents are applied and hot-reloaded immediately with no approval gate
-
-This ensures new users are protected by default while experienced users can remove the guardrail.
+When `true`: medium and high-risk actions (e.g., `close_wave`, `request_maintenance`) are blocked with an `action.blocked_by_risk` audit event. High-risk actions always log a warning regardless of this setting.
 
 ### 7. Workspace Manager (Execution Layer)
 
@@ -768,22 +756,43 @@ Two-way communication between the orchestrator agent and the user, plus audit-dr
 10. **New dependencies**: `github.com/slack-go/slack`, `github.com/gorilla/websocket` (promoted from indirect to direct for Dispatch adapter)
 12. **Project context enrichment** (`internal/orchestrator/orchagent.go`, `orchestrator.go`) -- StateSnapshot now includes a `Project` field (`ProjectContext`) carrying `file_tree`, `architecture`, `implementation`, and `project_summary`. Loaded at startup via `loadProjectContext()` and refreshed on config hot-reload. `generateFileTree()` walks the workspace root with configurable depth (default 6), skipping excluded directories (`.git`, `vendor`, `node_modules`, `workspaces`, `.idea`, `.vscode`, `.claude`, `.cursor`) and binary/temp files, with an 8KB output cap. Doc files (`CLAUDE.md`, `docs/plans/architecture.md`, `docs/plans/implementation.md`) are read from the project root with 8KB truncation. Project context is static between ticks and excluded from `snapshotHash` dirty-check to avoid unnecessary orchestrator consultations. The orchestrator system prompt includes a `## Project Context` section instructing the agent how to use this data for informed task decomposition.
 
-### Phase 4: Dashboard + Polish + Community
+### Phase 4: Frontier Implementation (COMPLETE)
+
+Competitive gap analysis against OpenHands, CrewAI, CC Mirror, SWE-agent, Aider, Roo Code, and other leading agentic coding systems. See `docs/plans/frontier-implementation.md` for the completed checklist.
+
+**Tier 1 -- Fix broken internals:**
+1. Audit log gaps -- record `task.completed`/`task.failed` to DB, populate `CostUSD` on audit rows, populate `WaveSpentUSD` and `RecentEvents` in snapshot
+2. SQL event type mismatch -- `SummaryForWave` queries wrong event type strings
+3. Dead config cleanup -- `require_plan` (implement), `workflow_changes_require_approval` (remove), `linear` tracker (remove), `RiskForAction` (wire or remove)
+
+**Tier 2 -- Architectural upgrades:**
+4. Clean multi-LLM driver abstraction -- extract hard-coded `"claude"` binary into configurable `Driver.binary` field, wire `agent.command` config
+5. DAG edges inside waves -- `DependsOn` field on `SubtaskDef` and `TaskSummary`, daemon enforces ordering, persisted in `state.json`
+6. Unified lean path through driver -- `handleLeanMessage` uses `AgentRunner.Run` with `MaxTurns: 1`, cost tracked under `__lean__`
+7. `promote_knowledge` implementation -- write exec-plans to `docs/exec-plans/`, load into `ProjectContext.Knowledge`, remove SchemaOnly flag
+8. Executor-reviewer agent loop -- optional single-turn reviewer after executor completion, retry with feedback on failure, `review_max_retries` limit
+
+**Tier 3 -- High-value competitive features:**
+9. Orchestrator codebase awareness -- orchestrator uses Claude Code tools (Read/Grep/Glob) during planning, `orchestrator.max_turns` config
+10. Specialist agent profiles -- `AgentProfile` struct with `PromptPrefix`/`PromptSuffix`/`AllowedTools`/`Model`/`MaxTurns`/`ReviewEnabled`. Default profiles: coder, architect, tester, debugger. Orchestrator selects via `profile` field on dispatch action
+11. Decision trace system -- `traces` table in audit DB captures every LLM interaction with prompt/response previews, tokens, cost, duration, linked task/wave/session IDs. Query methods for post-hoc debugging
+
+### Phase 5: Dashboard + Polish + Community
 
 1. Dashboard + status API + WebSocket streaming via EventBus (embedded HTTP server)
-2. Knowledge promotion -- `promote_knowledge` action implementation, write execution summaries to `docs/exec-plans/completed/`
-3. Plans as first-class DAG artifacts with dependency edges
-4. WhatsApp channel adapter (uses dashboard HTTP server for inbound webhooks)
-5. Example WORKFLOW.md + VOICE.md templates
-6. CONTRIBUTING.md
-7. Cross-platform release binaries via GoReleaser (Windows/macOS/Linux), code signing for Windows (SignPath.io or Azure Trusted Signing)
-8. Demo video
+2. WhatsApp channel adapter (uses dashboard HTTP server for inbound webhooks)
+3. Example WORKFLOW.md + VOICE.md templates
+4. CONTRIBUTING.md
+5. Cross-platform release binaries via GoReleaser (Windows/macOS/Linux), code signing for Windows (SignPath.io or Azure Trusted Signing)
+6. Demo video
 
-## Future Enhancements (Post Phase 4)
+## Future Enhancements (Post Phase 5)
 
 - **GitHub webhook support**: Alternative to polling for instant task detection and lower API usage. The `IssueTracker` interface doesn't need to change -- `GitHubTracker` could internally support both poll and webhook modes. Webhook mode would require a publicly accessible URL (or a tunneling solution like ngrok for local dev).
 - **GitHub App authentication**: For production/org use -- fine-grained permissions, separate rate limits per installation, auto-refreshing tokens.
 - **Multi-instance Anthem**: Distributed claim locking for running multiple Anthem instances against the same tracker.
+- **Multi-LLM executors**: Add Codex CLI and API-based drivers behind the `AgentRunner` interface. Per-task model selection via profiles.
+- **Container sandboxing**: Docker-based executor isolation for untrusted models or enterprise security requirements.
 
 ## Reference: OpenAI Symphony
 

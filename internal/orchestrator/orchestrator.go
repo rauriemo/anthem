@@ -869,9 +869,14 @@ Respond with a JSON object: {"passed": true/false, "feedback": "..."}
 If the output looks correct and complete, set passed=true. Otherwise set passed=false with specific feedback.`,
 		reviewPrompt, task.Title, task.Body, outputPreview)
 
+	reviewTurns := cfg.Agent.ReviewMaxTurns
+	if reviewTurns <= 0 {
+		reviewTurns = 3
+	}
+
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		Prompt:         prompt,
-		MaxTurns:       1,
+		MaxTurns:       reviewTurns,
 		PermissionMode: "bypassPermissions",
 	})
 

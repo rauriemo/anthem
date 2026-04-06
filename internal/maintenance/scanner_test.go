@@ -62,6 +62,14 @@ func (m *mockAuditLogger) RecentTraces(_ context.Context, _ int) ([]audit.TraceR
 	return nil, nil
 }
 
+func (m *mockAuditLogger) TracesForWave(_ context.Context, _ string, _ int) ([]audit.TraceRecord, error) {
+	return nil, nil
+}
+
+func (m *mockAuditLogger) GetTraceStats(_ context.Context) ([]audit.TraceStats, error) {
+	return nil, nil
+}
+
 func (m *mockAuditLogger) Close() error { return nil }
 
 type mockEventPublisher struct {

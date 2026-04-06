@@ -69,6 +69,7 @@ type AgentConfig struct {
 	DeniedTools           []string          `yaml:"denied_tools"`
 	AdditionalDirs        []string          `yaml:"additional_dirs"`
 	ReviewEnabled         bool                      `yaml:"review_enabled"`
+	ReviewMaxTurns        int                       `yaml:"review_max_turns"`
 	ReviewMaxRetries      int                       `yaml:"review_max_retries"`
 	ReviewPrompt          string                    `yaml:"review_prompt"`
 	Profiles              map[string]AgentProfile   `yaml:"profiles,omitempty"`
@@ -129,6 +130,7 @@ func DefaultConfig() Config {
 			MaxConcurrent:     3,
 			StallTimeoutMS:    300000,
 			MaxRetryBackoffMS: 300000,
+			ReviewMaxTurns:    3,
 			Profiles: map[string]AgentProfile{
 				"coder":     {PromptPrefix: "You are a coding agent. Write clean, tested code."},
 				"architect": {PromptPrefix: "You are an architect agent. Analyze and design, do not write code.", DeniedTools: []string{"Write", "Edit", "Bash"}},

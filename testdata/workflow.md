@@ -24,7 +24,7 @@ rules:
     approval_label: "approved"
 
 system:
-  workflow_changes_require_approval: true
+  constraints: []
 
 server:
   port: 9090

@@ -270,6 +270,7 @@ func (o *OrchestratorAgent) Consult(ctx context.Context, state StateSnapshot) ([
 	}
 
 	o.recordResult(result)
+	o.warnIfHighTokens(result)
 
 	actions, err := parseActions(result.Output)
 	if err != nil {
@@ -370,6 +371,7 @@ func (o *OrchestratorAgent) StartStreaming(ctx context.Context, state StateSnaps
 	}
 
 	o.recordResult(result)
+	o.warnIfHighTokens(result)
 
 	actions, err := parseActions(result.Output)
 	if err != nil {
@@ -402,6 +404,7 @@ func (o *OrchestratorAgent) ConsultStreaming(ctx context.Context, state StateSna
 	}
 
 	o.recordResult(result)
+	o.warnIfHighTokens(result)
 
 	actions, err := parseActions(result.Output)
 	if err != nil {

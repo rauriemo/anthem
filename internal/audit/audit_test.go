@@ -350,6 +350,108 @@ func TestTraceReviewFields(t *testing.T) {
 	}
 }
 
+func TestTracesForWave(t *testing.T) {
+	logger := newTestLogger(t)
+	ctx := context.Background()
+
+	traces := []TraceRecord{
+		{Timestamp: time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC), TraceType: "executor", WaveID: strPtr("wave-1"), TaskID: strPtr("t1"), TokensIn: 100},
+		{Timestamp: time.Date(2026, 1, 1, 10, 1, 0, 0, time.UTC), TraceType: "executor", WaveID: strPtr("wave-1"), TaskID: strPtr("t2"), TokensIn: 200},
+		{Timestamp: time.Date(2026, 1, 1, 10, 2, 0, 0, time.UTC), TraceType: "reviewer", WaveID: strPtr("wave-1"), TaskID: strPtr("t1"), TokensIn: 50},
+		{Timestamp: time.Date(2026, 1, 1, 10, 3, 0, 0, time.UTC), TraceType: "executor", WaveID: strPtr("wave-2"), TaskID: strPtr("t3"), TokensIn: 300},
+	}
+	for i, tr := range traces {
+		if err := logger.RecordTrace(ctx, tr); err != nil {
+			t.Fatalf("RecordTrace %d: %v", i, err)
+		}
+	}
+
+	got, err := logger.TracesForWave(ctx, "wave-1", 10)
+	if err != nil {
+		t.Fatalf("TracesForWave: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 traces for wave-1, got %d", len(got))
+	}
+	if got[0].TraceType != "reviewer" {
+		t.Errorf("expected most recent first (reviewer), got %s", got[0].TraceType)
+	}
+
+	limited, err := logger.TracesForWave(ctx, "wave-1", 2)
+	if err != nil {
+		t.Fatalf("TracesForWave with limit: %v", err)
+	}
+	if len(limited) != 2 {
+		t.Fatalf("expected 2 traces with limit, got %d", len(limited))
+	}
+
+	wave2, err := logger.TracesForWave(ctx, "wave-2", 10)
+	if err != nil {
+		t.Fatalf("TracesForWave wave-2: %v", err)
+	}
+	if len(wave2) != 1 {
+		t.Fatalf("expected 1 trace for wave-2, got %d", len(wave2))
+	}
+}
+
+func TestGetTraceStats(t *testing.T) {
+	logger := newTestLogger(t)
+	ctx := context.Background()
+
+	traces := []TraceRecord{
+		{Timestamp: time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC), TraceType: "executor", CostUSD: 0.10, TokensIn: 500, TokensOut: 200, DurationMS: 3000},
+		{Timestamp: time.Date(2026, 1, 1, 10, 1, 0, 0, time.UTC), TraceType: "executor", CostUSD: 0.20, TokensIn: 600, TokensOut: 300, DurationMS: 5000},
+		{Timestamp: time.Date(2026, 1, 1, 10, 2, 0, 0, time.UTC), TraceType: "reviewer", CostUSD: 0.03, TokensIn: 100, TokensOut: 50, DurationMS: 1000},
+		{Timestamp: time.Date(2026, 1, 1, 10, 3, 0, 0, time.UTC), TraceType: "lean", CostUSD: 0.01, TokensIn: 50, TokensOut: 20, DurationMS: 500},
+	}
+	for i, tr := range traces {
+		if err := logger.RecordTrace(ctx, tr); err != nil {
+			t.Fatalf("RecordTrace %d: %v", i, err)
+		}
+	}
+
+	stats, err := logger.GetTraceStats(ctx)
+	if err != nil {
+		t.Fatalf("GetTraceStats: %v", err)
+	}
+	if len(stats) != 3 {
+		t.Fatalf("expected 3 trace types, got %d", len(stats))
+	}
+
+	byType := make(map[string]TraceStats)
+	for _, s := range stats {
+		byType[s.TraceType] = s
+	}
+
+	exec := byType["executor"]
+	if exec.Count != 2 {
+		t.Errorf("executor count = %d, want 2", exec.Count)
+	}
+	const epsilon = 0.001
+	if exec.TotalCost < 0.30-epsilon || exec.TotalCost > 0.30+epsilon {
+		t.Errorf("executor total cost = %f, want 0.30", exec.TotalCost)
+	}
+	if exec.TotalIn != 1100 {
+		t.Errorf("executor TotalIn = %d, want 1100", exec.TotalIn)
+	}
+	if exec.TotalOut != 500 {
+		t.Errorf("executor TotalOut = %d, want 500", exec.TotalOut)
+	}
+	if exec.AvgDurMS < 3999 || exec.AvgDurMS > 4001 {
+		t.Errorf("executor AvgDurMS = %f, want 4000", exec.AvgDurMS)
+	}
+
+	rev := byType["reviewer"]
+	if rev.Count != 1 {
+		t.Errorf("reviewer count = %d, want 1", rev.Count)
+	}
+
+	lean := byType["lean"]
+	if lean.Count != 1 {
+		t.Errorf("lean count = %d, want 1", lean.Count)
+	}
+}
+
 func itoa(i int) string {
 	if i == 0 {
 		return "0"

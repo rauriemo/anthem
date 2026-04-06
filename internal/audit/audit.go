@@ -67,6 +67,15 @@ type TraceRecord struct {
 	Metadata       *string
 }
 
+type TraceStats struct {
+	TraceType  string
+	Count      int
+	TotalCost  float64
+	TotalIn    int64
+	TotalOut   int64
+	AvgDurMS   float64
+}
+
 type AuditLogger interface {
 	Record(ctx context.Context, event AuditEvent) error
 	Query(ctx context.Context, filter QueryFilter) ([]AuditEvent, error)
@@ -74,7 +83,9 @@ type AuditLogger interface {
 	SummaryForWave(ctx context.Context, waveID string) (*WaveSummary, error)
 	RecordTrace(ctx context.Context, trace TraceRecord) error
 	TracesForTask(ctx context.Context, taskID string, limit int) ([]TraceRecord, error)
+	TracesForWave(ctx context.Context, waveID string, limit int) ([]TraceRecord, error)
 	RecentTraces(ctx context.Context, limit int) ([]TraceRecord, error)
+	GetTraceStats(ctx context.Context) ([]TraceStats, error)
 	Close() error
 }
 
@@ -296,6 +307,47 @@ func (l *SQLiteAuditLogger) RecentTraces(ctx context.Context, limit int) ([]Trac
 		args = append(args, limit)
 	}
 	return l.queryTraceRows(ctx, query, args...)
+}
+
+func (l *SQLiteAuditLogger) TracesForWave(ctx context.Context, waveID string, limit int) ([]TraceRecord, error) {
+	query := `SELECT timestamp, trace_type, task_id, session_id, wave_id,
+		prompt_hash, prompt_preview, response_preview, tokens_in, tokens_out,
+		cost_usd, duration_ms, actions_json, reasoning, review_passed, review_feedback, metadata
+		FROM traces WHERE wave_id = ? ORDER BY timestamp DESC`
+	args := []any{waveID}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	return l.queryTraceRows(ctx, query, args...)
+}
+
+func (l *SQLiteAuditLogger) GetTraceStats(ctx context.Context) ([]TraceStats, error) {
+	rows, err := l.db.QueryContext(ctx,
+		`SELECT trace_type,
+			COUNT(*),
+			COALESCE(SUM(cost_usd), 0),
+			COALESCE(SUM(tokens_in), 0),
+			COALESCE(SUM(tokens_out), 0),
+			COALESCE(AVG(duration_ms), 0)
+		FROM traces GROUP BY trace_type ORDER BY trace_type`)
+	if err != nil {
+		return nil, fmt.Errorf("querying trace stats: %w", err)
+	}
+	defer rows.Close()
+
+	var stats []TraceStats
+	for rows.Next() {
+		var s TraceStats
+		if err := rows.Scan(&s.TraceType, &s.Count, &s.TotalCost, &s.TotalIn, &s.TotalOut, &s.AvgDurMS); err != nil {
+			return nil, fmt.Errorf("scanning trace stats: %w", err)
+		}
+		stats = append(stats, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating trace stats: %w", err)
+	}
+	return stats, nil
 }
 
 func (l *SQLiteAuditLogger) queryTraceRows(ctx context.Context, query string, args ...any) ([]TraceRecord, error) {

@@ -10,7 +10,7 @@
 - **WORKFLOW.md location**: Per-project, typically `./WORKFLOW.md` in repo root
 - **Global state root**: `~/.anthem/` (VOICE.md, constraints.yaml, state.json, voice-changelog.md)
 - **GitHub auth**: `GITHUB_TOKEN` env var, fallback to `gh auth token` command. No custom credential storage.
-- **Dashboard**: Deferred to Phase 4 (tech choice TBD)
+- **Dashboard**: Deferred to Phase 5 (tech choice TBD)
 - **Voice changelog**: Changelog at `~/.anthem/voice-changelog.md`, wired in Phase 3a via `update_voice` contract action
 - **Testing**: Interface-based mocks (no mocking framework), table-driven tests, `//go:build integration` tagged tests for external services, `testdata/` fixtures, CI from day 1
 - **Logging**: Use `log/slog` (Go stdlib) for structured logging
@@ -226,22 +226,45 @@ All 11 steps completed:
     - Dispatch client reference: `github.com/rauriemo/dispatch/dispatch/agents/anthem.py` -- auth timeout 10s, send timeout 120s, auto-reconnect with exponential backoff (1s to 30s), multiple concurrent requests with unique UUIDs.
     - New dependency: `github.com/gorilla/websocket` (promoted from indirect to direct).
 
-### Phase 4: Dashboard + Polish + Community
+### Phase 4: Frontier Implementation (COMPLETE)
+
+Competitive gap analysis against leading agentic coding systems. Full working checklist: `docs/plans/frontier-implementation.md`.
+
+Execution order: 1a -> 1b -> 1c -> 2a -> 2c -> 2b -> 2d -> 2e -> 3c -> 3b -> 3a.
+
+**Tier 1 -- Fix broken internals:**
+1. **Audit log gaps** (`internal/orchestrator/orchestrator.go`, `internal/audit/audit.go`) -- record task.completed/failed to DB, populate CostUSD, WaveSpentUSD, RecentEvents
+2. **SQL event type mismatch** (`internal/audit/audit.go`) -- fix SummaryForWave query strings
+3. **Dead config cleanup** (`config.go`, `validator.go`, `contract.go`, `main.go`) -- implement require_plan, remove workflow_changes_require_approval + linear, wire RiskForAction
+
+**Tier 2 -- Architectural upgrades:**
+4. **Driver abstraction** (`internal/agent/claude/driver.go`, `cmd/anthem/main.go`) -- configurable binary name, wire agent.command
+5. **DAG edges** (`contract.go`, `orchagent.go`, `orchestrator.go`, `state.go`) -- DependsOn field, dispatch ordering, state persistence
+6. **Lean path unification** (`orchestrator.go`) -- handleLeanMessage through AgentRunner.Run, cost tracking under __lean__
+7. **promote_knowledge** (`orchestrator.go`, `orchagent.go`, `contract.go`) -- write exec-plans, load into ProjectContext, remove SchemaOnly
+8. **Reviewer loop** (`orchestrator.go`, `config.go`) -- single-turn reviewer after executor, retry with feedback, max_retries limit
+
+**Tier 3 -- High-value competitive features:**
+9. **Orchestrator awareness** (`orchagent.go`, `config.go`) -- use Claude Code tools during planning, orchestrator.max_turns config
+10. **Agent profiles** (`config.go`, `contract.go`, `orchestrator.go`, `orchagent.go`) -- AgentProfile struct, default profiles, profile field on dispatch
+11. **Decision traces** (`audit/schema.go`, `audit/audit.go`, `orchestrator.go`) -- traces table, RecordTrace, query methods
+
+### Phase 5: Dashboard + Polish + Community
 
 1. Dashboard + status API + WebSocket streaming via EventBus (embedded HTTP server)
-2. Knowledge promotion -- `promote_knowledge` action implementation, write execution summaries to `docs/exec-plans/completed/`
-3. Plans as first-class DAG artifacts with dependency edges
-4. WhatsApp channel adapter (uses dashboard HTTP server for inbound webhooks)
-5. Example WORKFLOW.md + VOICE.md templates
-6. CONTRIBUTING.md
-7. Cross-platform release binaries via GoReleaser (Windows/macOS/Linux), Windows code signing (SignPath.io or Azure Trusted Signing)
-8. Demo video
+2. WhatsApp channel adapter (uses dashboard HTTP server for inbound webhooks)
+3. Example WORKFLOW.md + VOICE.md templates
+4. CONTRIBUTING.md
+5. Cross-platform release binaries via GoReleaser (Windows/macOS/Linux), Windows code signing (SignPath.io or Azure Trusted Signing)
+6. Demo video
 
-### Future Enhancements (Post Phase 4)
+### Future Enhancements (Post Phase 5)
 
 - GitHub webhook support as alternative to polling (instant detection, lower API usage)
 - GitHub App authentication for production/org use
 - Multi-instance distributed claim locking
+- Multi-LLM executors (Codex CLI, API-based drivers)
+- Container sandboxing (Docker-based executor isolation)
 
 ## Dependencies (go.mod)
 

@@ -30,7 +30,6 @@ rules:
     approval_label: "approved"
 
 system:
-  workflow_changes_require_approval: true
   constraints:
     - "Run all tests before merging"
     - "Do not commit secrets or credentials"
