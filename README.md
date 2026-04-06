@@ -110,8 +110,6 @@ go build -o anthem ./cmd/anthem
 
 On Windows, if Smart App Control blocks `go run`, build and run the binary directly (`go build ./cmd/anthem` then `.\anthem.exe`).
 
-**Binary releases**: planned for Phase 4 via GoReleaser.
-
 **Requires:** Go 1.26.1+, Claude Code CLI (`claude --version`), GitHub auth (`gh auth status` or `GITHUB_TOKEN`).
 
 ## Features
@@ -133,6 +131,11 @@ On Windows, if Smart App Control blocks `go run`, build and run the binary direc
 - **Config hot-reload**: edit WORKFLOW.md while running
 - **Graceful shutdown**: drains agents, releases claims, saves state on Ctrl+C
 - **Cross-platform**: Windows (Job Objects), macOS/Linux (process groups)
+- **Plan / Agent / Build modes**: orchestrator supports three channel modes — Plan (iterative markdown planning with stored artifacts), Agent (full JSON actions with plan context), and Build (approved plan → GitHub issue creation). Mode selected by `[system:plan]` / `[system:build]` tags; default is agent
+- **Model selection**: `[model:claude-xxx]` tags in messages select the Claude model for any path (lean, plan, build, agent). Supports Sonnet, Opus, Haiku across versions
+- **Plan storage**: plans saved to `~/.anthem/plans/{project-slug}/` with YAML frontmatter. Plan history and latest draft injected into agent-mode context for seamless plan-to-agent handoff
+- **Auto-label on subtask creation**: newly created subtasks auto-receive the first configured active label (e.g. `todo`) if not already present, ensuring immediate visibility in kanban and dispatch
+- **Dependency ordinal remapping**: `depends_on` in `create_subtasks` uses 1-based ordinals (e.g. `[1, 2]`); the daemon remaps to real GitHub issue IDs after creation
 
 ## CLI Commands
 
@@ -235,6 +238,27 @@ orchestrator:
 ```
 
 When enabled, the orchestrator agent (a persistent Claude session) plans task dispatch in waves. When disabled or on failure, Anthem falls back to mechanical dispatch.
+
+### Agent Profiles
+
+```yaml
+agent:
+  profiles:
+    coder:
+      prompt_prefix: "You are a coding agent. Write clean, tested code."
+    architect:
+      prompt_prefix: "You are an architect agent. Analyze and design, do not write code."
+      denied_tools: ["Write", "Edit", "Bash"]
+    tester:
+      prompt_prefix: "You are a testing agent. Focus on writing comprehensive tests."
+    debugger:
+      prompt_prefix: "You are a debugger agent. A previous attempt failed. Analyze the feedback carefully and fix the issues."
+  review_enabled: true
+  review_max_turns: 3
+  review_max_retries: 1
+```
+
+The orchestrator selects a profile when dispatching via `profile` on the `dispatch` action. Reviewer-failed retries automatically use the `debugger` profile. Four default profiles ship out of the box.
 
 ### Channels
 
@@ -360,6 +384,7 @@ The orchestrator evolves VOICE.md via the `update_voice` action as it learns pre
 | `~/.anthem/state.json` | Persisted retry queue and cost data |
 | `~/.anthem/audit.db` | SQLite audit log |
 | `~/.anthem/voice-changelog.md` | Log of VOICE.md changes |
+| `~/.anthem/plans/` | Stored plan artifacts (markdown with YAML frontmatter) |
 
 ## Troubleshooting
 
@@ -378,11 +403,11 @@ The orchestrator evolves VOICE.md via the `update_voice` action as it learns pre
 
 Anthem uses a **hybrid architecture** inspired by [OpenAI Symphony](https://github.com/openai/symphony):
 
-- **Go daemon** (Phases 1-2): polling, process management, workspace isolation, retry, state persistence, config hot-reload. Validates and executes actions -- never makes judgment calls.
-- **Orchestrator agent** (Phase 3a): a stateless allocator -- a Claude session with VOICE.md that receives state snapshots (including the project file tree and key docs) and proposes actions. If it fails, the daemon falls back to mechanical dispatch.
-- **Channel system** (Phase 3b): two-way communication via pluggable adapters (Slack and [Dispatch](https://github.com/rauriemo/dispatch) voice channel shipped). Users send feature requests by text or voice; orchestrator decomposes into subtasks.
-- **Executor agents**: headless Claude Code workers. They get WORKFLOW.md templates and constraints -- harnesses, not personality.
-- **Audit log + maintenance**: append-only SQLite at `~/.anthem/audit.db`. Scanner detects health signals and notifies via channels.
+- **Go daemon** (Phases 1-2): polling, process management, workspace isolation, retry, state persistence, config hot-reload. Validates and executes actions — never makes judgment calls.
+- **Orchestrator agent** (Phase 3a+): three modes of operation — **Plan** (iterative markdown planning, stored to `~/.anthem/plans/`), **Agent** (JSON actions with full plan + project context, can edit code directly via Claude Code), and **Build** (plan → subtask issue creation). Falls back to mechanical dispatch on failure.
+- **Channel system** (Phase 3b): two-way communication via pluggable adapters (Slack, [Dispatch](https://github.com/rauriemo/dispatch) voice, and [Prism](https://github.com/rauriemo/prism) visual workstation). Users send feature requests by text, voice, or file attachment; orchestrator decomposes into subtasks.
+- **Executor agents**: headless Claude Code workers with specialist profiles (coder, architect, tester, debugger). Post-execution reviewer loop with automatic debugger retry.
+- **Audit log + maintenance**: append-only SQLite at `~/.anthem/audit.db` with decision traces. Scanner detects health signals and notifies via channels.
 
 See [architecture.md](docs/plans/architecture.md) for the full system design with component diagrams and interface definitions.
 
