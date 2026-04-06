@@ -26,14 +26,20 @@ func Validate(cfg *Config) error {
 
 	var errs []error
 
-	if cfg.Tracker.Kind == "" {
-		errs = append(errs, fmt.Errorf("tracker.kind is required"))
-	} else if !validTrackerKinds[cfg.Tracker.Kind] {
-		errs = append(errs, fmt.Errorf("tracker.kind %q is not valid (github, linear, local_json)", cfg.Tracker.Kind))
-	}
+	if cfg.Orchestrator.Enabled {
+		if cfg.Tracker.Kind == "" {
+			errs = append(errs, fmt.Errorf("tracker.kind is required"))
+		} else if !validTrackerKinds[cfg.Tracker.Kind] {
+			errs = append(errs, fmt.Errorf("tracker.kind %q is not valid (github, linear, local_json)", cfg.Tracker.Kind))
+		}
 
-	if cfg.Tracker.Kind == "github" && cfg.Tracker.Repo == "" {
-		errs = append(errs, fmt.Errorf("tracker.repo is required for github tracker"))
+		if cfg.Tracker.Kind == "github" && cfg.Tracker.Repo == "" {
+			errs = append(errs, fmt.Errorf("tracker.repo is required for github tracker"))
+		}
+
+		if cfg.Polling.IntervalMS < 1000 {
+			errs = append(errs, fmt.Errorf("polling.interval_ms must be >= 1000"))
+		}
 	}
 
 	if cfg.Agent.Command == "" {
@@ -44,9 +50,6 @@ func Validate(cfg *Config) error {
 	}
 	if cfg.Agent.MaxConcurrent < 1 {
 		errs = append(errs, fmt.Errorf("agent.max_concurrent must be >= 1"))
-	}
-	if cfg.Polling.IntervalMS < 1000 {
-		errs = append(errs, fmt.Errorf("polling.interval_ms must be >= 1000"))
 	}
 
 	for i, r := range cfg.Rules {

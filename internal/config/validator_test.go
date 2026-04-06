@@ -124,6 +124,35 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: "tracker.kind",
 		},
+		{
+			name: "lean mode allows empty tracker and zero polling",
+			modify: func(c *Config) {
+				c.Orchestrator.Enabled = false
+				c.Tracker.Kind = ""
+				c.Tracker.Repo = ""
+				c.Polling.IntervalMS = 0
+			},
+		},
+		{
+			name: "lean mode still requires agent command",
+			modify: func(c *Config) {
+				c.Orchestrator.Enabled = false
+				c.Tracker.Kind = ""
+				c.Polling.IntervalMS = 0
+				c.Agent.Command = ""
+			},
+			wantErr: "agent.command is required",
+		},
+		{
+			name: "lean mode still requires workspace root",
+			modify: func(c *Config) {
+				c.Orchestrator.Enabled = false
+				c.Tracker.Kind = ""
+				c.Polling.IntervalMS = 0
+				c.Workspace.Root = ""
+			},
+			wantErr: "workspace.root is required",
+		},
 	}
 
 	for _, tt := range tests {
