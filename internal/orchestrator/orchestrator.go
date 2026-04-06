@@ -56,11 +56,12 @@ type Orchestrator struct {
 	homeDir         string
 	projectCtx      *ProjectContext
 
-	wg         sync.WaitGroup
-	mu         sync.Mutex
-	active     map[string]*ActiveRun
-	retryState map[string]*RetryInfo
-	taskDeps   map[string][]string
+	wg            sync.WaitGroup
+	mu            sync.Mutex
+	active        map[string]*ActiveRun
+	retryState    map[string]*RetryInfo
+	taskDeps      map[string][]string
+	reviewRetries map[string]int
 }
 
 type ActiveRun struct {
@@ -114,6 +115,7 @@ func New(opts Opts) *Orchestrator {
 		active:          make(map[string]*ActiveRun),
 		retryState:      make(map[string]*RetryInfo),
 		taskDeps:        make(map[string][]string),
+		reviewRetries:   make(map[string]int),
 	}
 
 	return o
@@ -782,6 +784,72 @@ func newDisplayID() string {
 	return "dsp-" + hex.EncodeToString(b)
 }
 
+type reviewResult struct {
+	Passed   bool   `json:"passed"`
+	Feedback string `json:"feedback"`
+}
+
+func (o *Orchestrator) runReview(ctx context.Context, task types.Task, execResult *types.RunResult) (passed bool, feedback string) {
+	snap := o.configSnapshot()
+	cfg := snap.cfg
+
+	outputPreview := ""
+	if execResult != nil && execResult.Output != "" {
+		outputPreview = execResult.Output
+		if len(outputPreview) > 4096 {
+			outputPreview = outputPreview[len(outputPreview)-4096:]
+		}
+	}
+
+	reviewPrompt := cfg.Agent.ReviewPrompt
+	if reviewPrompt == "" {
+		reviewPrompt = "You are a code reviewer. Review the following executor output for the task described below."
+	}
+
+	prompt := fmt.Sprintf(`%s
+
+## Task
+Title: %s
+Body: %s
+
+## Executor Output (last 4KB)
+%s
+
+Respond with a JSON object: {"passed": true/false, "feedback": "..."}
+If the output looks correct and complete, set passed=true. Otherwise set passed=false with specific feedback.`,
+		reviewPrompt, task.Title, task.Body, outputPreview)
+
+	result, err := o.runner.Run(ctx, types.RunOpts{
+		Prompt:         prompt,
+		MaxTurns:       1,
+		PermissionMode: "bypassPermissions",
+	})
+
+	if result != nil {
+		o.costTracker.Record(cost.SessionCost{
+			TaskID:    task.ID,
+			SessionID: fmt.Sprintf("review-%s-%d", task.ID, time.Now().UnixMilli()),
+			CostUSD:   result.CostUSD,
+			TokensIn:  result.TokensIn,
+			TokensOut: result.TokensOut,
+		})
+	}
+
+	if err != nil {
+		o.logger.Warn("reviewer agent failed, defaulting to passed", "task_id", task.ID, "error", err)
+		return true, ""
+	}
+
+	var rv reviewResult
+	if err := json.Unmarshal([]byte(result.Output), &rv); err != nil {
+		o.logger.Debug("failed to parse review response, defaulting to passed", "task_id", task.ID, "output", result.Output)
+		return true, ""
+	}
+
+	o.logger.Info("review result", "task_id", task.ID, "passed", rv.Passed, "feedback", rv.Feedback)
+	return rv.Passed, rv.Feedback
+}
+
 func (o *Orchestrator) executePromoteKnowledge(action Action) error {
 	root := o.cfg.Workspace.Root
 	if root == "" {
@@ -1052,6 +1120,11 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 	// Build full prompt: constraints + task template (voice is orchestrator-only, not for executors)
 	fullPrompt := buildFullPrompt(o.userConstraints, cfg.System.Constraints, prompt)
 
+	// Append reviewer feedback for retries
+	if ri := o.retryInfo(task.ID); ri != nil && strings.HasPrefix(ri.LastError, "review failed: ") {
+		fullPrompt += "\n\n## Previous Attempt Feedback\n\n" + strings.TrimPrefix(ri.LastError, "review failed: ")
+	}
+
 	// Continuation delay for retried tasks
 	if ri := o.retryInfo(task.ID); ri != nil {
 		select {
@@ -1135,6 +1208,36 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 		o.recordAuditWithCost(ctx, "task.failed", task.ID, nil, &result.CostUSD, &errStr)
 		o.publish(types.Event{Type: "task.failed", TaskID: task.ID, Data: exitErr.Error()})
 		return
+	}
+
+	// Review step (if enabled)
+	if cfg.Agent.ReviewEnabled {
+		passed, feedback := o.runReview(ctx, task, result)
+		if !passed {
+			maxReviewRetries := cfg.Agent.ReviewMaxRetries
+			if maxReviewRetries <= 0 {
+				maxReviewRetries = 1
+			}
+			o.mu.Lock()
+			o.reviewRetries[task.ID]++
+			retryCount := o.reviewRetries[task.ID]
+			o.mu.Unlock()
+
+			if retryCount > maxReviewRetries {
+				o.logger.Warn("review failed but max retries exceeded, completing anyway",
+					"task_id", task.ID, "retries", retryCount)
+				_ = o.tracker.AddLabel(ctx, task.ID, "review-skipped")
+			} else {
+				o.recordFailure(task.ID, fmt.Errorf("review failed: %s", feedback))
+				o.recordAuditWithCost(ctx, "task.review_failed", task.ID, nil, &result.CostUSD, &feedback)
+				o.publish(types.Event{Type: "task.review_failed", TaskID: task.ID, Data: feedback})
+				_ = o.tracker.AddComment(ctx, task.ID,
+					fmt.Sprintf("Review failed: %s. Retrying.", feedback))
+				return
+			}
+		} else {
+			o.recordAudit(ctx, "task.review_passed", task.ID, strPtr("review"))
+		}
 	}
 
 	o.clearRetry(task.ID)

@@ -79,7 +79,7 @@ Anthem's competitive gap analysis identified 11 improvements across three tiers.
   - Update orchestrator prompt to describe when to use `promote_knowledge` (after architectural discoveries, recurring patterns, solved edge cases).
   - Update tests.
 
-- [ ] **2e. Executor-reviewer agent loop**
+- [x] **2e. Executor-reviewer agent loop**
   - Files: `internal/orchestrator/orchestrator.go`, `internal/config/config.go`
   - Add to `AgentConfig`: `ReviewEnabled bool`, `ReviewMaxTurns int` (default 1), `ReviewPrompt string`, `ReviewMaxRetries int` (default 1).
   - In `dispatch` goroutine, after executor `Run` succeeds (ExitCode == 0) and before marking complete: if `ReviewEnabled`, call `o.runReview(ctx, task, result)`.

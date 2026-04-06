@@ -894,6 +894,159 @@ func TestLoadKnowledge_ReadsRecentFiles(t *testing.T) {
 	}
 }
 
+func TestReviewLoop_PassedCompletes(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Identifier: "GH-1", Title: "T1", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	callCount := 0
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		callCount++
+		if callCount == 1 {
+			// Executor
+			return &types.RunResult{SessionID: "s1", ExitCode: 0, Output: "done", CostUSD: 0.10, Duration: time.Millisecond}, nil
+		}
+		// Reviewer — passes
+		return &types.RunResult{SessionID: "s2", ExitCode: 0, Output: `{"passed":true,"feedback":""}`, CostUSD: 0.02}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 100000
+	cfg.Agent.ReviewEnabled = true
+	cfg.Agent.ReviewMaxRetries = 1
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       runner,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	_ = orch.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	task, _ := trk.GetTask(context.Background(), "1")
+	if task.Status != types.StatusCompleted {
+		t.Errorf("task status = %v, want completed", task.Status)
+	}
+}
+
+func TestReviewLoop_FailedTriggersRetry(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Identifier: "GH-1", Title: "T1", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+	events := NewMockEventBus()
+
+	callCount := 0
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		callCount++
+		if callCount%2 == 1 {
+			// Executor
+			return &types.RunResult{SessionID: "s1", ExitCode: 0, Output: "done", CostUSD: 0.10, Duration: time.Millisecond}, nil
+		}
+		// Reviewer — fails
+		return &types.RunResult{SessionID: "s2", ExitCode: 0, Output: `{"passed":false,"feedback":"missing tests"}`, CostUSD: 0.02}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 100000
+	cfg.Agent.ReviewEnabled = true
+	cfg.Agent.ReviewMaxRetries = 1
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       runner,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     events,
+		Logger:       testLogger(),
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	_ = orch.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	hasReviewFailed := false
+	for _, ev := range events.Published {
+		if ev.Type == "task.review_failed" {
+			hasReviewFailed = true
+		}
+	}
+	if !hasReviewFailed {
+		t.Error("expected task.review_failed event")
+	}
+}
+
+func TestReviewLoop_ExceedsMaxRetriesSkips(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Identifier: "GH-1", Title: "T1", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		// Reviewer always fails
+		return &types.RunResult{SessionID: "s1", ExitCode: 0, Output: `{"passed":false,"feedback":"bad"}`, CostUSD: 0.01}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 100000
+	cfg.Agent.ReviewEnabled = true
+	cfg.Agent.ReviewMaxRetries = 0
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       runner,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	// Pre-seed review retries to exceed max
+	orch.mu.Lock()
+	orch.reviewRetries["1"] = 1
+	orch.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	_ = orch.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	task, _ := trk.GetTask(context.Background(), "1")
+	if task.Status != types.StatusCompleted {
+		t.Errorf("task status = %v, want completed (review-skipped)", task.Status)
+	}
+
+	hasReviewSkipped := false
+	for _, l := range task.Labels {
+		if l == "review-skipped" {
+			hasReviewSkipped = true
+		}
+	}
+	if !hasReviewSkipped {
+		t.Error("expected review-skipped label")
+	}
+}
+
 func TestBuildStateSnapshot_IncludesDependsOn(t *testing.T) {
 	cfg := config.DefaultConfig()
 	orch := New(Opts{

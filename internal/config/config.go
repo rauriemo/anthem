@@ -68,6 +68,9 @@ type AgentConfig struct {
 	SkipPermissions       bool              `yaml:"skip_permissions"`
 	DeniedTools           []string          `yaml:"denied_tools"`
 	AdditionalDirs        []string          `yaml:"additional_dirs"`
+	ReviewEnabled         bool              `yaml:"review_enabled"`
+	ReviewMaxRetries      int               `yaml:"review_max_retries"`
+	ReviewPrompt          string            `yaml:"review_prompt"`
 }
 
 type MCPServerConfig struct {
