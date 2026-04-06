@@ -333,17 +333,6 @@ func TestExecuteActions_CreateSubtasks(t *testing.T) {
 	}
 }
 
-func newTestAuditLogger(t *testing.T) *audit.SQLiteAuditLogger {
-	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "test-audit.db")
-	logger, err := audit.NewSQLiteAuditLogger(dbPath)
-	if err != nil {
-		t.Fatalf("creating audit logger: %v", err)
-	}
-	t.Cleanup(func() { logger.Close() })
-	return logger
-}
-
 func TestDispatch_AuditRecordOnCompletion(t *testing.T) {
 	tasks := []types.Task{
 		{ID: "1", Identifier: "GH-1", Title: "T1", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
