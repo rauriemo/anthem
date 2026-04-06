@@ -205,7 +205,10 @@ func TestHandleBuildMessage_CreatesSubtasks(t *testing.T) {
 	}
 
 	// Verify the created task has "todo" auto-added (LLM only provided "priority:high")
-	trk := orch.tracker.(*tracker.MockTracker)
+	trk, ok := orch.tracker.(*tracker.MockTracker)
+	if !ok {
+		t.Fatal("expected MockTracker")
+	}
 	createdTask, _ := trk.GetTask(context.Background(), "2")
 	if createdTask == nil {
 		t.Fatal("expected task with ID '2' to be created")
