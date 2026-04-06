@@ -47,11 +47,34 @@ type WaveSummary struct {
 	EndedAt         time.Time
 }
 
+type TraceRecord struct {
+	Timestamp      time.Time
+	TraceType      string // "orchestrator", "executor", "reviewer", "lean"
+	TaskID         *string
+	SessionID      *string
+	WaveID         *string
+	PromptHash     *string
+	PromptPreview  *string
+	ResponsePreview *string
+	TokensIn       int
+	TokensOut      int
+	CostUSD        float64
+	DurationMS     int64
+	ActionsJSON    *string
+	Reasoning      *string
+	ReviewPassed   *bool
+	ReviewFeedback *string
+	Metadata       *string
+}
+
 type AuditLogger interface {
 	Record(ctx context.Context, event AuditEvent) error
 	Query(ctx context.Context, filter QueryFilter) ([]AuditEvent, error)
 	RecentByTask(ctx context.Context, taskID string, limit int) ([]AuditEvent, error)
 	SummaryForWave(ctx context.Context, waveID string) (*WaveSummary, error)
+	RecordTrace(ctx context.Context, trace TraceRecord) error
+	TracesForTask(ctx context.Context, taskID string, limit int) ([]TraceRecord, error)
+	RecentTraces(ctx context.Context, limit int) ([]TraceRecord, error)
 	Close() error
 }
 
@@ -205,6 +228,143 @@ func (l *SQLiteAuditLogger) SummaryForWave(ctx context.Context, waveID string) (
 	}
 
 	return summary, nil
+}
+
+func (l *SQLiteAuditLogger) RecordTrace(ctx context.Context, trace TraceRecord) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var reviewPassed *int
+	if trace.ReviewPassed != nil {
+		v := 0
+		if *trace.ReviewPassed {
+			v = 1
+		}
+		reviewPassed = &v
+	}
+
+	_, err := l.db.ExecContext(ctx,
+		`INSERT INTO traces (timestamp, trace_type, task_id, session_id, wave_id,
+			prompt_hash, prompt_preview, response_preview, tokens_in, tokens_out,
+			cost_usd, duration_ms, actions_json, reasoning, review_passed, review_feedback, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		trace.Timestamp.Format(time.RFC3339Nano),
+		trace.TraceType,
+		trace.TaskID,
+		trace.SessionID,
+		trace.WaveID,
+		trace.PromptHash,
+		trace.PromptPreview,
+		trace.ResponsePreview,
+		trace.TokensIn,
+		trace.TokensOut,
+		trace.CostUSD,
+		trace.DurationMS,
+		trace.ActionsJSON,
+		trace.Reasoning,
+		reviewPassed,
+		trace.ReviewFeedback,
+		trace.Metadata,
+	)
+	if err != nil {
+		return fmt.Errorf("recording trace: %w", err)
+	}
+	return nil
+}
+
+func (l *SQLiteAuditLogger) TracesForTask(ctx context.Context, taskID string, limit int) ([]TraceRecord, error) {
+	query := `SELECT timestamp, trace_type, task_id, session_id, wave_id,
+		prompt_hash, prompt_preview, response_preview, tokens_in, tokens_out,
+		cost_usd, duration_ms, actions_json, reasoning, review_passed, review_feedback, metadata
+		FROM traces WHERE task_id = ? ORDER BY timestamp DESC`
+	args := []any{taskID}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	return l.queryTraceRows(ctx, query, args...)
+}
+
+func (l *SQLiteAuditLogger) RecentTraces(ctx context.Context, limit int) ([]TraceRecord, error) {
+	query := `SELECT timestamp, trace_type, task_id, session_id, wave_id,
+		prompt_hash, prompt_preview, response_preview, tokens_in, tokens_out,
+		cost_usd, duration_ms, actions_json, reasoning, review_passed, review_feedback, metadata
+		FROM traces ORDER BY timestamp DESC`
+	var args []any
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	return l.queryTraceRows(ctx, query, args...)
+}
+
+func (l *SQLiteAuditLogger) queryTraceRows(ctx context.Context, query string, args ...any) ([]TraceRecord, error) {
+	rows, err := l.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying traces: %w", err)
+	}
+	defer rows.Close()
+
+	var traces []TraceRecord
+	for rows.Next() {
+		var (
+			tsStr          string
+			traceType      string
+			taskID         *string
+			sessionID      *string
+			waveID         *string
+			promptHash     *string
+			promptPreview  *string
+			responsePreview *string
+			tokensIn       int
+			tokensOut      int
+			costUSD        float64
+			durationMS     int64
+			actionsJSON    *string
+			reasoning      *string
+			reviewPassed   *int
+			reviewFeedback *string
+			metadata       *string
+		)
+		if err := rows.Scan(&tsStr, &traceType, &taskID, &sessionID, &waveID,
+			&promptHash, &promptPreview, &responsePreview, &tokensIn, &tokensOut,
+			&costUSD, &durationMS, &actionsJSON, &reasoning, &reviewPassed, &reviewFeedback, &metadata); err != nil {
+			return nil, fmt.Errorf("scanning trace: %w", err)
+		}
+
+		ts, err := time.Parse(time.RFC3339Nano, tsStr)
+		if err != nil {
+			return nil, fmt.Errorf("parsing trace timestamp: %w", err)
+		}
+
+		tr := TraceRecord{
+			Timestamp:       ts,
+			TraceType:       traceType,
+			TaskID:          taskID,
+			SessionID:       sessionID,
+			WaveID:          waveID,
+			PromptHash:      promptHash,
+			PromptPreview:   promptPreview,
+			ResponsePreview: responsePreview,
+			TokensIn:        tokensIn,
+			TokensOut:       tokensOut,
+			CostUSD:         costUSD,
+			DurationMS:      durationMS,
+			ActionsJSON:     actionsJSON,
+			Reasoning:       reasoning,
+			ReviewFeedback:  reviewFeedback,
+			Metadata:        metadata,
+		}
+		if reviewPassed != nil {
+			b := *reviewPassed != 0
+			tr.ReviewPassed = &b
+		}
+		traces = append(traces, tr)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating traces: %w", err)
+	}
+	return traces, nil
 }
 
 func (l *SQLiteAuditLogger) Close() error {

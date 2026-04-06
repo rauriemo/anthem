@@ -378,7 +378,19 @@ func (o *Orchestrator) tick(ctx context.Context) {
 	// 5. Orchestrator-driven dispatch or fallback
 	if o.orchAgent != nil {
 		actions, err := o.orchAgent.ConsultWithRepair(ctx, snapshot)
-		o.recordOrchCost()
+		tokIn, tokOut, orchCostUSD := o.orchAgent.DrainCost()
+		if orchCostUSD > 0 {
+			o.costTracker.Record(cost.SessionCost{
+				TaskID:    orchCostTaskID,
+				SessionID: fmt.Sprintf("orch-%d", time.Now().UnixMilli()),
+				CostUSD:   orchCostUSD,
+			})
+		}
+		o.recordTrace(ctx, "orchestrator", "", &types.RunResult{
+			TokensIn:  tokIn,
+			TokensOut: tokOut,
+			CostUSD:   orchCostUSD,
+		}, truncateStr(snapshot.Serialize(), 500))
 		if err != nil {
 			o.logger.Warn("orchestrator consult failed, falling back to mechanical dispatch", "error", err)
 			o.mechanicalDispatch(ctx, tasks)
@@ -750,6 +762,44 @@ func (o *Orchestrator) recordOrchCost() {
 	})
 }
 
+func truncateStr(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max]
+}
+
+func (o *Orchestrator) recordTrace(ctx context.Context, traceType string, taskID string, result *types.RunResult, prompt string) {
+	if o.auditLogger == nil || result == nil {
+		return
+	}
+	promptPreview := truncateStr(prompt, 500)
+	responsePreview := truncateStr(result.Output, 500)
+
+	trace := audit.TraceRecord{
+		Timestamp:       time.Now(),
+		TraceType:       traceType,
+		PromptPreview:   &promptPreview,
+		ResponsePreview: &responsePreview,
+		TokensIn:        result.TokensIn,
+		TokensOut:       result.TokensOut,
+		CostUSD:         result.CostUSD,
+		DurationMS:      result.Duration.Milliseconds(),
+	}
+	if taskID != "" {
+		trace.TaskID = &taskID
+	}
+	if result.SessionID != "" {
+		trace.SessionID = &result.SessionID
+	}
+	if o.currentWave != nil {
+		trace.WaveID = &o.currentWave.ID
+	}
+	if err := o.auditLogger.RecordTrace(ctx, trace); err != nil {
+		o.logger.Warn("failed to record trace", "trace_type", traceType, "error", err)
+	}
+}
+
 func (o *Orchestrator) recordAudit(ctx context.Context, eventType string, taskID string, actionName *string) {
 	o.recordAuditWithCost(ctx, eventType, taskID, actionName, nil, nil)
 }
@@ -834,6 +884,8 @@ If the output looks correct and complete, set passed=true. Otherwise set passed=
 			TokensOut: result.TokensOut,
 		})
 	}
+
+	o.recordTrace(ctx, "reviewer", task.ID, result, prompt)
 
 	if err != nil {
 		o.logger.Warn("reviewer agent failed, defaulting to passed", "task_id", task.ID, "error", err)
@@ -1261,6 +1313,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 	_ = o.tracker.RemoveLabel(ctx, task.ID, "in-progress")
 	_ = o.tracker.UpdateStatus(ctx, task.ID, string(types.StatusCompleted))
 
+	o.recordTrace(ctx, "executor", task.ID, result, fullPrompt)
 	o.recordAuditWithCost(ctx, "task.completed", task.ID, nil, &result.CostUSD, nil)
 	o.publish(types.Event{
 		Type:   "task.completed",
@@ -1686,6 +1739,7 @@ func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.Incomi
 	}
 
 	o.sendFollowUp(ctx, msg, strings.TrimRight(cleanText, "\n"))
+	o.recordTrace(ctx, "lean", "", result, promptText)
 	var costPtr *float64
 	if result != nil && result.CostUSD > 0 {
 		costPtr = &result.CostUSD

@@ -111,7 +111,7 @@ Anthem's competitive gap analysis identified 11 improvements across three tiers.
   - Add profile config example to default WORKFLOW.md template.
   - Update tests.
 
-- [ ] **3c. Full decision trace system**
+- [x] **3c. Full decision trace system**
   - Files: `internal/audit/schema.go`, `internal/audit/audit.go`, `internal/orchestrator/orchestrator.go`
   - Add `traces` table to audit DB schema with columns: id, timestamp, trace_type, task_id, session_id, wave_id, prompt_hash, prompt_preview (500 chars), response_preview (500 chars), tokens_in, tokens_out, cost_usd, duration_ms, actions_json, reasoning, review_passed, review_feedback, metadata. Indexes on task_id, wave_id, trace_type, timestamp.
   - Add `TraceRecord` struct and `RecordTrace(trace TraceRecord) error` method to audit logger.

@@ -251,6 +251,105 @@ func TestCloseFlushes(t *testing.T) {
 	}
 }
 
+func TestRecordTraceAndQuery(t *testing.T) {
+	logger := newTestLogger(t)
+	ctx := context.Background()
+
+	trace := TraceRecord{
+		Timestamp:       time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC),
+		TraceType:       "executor",
+		TaskID:          strPtr("task-1"),
+		SessionID:       strPtr("sess-1"),
+		PromptPreview:   strPtr("Write tests for..."),
+		ResponsePreview: strPtr("Here are the tests..."),
+		TokensIn:        500,
+		TokensOut:       200,
+		CostUSD:         0.05,
+		DurationMS:      3000,
+	}
+	if err := logger.RecordTrace(ctx, trace); err != nil {
+		t.Fatalf("RecordTrace: %v", err)
+	}
+
+	traces, err := logger.TracesForTask(ctx, "task-1", 10)
+	if err != nil {
+		t.Fatalf("TracesForTask: %v", err)
+	}
+	if len(traces) != 1 {
+		t.Fatalf("expected 1 trace, got %d", len(traces))
+	}
+
+	tr := traces[0]
+	if tr.TraceType != "executor" {
+		t.Errorf("TraceType = %q, want executor", tr.TraceType)
+	}
+	if tr.TokensIn != 500 {
+		t.Errorf("TokensIn = %d, want 500", tr.TokensIn)
+	}
+	if tr.CostUSD != 0.05 {
+		t.Errorf("CostUSD = %f, want 0.05", tr.CostUSD)
+	}
+}
+
+func TestRecentTraces(t *testing.T) {
+	logger := newTestLogger(t)
+	ctx := context.Background()
+
+	for i := range 5 {
+		err := logger.RecordTrace(ctx, TraceRecord{
+			Timestamp: time.Date(2026, 1, 1, 0, 0, i, 0, time.UTC),
+			TraceType: "lean",
+			TokensIn:  100,
+		})
+		if err != nil {
+			t.Fatalf("RecordTrace %d: %v", i, err)
+		}
+	}
+
+	traces, err := logger.RecentTraces(ctx, 3)
+	if err != nil {
+		t.Fatalf("RecentTraces: %v", err)
+	}
+	if len(traces) != 3 {
+		t.Fatalf("expected 3 traces, got %d", len(traces))
+	}
+	// DESC order: most recent first
+	if !traces[0].Timestamp.After(traces[2].Timestamp) {
+		t.Error("expected DESC order")
+	}
+}
+
+func TestTraceReviewFields(t *testing.T) {
+	logger := newTestLogger(t)
+	ctx := context.Background()
+
+	passed := true
+	trace := TraceRecord{
+		Timestamp:      time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC),
+		TraceType:      "reviewer",
+		TaskID:         strPtr("task-1"),
+		ReviewPassed:   &passed,
+		ReviewFeedback: strPtr("looks good"),
+	}
+	if err := logger.RecordTrace(ctx, trace); err != nil {
+		t.Fatalf("RecordTrace: %v", err)
+	}
+
+	traces, err := logger.TracesForTask(ctx, "task-1", 1)
+	if err != nil {
+		t.Fatalf("TracesForTask: %v", err)
+	}
+	if len(traces) != 1 {
+		t.Fatalf("expected 1 trace, got %d", len(traces))
+	}
+	if traces[0].ReviewPassed == nil || !*traces[0].ReviewPassed {
+		t.Error("expected ReviewPassed = true")
+	}
+	if traces[0].ReviewFeedback == nil || *traces[0].ReviewFeedback != "looks good" {
+		t.Errorf("ReviewFeedback = %v, want 'looks good'", traces[0].ReviewFeedback)
+	}
+}
+
 func itoa(i int) string {
 	if i == 0 {
 		return "0"
