@@ -58,7 +58,7 @@ func TestHandleLeanMessage_StreamsAndReplies(t *testing.T) {
 		ThreadID:    "thread-lean",
 		Text:        "hello world",
 		Timestamp:   time.Now(),
-	})
+	}, "")
 
 	sent := ch.sentMessages()
 
@@ -124,7 +124,7 @@ func TestHandleLeanMessage_ErrorSendsFollowUp(t *testing.T) {
 		ThreadID:    "thread-err",
 		Text:        "test",
 		Timestamp:   time.Now(),
-	})
+	}, "")
 
 	sent := ch.sentMessages()
 	found := false
@@ -164,7 +164,7 @@ func TestHandleLeanMessage_RecordsCost(t *testing.T) {
 		ThreadID:    "thread-cost",
 		Text:        "test",
 		Timestamp:   time.Now(),
-	})
+	}, "")
 
 	leanCost := ct.TaskCost(leanCostTaskID)
 	if leanCost < 0.009 || leanCost > 0.011 {
@@ -195,7 +195,7 @@ func TestHandleLeanMessage_MaxTurnsOne(t *testing.T) {
 	orch.handleLeanMessage(context.Background(), channel.IncomingMessage{
 		ChannelKind: "test",
 		Text:        "test",
-	})
+	}, "")
 
 	if capturedOpts.MaxTurns != 1 {
 		t.Errorf("MaxTurns = %d, want 1", capturedOpts.MaxTurns)

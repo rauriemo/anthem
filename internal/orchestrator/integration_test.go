@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -294,6 +295,7 @@ func TestExecuteActions_CreateSubtasks(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Tracker.Kind = "github"
 	cfg.Tracker.Repo = "t/r"
+	cfg.Tracker.Labels.Active = []string{"todo"}
 
 	orch := New(Opts{
 		Config:       &cfg,
@@ -310,7 +312,7 @@ func TestExecuteActions_CreateSubtasks(t *testing.T) {
 		{
 			Type: ActionCreateSubtasks,
 			Subtasks: []SubtaskDef{
-				{Title: "Subtask A", Body: "Do A", Labels: []string{"todo"}},
+				{Title: "Subtask A", Body: "Do A", Labels: []string{"priority:high"}},
 				{Title: "Subtask B", Body: "Do B", Labels: []string{"todo", "bug"}},
 			},
 		},
@@ -318,18 +320,28 @@ func TestExecuteActions_CreateSubtasks(t *testing.T) {
 
 	orch.executeActions(context.Background(), tasks, actions)
 
-	// Original task + 2 subtasks = 3
 	if len(trk.Tasks) != 3 {
 		t.Fatalf("expected 3 tasks (1 original + 2 subtasks), got %d", len(trk.Tasks))
 	}
 	if trk.Tasks[1].Title != "Subtask A" {
 		t.Errorf("subtask 1 title = %q, want 'Subtask A'", trk.Tasks[1].Title)
 	}
+	// Subtask A had no "todo" — auto-add should have added it via AddLabel
+	if !slices.Contains(trk.Tasks[1].Labels, "todo") {
+		t.Errorf("subtask A labels = %v, want 'todo' to be auto-added", trk.Tasks[1].Labels)
+	}
+	// Subtask B already had "todo" — should not be duplicated
 	if trk.Tasks[2].Title != "Subtask B" {
 		t.Errorf("subtask 2 title = %q, want 'Subtask B'", trk.Tasks[2].Title)
 	}
-	if len(trk.Tasks[2].Labels) != 2 {
-		t.Errorf("subtask 2 labels = %v, want [todo bug]", trk.Tasks[2].Labels)
+	todoCount := 0
+	for _, l := range trk.Tasks[2].Labels {
+		if l == "todo" {
+			todoCount++
+		}
+	}
+	if todoCount != 1 {
+		t.Errorf("subtask B has %d 'todo' labels, want exactly 1; labels = %v", todoCount, trk.Tasks[2].Labels)
 	}
 }
 
@@ -1071,5 +1083,137 @@ func TestBuildStateSnapshot_IncludesDependsOn(t *testing.T) {
 	}
 	if len(t2Summary.DependsOn) != 1 || t2Summary.DependsOn[0] != "t1" {
 		t.Errorf("t2.DependsOn = %v, want [t1]", t2Summary.DependsOn)
+	}
+}
+
+func TestCreateSubtasks_AutoAddsTodoLabel(t *testing.T) {
+	trk := tracker.NewMockTracker([]types.Task{
+		{ID: "1", Title: "Parent", Status: types.StatusQueued},
+	})
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Tracker.Labels.Active = []string{"todo"}
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       newNoopRunner(),
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	tasks := []types.Task{{ID: "1", Title: "Parent", Status: types.StatusQueued}}
+	actions := []Action{
+		{
+			Type: ActionCreateSubtasks,
+			Subtasks: []SubtaskDef{
+				{Title: "No Status Label", Body: "body", Labels: []string{"type:feature", "priority:high"}},
+			},
+		},
+	}
+
+	orch.executeActions(context.Background(), tasks, actions)
+
+	if len(trk.Tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(trk.Tasks))
+	}
+	created := trk.Tasks[1]
+	if !slices.Contains(created.Labels, "todo") {
+		t.Errorf("created task labels = %v, want 'todo' to be present", created.Labels)
+	}
+	if !slices.Contains(created.Labels, "type:feature") {
+		t.Errorf("created task labels = %v, want 'type:feature' to be preserved", created.Labels)
+	}
+}
+
+func TestCreateSubtasks_RemapsDependsOnOrdinals(t *testing.T) {
+	trk := tracker.NewMockTracker([]types.Task{
+		{ID: "1", Title: "Parent", Status: types.StatusQueued},
+	})
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       newNoopRunner(),
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	tasks := []types.Task{{ID: "1", Title: "Parent", Status: types.StatusQueued}}
+	actions := []Action{
+		{
+			Type: ActionCreateSubtasks,
+			Subtasks: []SubtaskDef{
+				{Title: "Step A", Body: "first"},
+				{Title: "Step B", Body: "second"},
+				{Title: "Step C", Body: "third", DependsOn: []string{"1", "2"}},
+			},
+		},
+	}
+
+	orch.executeActions(context.Background(), tasks, actions)
+
+	// Mock tracker assigns IDs sequentially: len(Tasks)+1 for each.
+	// Parent is ID "1", so subtasks get "2", "3", "4".
+	// Step C (ID "4") depends on ordinals "1" and "2", which should remap to "2" and "3".
+	orch.mu.Lock()
+	deps := orch.taskDeps["4"]
+	orch.mu.Unlock()
+
+	if len(deps) != 2 {
+		t.Fatalf("expected 2 deps for task 4, got %d: %v", len(deps), deps)
+	}
+	if deps[0] != "2" || deps[1] != "3" {
+		t.Errorf("task 4 deps = %v, want [2 3] (remapped from ordinals [1 2])", deps)
+	}
+}
+
+func TestCreateSubtasks_NoActiveLabelsConfigured(t *testing.T) {
+	trk := tracker.NewMockTracker([]types.Task{
+		{ID: "1", Title: "Parent", Status: types.StatusQueued},
+	})
+
+	cfg := config.DefaultConfig()
+	// Labels.Active is nil by default — no auto-add should occur
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       newNoopRunner(),
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	tasks := []types.Task{{ID: "1", Title: "Parent", Status: types.StatusQueued}}
+	actions := []Action{
+		{
+			Type: ActionCreateSubtasks,
+			Subtasks: []SubtaskDef{
+				{Title: "Task", Body: "body", Labels: []string{"type:bug"}},
+			},
+		},
+	}
+
+	orch.executeActions(context.Background(), tasks, actions)
+
+	if len(trk.Tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(trk.Tasks))
+	}
+	// Only the original label should be present, no "todo" added
+	created := trk.Tasks[1]
+	if len(created.Labels) != 1 || created.Labels[0] != "type:bug" {
+		t.Errorf("created task labels = %v, want [type:bug] (no auto-add when Active is empty)", created.Labels)
 	}
 }

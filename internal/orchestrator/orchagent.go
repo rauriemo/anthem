@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/rauriemo/anthem/internal/agent"
 	"github.com/rauriemo/anthem/internal/types"
@@ -59,6 +60,21 @@ type ProjectContext struct {
 	Knowledge      string `json:"knowledge,omitempty"`
 }
 
+// PlanContext carries the active plan draft for plan/build mode consults.
+type PlanContext struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	Status  string `json:"status"`
+}
+
+// PlanMetaSummary is a lightweight entry for plan history in the snapshot.
+type PlanMetaSummary struct {
+	Path    string    `json:"path"`
+	Title   string    `json:"title"`
+	Status  string    `json:"status"`
+	Updated time.Time `json:"updated"`
+}
+
 type StateSnapshot struct {
 	Tasks         []TaskSummary       `json:"tasks"`
 	RetryQueue    []RetrySummary      `json:"retry_queue,omitempty"`
@@ -68,6 +84,8 @@ type StateSnapshot struct {
 	UserMessage   *UserMessageContext `json:"user_message,omitempty"`
 	Project       *ProjectContext     `json:"project,omitempty"`
 	SourceChannel string              `json:"source_channel,omitempty"`
+	ActivePlan    *PlanContext        `json:"active_plan,omitempty"`
+	PlanHistory   []PlanMetaSummary   `json:"plan_history,omitempty"`
 }
 
 func (s StateSnapshot) Serialize() string {
@@ -127,7 +145,7 @@ Available action types:
 - update_voice: Propose a VOICE.md section update. Required: section_name, section_content.
 - request_approval: Flag a task for human review. Required: task_id.
 - close_wave: Mark the current wave as exhausted. No extra fields.
-- create_subtasks: Create subtasks as new tracker issues. Required: subtasks list with title, body, labels. Optional: depends_on (list of task IDs) for execution ordering within the wave.
+- create_subtasks: Create subtasks as new tracker issues. Required: subtasks list with title, body, labels. Optional: depends_on (list of 1-based ordinal task numbers from this batch, e.g. [1, 2] means "depends on the 1st and 2nd subtasks"). The daemon remaps ordinals to real issue IDs after creation.
 - promote_knowledge: Save architectural discoveries, recurring patterns, or solved edge cases to docs/exec-plans/. Required: summary (markdown content to save). Use after completing tasks that revealed non-obvious insights.
 - reply: Send a message back to the user through the communication channel. Required: body.
 - display: Push visual content to connected Prism clients. Required: display_kind. Fields vary by kind:
@@ -166,7 +184,8 @@ When a user message arrives through a channel (Slack, etc.), the state snapshot 
 3. For feature requests containing task descriptions:
    - Decompose the feature into concrete, actionable subtasks
    - Use create_subtasks with detailed titles and bodies for each subtask
-   - Include appropriate labels (e.g. "priority:high", "type:feature")
+   - Always include "todo" as the first label so the tracker picks up the issue, plus descriptive labels (e.g. "todo", "priority:high", "type:feature")
+   - Use 1-based ordinal numbers in depends_on (e.g. [1, 2] = depends on subtasks #1 and #2 in this batch)
    - Reply with a summary of the created tasks for user confirmation
 
 4. For commands:
@@ -475,5 +494,87 @@ func (o *OrchestratorAgent) ConsultWithRepair(ctx context.Context, state StateSn
 		return nil, nil
 	}
 
+	return actions, nil
+}
+
+// --- Plan-mode and Build-mode prompts ---
+
+const planModePromptSuffix = `
+
+## Plan Mode
+
+You are in PLANNING mode. The user wants to collaborate on a plan before any work begins.
+
+1. Analyze the codebase thoroughly using the project context and your tools before proposing tasks.
+2. Return a structured markdown plan (NOT the usual JSON actions format). Use this format:
+   - A title heading (# Title)
+   - A "## Tasks" section containing numbered subsections (### 1. Task Title) each with:
+     - **Labels:** comma-separated labels; always start with "todo" for tracker pickup, then add descriptive labels (e.g. todo, area:frontend, priority:high)
+     - **Profile:** recommended executor profile (coder, architect, tester, debugger)
+     - **Depends on:** task numbers this depends on, or "none"
+     - **Description:** detailed implementation steps referencing specific files, functions, and patterns
+3. If an existing plan draft is included in the state, refine it based on the user's feedback rather than starting from scratch.
+4. Do NOT output JSON actions. Do NOT create issues, dispatch, or execute anything.
+5. Wrap your entire markdown plan in a fenced block: ` + "```anthem-plan\n...\n```" + `
+6. You may include a brief conversational reply outside the fenced block.`
+
+const buildModePromptSuffix = `
+
+## Build Mode
+
+The user has approved the plan below and wants to start building. Your job:
+
+1. Read the plan content carefully.
+2. For each task in the plan, create a GitHub issue using the create_subtasks action.
+   - Use the task title as the subtask title
+   - Use the description as the subtask body
+   - Always include "todo" as the first label, then any descriptive labels from the plan
+   - Use 1-based ordinal numbers for depends_on (e.g. [1, 2] means "depends on subtasks #1 and #2 in this batch"); the daemon remaps ordinals to real issue IDs
+3. Reply with a confirmation summary of all created issues.
+4. Include a display showing the created task list.
+5. Respond in the normal JSON actions format: {"reasoning": "...", "actions": [...]}`
+
+// ConsultPlan runs a plan-mode consultation. The LLM returns markdown, not JSON actions.
+func (o *OrchestratorAgent) ConsultPlan(ctx context.Context, state StateSnapshot, model string, onStream func(string)) (string, error) {
+	prompt := buildSystemPrompt(o.voiceContent) + planModePromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
+
+	result, err := o.runner.Run(ctx, types.RunOpts{
+		Prompt:         prompt,
+		Model:          model,
+		PermissionMode: "bypassPermissions",
+		MaxTurns:       o.maxTurns,
+		OnStream:       onStream,
+	})
+	if err != nil {
+		return "", fmt.Errorf("plan consult: %w", err)
+	}
+
+	o.recordResult(result)
+	o.warnIfHighTokens(result)
+	return result.Output, nil
+}
+
+// ConsultBuild runs a build-mode consultation with the approved plan injected.
+func (o *OrchestratorAgent) ConsultBuild(ctx context.Context, state StateSnapshot, model string, onStream func(string)) ([]Action, error) {
+	prompt := buildSystemPrompt(o.voiceContent) + buildModePromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
+
+	result, err := o.runner.Run(ctx, types.RunOpts{
+		Prompt:         prompt,
+		Model:          model,
+		PermissionMode: "bypassPermissions",
+		MaxTurns:       o.maxTurns,
+		OnStream:       onStream,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build consult: %w", err)
+	}
+
+	o.recordResult(result)
+	o.warnIfHighTokens(result)
+
+	actions, err := parseActions(result.Output)
+	if err != nil {
+		return nil, fmt.Errorf("build consult: parsing actions: %w", err)
+	}
 	return actions, nil
 }

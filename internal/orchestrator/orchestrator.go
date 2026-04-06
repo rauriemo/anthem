@@ -10,8 +10,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +23,7 @@ import (
 	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/cost"
+	"github.com/rauriemo/anthem/internal/plans"
 	"github.com/rauriemo/anthem/internal/rules"
 	"github.com/rauriemo/anthem/internal/tracker"
 	"github.com/rauriemo/anthem/internal/types"
@@ -55,6 +58,7 @@ type Orchestrator struct {
 	lastSnapHash    string
 	homeDir         string
 	projectCtx      *ProjectContext
+	planStore       *plans.Store
 
 	wg            sync.WaitGroup
 	mu            sync.Mutex
@@ -135,6 +139,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	o.loadProjectContext()
+	o.initPlanStore()
 
 	o.logger.Info("orchestrator started",
 		"interval_ms", o.cfg.Polling.IntervalMS,
@@ -641,19 +646,53 @@ func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, a
 			}
 
 		case ActionCreateSubtasks:
-			for _, sub := range action.Subtasks {
+			activeLabel := ""
+			if len(o.cfg.Tracker.Labels.Active) > 0 {
+				activeLabel = o.cfg.Tracker.Labels.Active[0]
+			}
+
+			// Pass 1: create all issues and build ordinal-to-ID mapping
+			ordinalToID := make(map[string]string, len(action.Subtasks))
+			type created struct {
+				idx int
+				id  string
+			}
+			var createdList []created
+			for i, sub := range action.Subtasks {
 				createdID, err := o.tracker.CreateIssue(ctx, sub.Title, sub.Body, sub.Labels)
 				if err != nil {
 					o.logger.Warn("failed to create subtask", "title", sub.Title, "error", err)
 					continue
 				}
 				o.logger.Info("created subtask", "id", createdID, "title", sub.Title)
-				if len(sub.DependsOn) > 0 {
-					o.mu.Lock()
-					o.taskDeps[createdID] = sub.DependsOn
-					o.mu.Unlock()
-					o.logger.Info("registered task dependencies", "id", createdID, "depends_on", sub.DependsOn)
+				ordinalToID[strconv.Itoa(i+1)] = createdID
+				createdList = append(createdList, created{idx: i, id: createdID})
+
+				if activeLabel != "" && !slices.Contains(sub.Labels, activeLabel) {
+					if err := o.tracker.AddLabel(ctx, createdID, activeLabel); err != nil {
+						o.logger.Warn("failed to add active label", "id", createdID, "error", err)
+					}
 				}
+			}
+
+			// Pass 2: register dependencies with remapped IDs
+			for _, c := range createdList {
+				sub := action.Subtasks[c.idx]
+				if len(sub.DependsOn) == 0 {
+					continue
+				}
+				remapped := make([]string, 0, len(sub.DependsOn))
+				for _, dep := range sub.DependsOn {
+					if realID, ok := ordinalToID[dep]; ok {
+						remapped = append(remapped, realID)
+					} else {
+						remapped = append(remapped, dep)
+					}
+				}
+				o.mu.Lock()
+				o.taskDeps[c.id] = remapped
+				o.mu.Unlock()
+				o.logger.Info("registered task dependencies", "id", c.id, "depends_on", remapped)
 			}
 			o.recordAudit(ctx, "subtasks.created", "", strPtr("create_subtasks"))
 
@@ -1536,14 +1575,28 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		})
 	}
 
+	// Extract model tag before routing (e.g. [model:claude-sonnet-4-6])
+	model, cleanedText := extractModelTag(msg.Text)
+	msg.Text = cleanedText
+
+	// Plan/build routing -- must be checked before fast path
+	if strings.Contains(msg.Text, "[system:build]") {
+		o.handleBuildMessage(ctx, msg, model)
+		return
+	}
+	if strings.Contains(msg.Text, "[system:plan]") {
+		o.handlePlanMessage(ctx, msg, model)
+		return
+	}
+
 	// Fast path for lightweight queries (status checks, /fast messages)
 	if strings.Contains(msg.Text, "[system:status]") || strings.Contains(msg.Text, "[system:fast]") {
-		o.handleLeanMessage(ctx, msg)
+		o.handleLeanMessage(ctx, msg, model)
 		return
 	}
 
 	if o.tracker == nil {
-		o.handleLeanMessage(ctx, msg)
+		o.handleLeanMessage(ctx, msg, model)
 		return
 	}
 
@@ -1559,7 +1612,7 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	snap.SourceChannel = msg.ChannelKind
 
 	if o.orchAgent == nil {
-		o.handleLeanMessage(ctx, msg)
+		o.handleLeanMessage(ctx, msg, model)
 		return
 	}
 
@@ -1662,6 +1715,18 @@ func (o *Orchestrator) sendFollowUp(ctx context.Context, original channel.Incomi
 	})
 }
 
+var modelTagRe = regexp.MustCompile(`\[model:([^\]]+)\]`)
+
+func extractModelTag(text string) (model, cleaned string) {
+	m := modelTagRe.FindStringSubmatch(text)
+	if len(m) < 2 {
+		return "", text
+	}
+	cleaned = modelTagRe.ReplaceAllString(text, " ")
+	cleaned = strings.Join(strings.Fields(cleaned), " ")
+	return strings.TrimSpace(m[1]), cleaned
+}
+
 const leanCostTaskID = "__lean__"
 
 func buildLeanPrompt(projectCtx *ProjectContext, msg channel.IncomingMessage) string {
@@ -1697,7 +1762,7 @@ func buildLeanPrompt(projectCtx *ProjectContext, msg channel.IncomingMessage) st
 	return prompt.String()
 }
 
-func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.IncomingMessage) {
+func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.IncomingMessage, model string) {
 	o.logger.Info("handling lean message", "sender", msg.SenderID, "text_len", len(msg.Text))
 
 	promptText := buildLeanPrompt(o.projectCtx, msg)
@@ -1729,6 +1794,7 @@ func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.Incomi
 		WorkspacePath:  wsPath,
 		Prompt:         promptText,
 		MaxTurns:       1,
+		Model:          model,
 		PermissionMode: "bypassPermissions",
 		OnStream:       onStream,
 	})
@@ -2090,4 +2156,320 @@ func (o *Orchestrator) StartChannelListener(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// --- Plan mode handlers ---
+
+func (o *Orchestrator) initPlanStore() {
+	home := o.homeDir
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			o.logger.Warn("failed to get home dir for plan store", "error", err)
+			return
+		}
+	}
+	store, err := plans.NewStore(home)
+	if err != nil {
+		o.logger.Warn("failed to init plan store", "error", err)
+		return
+	}
+	o.planStore = store
+}
+
+func (o *Orchestrator) projectSlug() string {
+	if o.cfg.Tracker.Repo != "" {
+		return o.cfg.Tracker.Repo
+	}
+	return "default"
+}
+
+// extractPlanBlock pulls the markdown content from an ```anthem-plan fenced block.
+func extractPlanBlock(output string) string {
+	const open = "```anthem-plan\n"
+	start := strings.Index(output, open)
+	if start == -1 {
+		const openAlt = "```anthem-plan\r\n"
+		start = strings.Index(output, openAlt)
+		if start == -1 {
+			return ""
+		}
+		start += len(openAlt)
+	} else {
+		start += len(open)
+	}
+	end := strings.Index(output[start:], "\n```")
+	if end == -1 {
+		return output[start:]
+	}
+	return output[start : start+end]
+}
+
+func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.IncomingMessage, model string) {
+	o.logger.Info("handling plan message", "sender", msg.SenderID, "text_len", len(msg.Text))
+
+	cleanText := strings.Replace(msg.Text, "[system:plan]", "", 1)
+	cleanText = strings.TrimSpace(cleanText)
+
+	if o.orchAgent == nil {
+		o.sendFollowUp(ctx, msg, "Plan mode requires the orchestrator agent to be configured.")
+		return
+	}
+
+	onStream := func(delta string) {
+		if o.channelMgr != nil {
+			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+				StreamDelta: delta,
+				ThreadID:    msg.ThreadID,
+			})
+		}
+	}
+
+	// Build snapshot with plan context
+	var tasks []types.Task
+	if o.tracker != nil {
+		var err error
+		tasks, err = o.tracker.ListActive(ctx)
+		if err != nil {
+			o.logger.Warn("plan mode: failed to list tasks", "error", err)
+		}
+	}
+	snap := o.buildStateSnapshot(tasks)
+	snap.UserMessage = &UserMessageContext{Text: cleanText}
+	snap.SourceChannel = msg.ChannelKind
+
+	// Load active plan draft and history
+	if o.planStore != nil {
+		slug := o.projectSlug()
+		if draft, err := o.planStore.LatestDraft(slug); err == nil && draft != nil {
+			snap.ActivePlan = &PlanContext{
+				Path:    draft.Path,
+				Content: draft.Body,
+				Status:  string(draft.Frontmatter.Status),
+			}
+		}
+		if metas, err := o.planStore.List(slug); err == nil {
+			for _, m := range metas {
+				snap.PlanHistory = append(snap.PlanHistory, PlanMetaSummary{
+					Path:    m.Path,
+					Title:   m.Title,
+					Status:  string(m.Status),
+					Updated: m.Updated,
+				})
+			}
+		}
+	}
+
+	output, err := o.orchAgent.ConsultPlan(ctx, snap, model, onStream)
+	o.recordOrchCost()
+
+	if o.channelMgr != nil {
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			StreamDone: true,
+			ThreadID:   msg.ThreadID,
+		})
+	}
+
+	if err != nil {
+		o.logger.Warn("plan consult failed", "error", err)
+		o.sendFollowUp(ctx, msg, "Plan consultation failed. Please try again.")
+		return
+	}
+
+	// Extract the plan block from the LLM output
+	planContent := extractPlanBlock(output)
+	if planContent == "" {
+		planContent = output
+	}
+
+	// Save or update the plan file
+	var planPath string
+	if o.planStore != nil {
+		slug := o.projectSlug()
+		if draft, _ := o.planStore.LatestDraft(slug); draft != nil {
+			if err := o.planStore.Update(draft.Path, planContent); err != nil {
+				o.logger.Warn("failed to update plan", "error", err)
+			}
+			planPath = draft.Path
+		} else {
+			title := extractPlanTitle(planContent)
+			if title == "" {
+				title = "Plan"
+			}
+			path, err := o.planStore.Save(slug, title, planContent)
+			if err != nil {
+				o.logger.Warn("failed to save plan", "error", err)
+			}
+			planPath = path
+		}
+	}
+
+	// Send plan as a display artifact with kind "plan"
+	if o.channelMgr != nil {
+		component := map[string]any{
+			"kind":     "plan",
+			"content":  planContent,
+			"planPath": planPath,
+		}
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			Display:   component,
+			DisplayID: newDisplayID(),
+			ThreadID:  msg.ThreadID,
+		})
+	}
+
+	o.recordAudit(ctx, "channel.plan_proposed", "", strPtr("plan"))
+}
+
+func (o *Orchestrator) handleBuildMessage(ctx context.Context, msg channel.IncomingMessage, model string) {
+	o.logger.Info("handling build message", "sender", msg.SenderID, "text_len", len(msg.Text))
+
+	cleanText := strings.Replace(msg.Text, "[system:build]", "", 1)
+	planPath := strings.TrimSpace(cleanText)
+
+	if o.orchAgent == nil {
+		o.sendFollowUp(ctx, msg, "Build mode requires the orchestrator agent to be configured.")
+		return
+	}
+
+	// Load the plan content
+	var planContent string
+	if o.planStore != nil && planPath != "" {
+		plan, err := o.planStore.Load(planPath)
+		if err != nil {
+			o.logger.Warn("failed to load plan for build", "path", planPath, "error", err)
+			o.sendFollowUp(ctx, msg, "Could not load the plan file. Please try again.")
+			return
+		}
+		planContent = plan.Body
+		_ = o.planStore.SetStatus(planPath, plans.StatusBuilding)
+	} else if o.planStore != nil {
+		// Fall back to latest draft
+		draft, err := o.planStore.LatestDraft(o.projectSlug())
+		if err != nil || draft == nil {
+			o.sendFollowUp(ctx, msg, "No plan found to build. Create a plan first using Plan mode.")
+			return
+		}
+		planContent = draft.Body
+		planPath = draft.Path
+		_ = o.planStore.SetStatus(draft.Path, plans.StatusBuilding)
+	}
+
+	onStream := func(delta string) {
+		if o.channelMgr != nil {
+			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+				StreamDelta: delta,
+				ThreadID:    msg.ThreadID,
+			})
+		}
+	}
+
+	// Build snapshot with plan injected
+	var tasks []types.Task
+	if o.tracker != nil {
+		var err error
+		tasks, err = o.tracker.ListActive(ctx)
+		if err != nil {
+			o.logger.Warn("build mode: failed to list tasks", "error", err)
+		}
+	}
+	snap := o.buildStateSnapshot(tasks)
+	snap.UserMessage = &UserMessageContext{Text: "Build the approved plan."}
+	snap.SourceChannel = msg.ChannelKind
+	snap.ActivePlan = &PlanContext{
+		Path:    planPath,
+		Content: planContent,
+		Status:  string(plans.StatusBuilding),
+	}
+
+	actions, err := o.orchAgent.ConsultBuild(ctx, snap, model, onStream)
+	o.recordOrchCost()
+
+	if o.channelMgr != nil {
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			StreamDone: true,
+			ThreadID:   msg.ThreadID,
+		})
+	}
+
+	if err != nil {
+		o.logger.Warn("build consult failed", "error", err)
+		o.sendFollowUp(ctx, msg, "Build failed. The orchestrator could not process the plan.")
+		if o.planStore != nil && planPath != "" {
+			_ = o.planStore.SetStatus(planPath, plans.StatusDraft)
+		}
+		return
+	}
+
+	// Execute all actions (create_subtasks, reply, display)
+	o.executePlanBuildActions(ctx, msg, tasks, actions)
+
+	// Mark plan as done
+	if o.planStore != nil && planPath != "" {
+		_ = o.planStore.SetStatus(planPath, plans.StatusDone)
+	}
+
+	o.recordAudit(ctx, "channel.plan_built", "", strPtr("build"))
+}
+
+// executePlanBuildActions handles actions from a build consult, which uses
+// the same action types as HandleUserMessage (reply, display, create_subtasks).
+func (o *Orchestrator) executePlanBuildActions(ctx context.Context, msg channel.IncomingMessage, tasks []types.Task, actions []Action) {
+	for i := range actions {
+		switch actions[i].Type {
+		case ActionReply:
+			if o.channelMgr != nil {
+				o.sendFollowUp(ctx, msg, actions[i].Body)
+			}
+		case ActionDisplay:
+			if o.channelMgr != nil {
+				component := map[string]any{"kind": actions[i].DisplayKind}
+				if actions[i].DisplayContent != "" {
+					component["content"] = actions[i].DisplayContent
+				}
+				if actions[i].DisplayTitle != "" {
+					component["title"] = actions[i].DisplayTitle
+				}
+				if actions[i].DisplayLanguage != "" {
+					component["language"] = actions[i].DisplayLanguage
+				}
+				if actions[i].DisplayData != nil {
+					if m, ok := actions[i].DisplayData.(map[string]any); ok {
+						for k, v := range m {
+							component[k] = v
+						}
+					} else {
+						component["data"] = actions[i].DisplayData
+					}
+				}
+				_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+					Display:   component,
+					DisplayID: newDisplayID(),
+					ThreadID:  msg.ThreadID,
+				})
+			}
+		default:
+			// create_subtasks and others go through standard execution
+		}
+	}
+
+	var otherActions []Action
+	for _, a := range actions {
+		if a.Type != ActionReply && a.Type != ActionDisplay {
+			otherActions = append(otherActions, a)
+		}
+	}
+	o.executeActions(ctx, tasks, otherActions)
+}
+
+// extractPlanTitle pulls the first H1 heading from plan markdown.
+func extractPlanTitle(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "# ") {
+			return strings.TrimPrefix(line, "# ")
+		}
+	}
+	return ""
 }
