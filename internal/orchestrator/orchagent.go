@@ -522,17 +522,25 @@ const buildModePromptSuffix = `
 
 ## Build Mode
 
-The user has approved the plan below and wants to start building. Your job:
+The user has approved the plan below and wants to start building. Your job is ONLY to create GitHub issues — you do NOT execute the work yourself.
 
+CRITICAL RULES:
+- You MUST emit a create_subtasks action. This is mandatory. Without it, nothing happens.
+- You MUST NOT pretend the work is already done. You are a planner, not an executor.
+- You MUST NOT show completion summaries or checkmarks. The work has NOT been done yet.
+- Even for a single small task, you MUST create at least one subtask issue.
+
+Steps:
 1. Read the plan content carefully.
-2. For each task in the plan, create a GitHub issue using the create_subtasks action.
-   - Use the task title as the subtask title
-   - Use the description as the subtask body
-   - Always include "todo" as the first label, then any descriptive labels from the plan
-   - Use 1-based ordinal numbers for depends_on (e.g. [1, 2] means "depends on subtasks #1 and #2 in this batch"); the daemon remaps ordinals to real issue IDs
-3. Reply with a confirmation summary of all created issues.
-4. Include a display showing the created task list.
-5. Respond in the normal JSON actions format: {"reasoning": "...", "actions": [...]}`
+2. Break it into one or more concrete GitHub issues using the create_subtasks action.
+   - Use clear, actionable titles (e.g. "Remove /fast slash command from slashCommands.ts and update tests")
+   - Write detailed implementation instructions in the body including file paths, line numbers, and acceptance criteria
+   - Always include "todo" as the first label, then any descriptive labels (e.g. "type:cleanup", "priority:high")
+   - Use 1-based ordinal numbers for depends_on; the daemon remaps ordinals to real issue IDs
+3. After the create_subtasks action, include a reply action confirming what issues were created.
+4. Respond in the normal JSON actions format: {"reasoning": "...", "actions": [...]}
+
+The create_subtasks action is the ONLY way work gets dispatched to executors. If you skip it, nothing will be built.`
 
 // ConsultPlan runs a plan-mode consultation. The LLM returns markdown, not JSON actions.
 func (o *OrchestratorAgent) ConsultPlan(ctx context.Context, state StateSnapshot, model string, onStream func(string)) (string, error) {

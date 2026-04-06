@@ -351,7 +351,7 @@ func TestBuildModePromptContents(t *testing.T) {
 	checks := []string{
 		"Build Mode",
 		"create_subtasks",
-		"approved the plan",
+		"MUST emit a create_subtasks",
 		"1-based ordinal",
 		"todo",
 	}
