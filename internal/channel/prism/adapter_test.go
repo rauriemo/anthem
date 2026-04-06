@@ -128,6 +128,8 @@ func TestDisplayBroadcast(t *testing.T) {
 		t.Fatalf("auth failed")
 	}
 
+	time.Sleep(50 * time.Millisecond)
+
 	component := map[string]any{
 		"kind":    "markdown",
 		"content": "# Hello",
