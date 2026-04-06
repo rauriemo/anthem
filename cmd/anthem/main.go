@@ -52,7 +52,6 @@ func rootCmd() *cobra.Command {
 		initCmd(),
 		runCmd(),
 		validateCmd(),
-		statusCmd(),
 		versionCmd(),
 	)
 
@@ -298,7 +297,7 @@ func runCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringP("workflow", "w", "WORKFLOW.md", "Path to workflow file")
-	cmd.Flags().Int("port", 8080, "Dashboard port")
+	cmd.Flags().Int("port", 8080, "Server port (mDNS discovery fallback)")
 	cmd.Flags().String("log-level", "info", "Log level (debug, info, warn, error)")
 	return cmd
 }
@@ -374,17 +373,6 @@ func initCmd() *cobra.Command {
 			fmt.Printf("  %s created\n", voicePath)
 			fmt.Printf("  %s created\n", constraintsPath)
 			fmt.Printf("  %s created\n", channelsPath)
-			return nil
-		},
-	}
-}
-
-func statusCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "status",
-		Short: "Query running orchestrator state",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			fmt.Println("anthem status: not yet implemented (Phase 3)")
 			return nil
 		},
 	}

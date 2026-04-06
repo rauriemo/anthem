@@ -57,7 +57,6 @@ graph TD
   subgraph observability [Observability Layer]
     LOG["Structured Logger - slog"]
     PRISM["Prism Visual Workstation"]
-    API["Status API"]
   end
 
   WF --> CFG
@@ -585,12 +584,10 @@ Dashboard functionality is fulfilled by **Prism** (separate repo), a visual work
 - mDNS discovery for automatic Anthem connection
 - Auto-install of Go and Anthem dependencies
 
-Anthem exposes observability through:
+Anthem exposes observability to Prism through:
 
-- `GET /api/v1/state` -- JSON snapshot: running tasks, queued, retry queue, token totals
-- `GET /api/v1/tasks/:id` -- Single task details + agent session history
-- `POST /api/v1/refresh` -- Force immediate poll tick
 - Prism WebSocket channel -- real-time event stream, display frames, stream frames
+- mDNS discovery -- Prism auto-discovers running Anthem instances on the local network
 
 ### 13. Structured Logging
 
@@ -672,7 +669,6 @@ anthem/
     agent/              # AgentRunner interface
       claude/           # Claude Code driver (stream-json, session resume, cross-platform process mgmt)
     voice/              # VOICE.md parser, section merge logic, changelog
-    dashboard/          # HTTP server skeleton, status API
     logging/            # Structured logger (slog)
     cost/               # Token/cost tracking, budget enforcement
   testdata/             # Test fixtures (workflow.md, voice.md, tasks.json)
@@ -692,9 +688,8 @@ anthem/
 anthem init                   # Create starter WORKFLOW.md + bootstrap ~/.anthem/VOICE.md
 anthem run                    # Start orchestrator (default: ./WORKFLOW.md)
 anthem run -w /path/to.md     # Custom workflow file
-anthem run --port 8080        # Override API/server port
+anthem run --port 8080        # Override server port (mDNS discovery fallback)
 anthem validate               # Validate WORKFLOW.md without starting
-anthem status                 # Query running orchestrator's /api/v1/state
 anthem version                # Print version
 ```
 

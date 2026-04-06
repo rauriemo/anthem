@@ -82,9 +82,7 @@ anthem/
         adapter.go                   # Post-3b: Dispatch WebSocket server adapter
     maintenance/
       scanner.go                     # Phase 3b: audit-log health signal scanner
-    dashboard/
-      server.go                      # HTTP server skeleton, status API
-      api.go                         # REST API route definitions
+    discovery/                       # mDNS advertisement for Prism auto-discovery
     logging/
       logger.go                      # Structured JSON logger (slog wrapper)
     cost/
@@ -145,7 +143,7 @@ anthem/
 7. Create mock implementations of all interfaces for testing
 8. Define Config struct matching WORKFLOW.md YAML schema (including `system:` block, `agent.max_concurrent`, `agent.max_concurrent_per_label`), parser skeleton, validator skeleton
 9. Define VoiceConfig struct, parser skeleton with section extraction
-10. Wire up Cobra CLI skeleton: `anthem init`, `anthem run`, `anthem validate`, `anthem status`, `anthem version`
+10. Wire up Cobra CLI skeleton: `anthem init`, `anthem run`, `anthem validate`, `anthem version`
 11. Create `WORKFLOW.md.example`, `VOICE.md.example`, `testdata/` fixtures
 
 ### Phase 1: Foundation (Core Loop + GitHub + Claude Code + VOICE.md)
