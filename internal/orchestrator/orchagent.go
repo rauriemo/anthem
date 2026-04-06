@@ -56,6 +56,7 @@ type ProjectContext struct {
 	Architecture   string `json:"architecture,omitempty"`
 	Implementation string `json:"implementation,omitempty"`
 	ProjectSummary string `json:"project_summary,omitempty"`
+	Knowledge      string `json:"knowledge,omitempty"`
 }
 
 type StateSnapshot struct {
@@ -122,7 +123,7 @@ Available action types:
 - request_approval: Flag a task for human review. Required: task_id.
 - close_wave: Mark the current wave as exhausted. No extra fields.
 - create_subtasks: Create subtasks as new tracker issues. Required: subtasks list with title, body, labels. Optional: depends_on (list of task IDs) for execution ordering within the wave.
-- promote_knowledge: (schema-only) Promote knowledge to repo. Required: summary.
+- promote_knowledge: Save architectural discoveries, recurring patterns, or solved edge cases to docs/exec-plans/. Required: summary (markdown content to save). Use after completing tasks that revealed non-obvious insights.
 - reply: Send a message back to the user through the communication channel. Required: body.
 - display: Push visual content to connected Prism clients. Required: display_kind. Fields vary by kind:
   * text:     display_kind="text", display_content="<plain text>", display_title (optional)
@@ -203,7 +204,9 @@ Use this context to:
 - Reference specific files and modules when writing subtask descriptions
 - Respect architectural decisions documented in the project summary
 - Understand what has been built (completed phases) vs what is planned (future phases)
-- Write subtask bodies that reference the correct file paths and existing patterns`)
+- Write subtask bodies that reference the correct file paths and existing patterns
+
+The "knowledge" field (if present) contains summaries from previous runs -- architectural discoveries, recurring patterns, and solved edge cases. Use these to inform planning.`)
 
 	sections = append(sections, `## Wave Model
 

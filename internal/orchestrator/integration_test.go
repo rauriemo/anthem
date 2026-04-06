@@ -3,7 +3,10 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -797,6 +800,97 @@ func TestDAGEdges_StatePersistence(t *testing.T) {
 	}
 	if len(state.TaskDeps["task-3"]) != 2 {
 		t.Errorf("task-3 deps = %v, want 2 entries", state.TaskDeps["task-3"])
+	}
+}
+
+func TestPromoteKnowledge_WritesFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = tmpDir
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "",
+		Tracker:      tracker.NewMockTracker(nil),
+		Runner:       newNoopRunner(),
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	action := Action{
+		Type:    ActionPromoteKnowledge,
+		Summary: "# Discovery\n\nThe auth middleware needs to validate tokens before rate limiting.",
+	}
+
+	err := orch.executePromoteKnowledge(action)
+	if err != nil {
+		t.Fatalf("executePromoteKnowledge error: %v", err)
+	}
+
+	// Check that a file was created in docs/exec-plans/
+	entries, err := os.ReadDir(filepath.Join(tmpDir, "docs", "exec-plans"))
+	if err != nil {
+		t.Fatalf("reading exec-plans dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 file in exec-plans, got %d", len(entries))
+	}
+	if !strings.HasSuffix(entries[0].Name(), ".md") {
+		t.Errorf("expected .md file, got %q", entries[0].Name())
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "docs", "exec-plans", entries[0].Name()))
+	if err != nil {
+		t.Fatalf("reading knowledge file: %v", err)
+	}
+	if !strings.Contains(string(data), "auth middleware") {
+		t.Error("knowledge file should contain the summary content")
+	}
+}
+
+func TestSanitizeFilename(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Hello World", "hello-world"},
+		{"Fix: auth-middleware bug", "fix-auth-middleware-bug"},
+		{"Test 123!", "test-123"},
+	}
+	for _, tt := range tests {
+		got := sanitizeFilename(tt.input)
+		if got != tt.want {
+			t.Errorf("sanitizeFilename(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestLoadKnowledge_ReadsRecentFiles(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "exec-plans")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := range 7 {
+		name := fmt.Sprintf("2026-01-%02d-discovery.md", i+1)
+		content := fmt.Sprintf("# Discovery %d\nSome content.", i+1)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	knowledge := loadKnowledge(dir)
+	if knowledge == "" {
+		t.Fatal("expected non-empty knowledge")
+	}
+
+	// Should only include last 5 files (3-7)
+	if strings.Contains(knowledge, "Discovery 1") {
+		t.Error("should not include oldest files (only last 5)")
+	}
+	if !strings.Contains(knowledge, "Discovery 7") {
+		t.Error("should include most recent file")
 	}
 }
 

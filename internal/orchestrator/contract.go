@@ -186,11 +186,6 @@ func IsIdempotent(actionType ActionType) bool {
 }
 
 // SchemaOnly reports whether the action's schema is defined but execution is deferred to a future phase.
-func SchemaOnly(actionType ActionType) bool {
-	switch actionType {
-	case ActionPromoteKnowledge:
-		return true
-	default:
-		return false
-	}
+func SchemaOnly(_ ActionType) bool {
+	return false
 }

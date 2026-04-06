@@ -70,7 +70,7 @@ Anthem's competitive gap analysis identified 11 improvements across three tiers.
   - Remove the raw `exec.CommandContext` code path entirely.
   - Update lean_test.go.
 
-- [ ] **2d. Implement promote_knowledge**
+- [x] **2d. Implement promote_knowledge**
   - Files: `internal/orchestrator/orchestrator.go`, `internal/orchestrator/orchagent.go`, `internal/orchestrator/contract.go`
   - In `contract.go`: remove `promote_knowledge` from any `SchemaOnly` check so `ValidateAction` passes it.
   - In `executeActions` switch: replace the `ActionPromoteKnowledge` not-implemented log with actual file write to `docs/exec-plans/<date>-<sanitized-summary>.md`.

@@ -643,6 +643,13 @@ func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, a
 			}
 			o.recordAudit(ctx, "subtasks.created", "", strPtr("create_subtasks"))
 
+		case ActionPromoteKnowledge:
+			if err := o.executePromoteKnowledge(action); err != nil {
+				o.logger.Warn("promote_knowledge failed", "error", err)
+			} else {
+				o.recordAudit(ctx, "knowledge.promoted", "", strPtr("promote_knowledge"))
+			}
+
 		case ActionReply:
 			if o.channelMgr != nil {
 				replyMsg := channel.OutgoingMessage{Text: action.Body, Markdown: true}
@@ -773,6 +780,45 @@ func newDisplayID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	return "dsp-" + hex.EncodeToString(b)
+}
+
+func (o *Orchestrator) executePromoteKnowledge(action Action) error {
+	root := o.cfg.Workspace.Root
+	if root == "" {
+		root = "."
+	}
+	dir := filepath.Join(root, "docs", "exec-plans")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating exec-plans directory: %w", err)
+	}
+
+	sanitized := sanitizeFilename(action.Summary)
+	if len(sanitized) > 60 {
+		sanitized = sanitized[:60]
+	}
+	filename := fmt.Sprintf("%s-%s.md", time.Now().Format("2006-01-02"), sanitized)
+	path := filepath.Join(dir, filename)
+
+	if err := os.WriteFile(path, []byte(action.Summary), 0o644); err != nil {
+		return fmt.Errorf("writing knowledge file: %w", err)
+	}
+	o.logger.Info("promoted knowledge", "path", path)
+
+	o.loadProjectContext()
+	return nil
+}
+
+func sanitizeFilename(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == ' ' || r == '-' || r == '_':
+			b.WriteByte('-')
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 func (o *Orchestrator) executeUpdateVoice(ctx context.Context, action Action) error {
@@ -1639,8 +1685,53 @@ func (o *Orchestrator) loadProjectContext() {
 	pctx.ProjectSummary = readDocFile("CLAUDE.md")
 	pctx.Architecture = readDocFile(filepath.Join("docs", "plans", "architecture.md"))
 	pctx.Implementation = readDocFile(filepath.Join("docs", "plans", "implementation.md"))
+	pctx.Knowledge = loadKnowledge(filepath.Join(root, "docs", "exec-plans"))
 
 	o.projectCtx = pctx
+}
+
+const maxKnowledgeBytes = 8 * 1024
+
+func loadKnowledge(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+
+	// Filter to .md files, sorted by name (date prefix gives chronological order)
+	var mdFiles []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+			mdFiles = append(mdFiles, filepath.Join(dir, e.Name()))
+		}
+	}
+	if len(mdFiles) == 0 {
+		return ""
+	}
+
+	// Take last 5 (most recent)
+	start := 0
+	if len(mdFiles) > 5 {
+		start = len(mdFiles) - 5
+	}
+	mdFiles = mdFiles[start:]
+
+	var b strings.Builder
+	for _, f := range mdFiles {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		if b.Len()+len(data) > maxKnowledgeBytes {
+			break
+		}
+		b.WriteString("### ")
+		b.WriteString(filepath.Base(f))
+		b.WriteByte('\n')
+		b.Write(data)
+		b.WriteString("\n\n")
+	}
+	return b.String()
 }
 
 func readDocFile(path string) string {

@@ -256,7 +256,7 @@ func TestSchemaOnly(t *testing.T) {
 		action ActionType
 		want   bool
 	}{
-		{ActionPromoteKnowledge, true},
+		{ActionPromoteKnowledge, false},
 		{ActionCreateSubtasks, false},
 		{ActionDispatch, false},
 		{ActionSkip, false},
