@@ -1611,6 +1611,28 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	snap.UserMessage = buildUserMessageContext(msg)
 	snap.SourceChannel = msg.ChannelKind
 
+	// Inject latest plan context so agent mode can reference plans created in plan mode
+	if o.planStore != nil {
+		slug := o.projectSlug()
+		if draft, err := o.planStore.LatestDraft(slug); err == nil && draft != nil {
+			snap.ActivePlan = &PlanContext{
+				Path:    draft.Path,
+				Content: draft.Body,
+				Status:  string(draft.Frontmatter.Status),
+			}
+		}
+		if metas, err := o.planStore.List(slug); err == nil {
+			for _, m := range metas {
+				snap.PlanHistory = append(snap.PlanHistory, PlanMetaSummary{
+					Path:    m.Path,
+					Title:   m.Title,
+					Status:  string(m.Status),
+					Updated: m.Updated,
+				})
+			}
+		}
+	}
+
 	if o.orchAgent == nil {
 		o.handleLeanMessage(ctx, msg, model)
 		return
