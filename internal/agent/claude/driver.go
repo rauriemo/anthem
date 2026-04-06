@@ -18,16 +18,21 @@ import (
 const postResultTimeout = 5 * time.Second
 
 // Driver implements agent.AgentRunner using the Claude Code CLI.
+// The binary field controls which CLI executable is invoked (default: "claude").
 type Driver struct {
 	pm     ProcessManager
 	logger *slog.Logger
+	binary string
 }
 
-func NewDriver(pm ProcessManager, logger *slog.Logger) *Driver {
+func NewDriver(pm ProcessManager, logger *slog.Logger, binary string) *Driver {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Driver{pm: pm, logger: logger}
+	if binary == "" {
+		binary = "claude"
+	}
+	return &Driver{pm: pm, logger: logger, binary: binary}
 }
 
 func (d *Driver) Run(ctx context.Context, opts types.RunOpts) (*types.RunResult, error) {
@@ -100,7 +105,7 @@ func (d *Driver) Kill(pid int) error {
 }
 
 func (d *Driver) execute(ctx context.Context, workDir string, args []string, opts types.RunOpts, stdinPrompt string) (*types.RunResult, error) {
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd := exec.CommandContext(ctx, d.binary, args...)
 	if workDir != "" {
 		cmd.Dir = workDir
 	}

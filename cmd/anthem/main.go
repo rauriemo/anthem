@@ -121,7 +121,7 @@ func runCmd() *cobra.Command {
 			}
 
 			pm := claude.NewPlatformProcessManager()
-			runner := claude.NewDriver(pm, logger)
+			runner := claude.NewDriver(pm, logger, cfg.Agent.Command)
 
 			ws := workspace.NewManager(cfg.Workspace.Root, cfg.Hooks, logger)
 

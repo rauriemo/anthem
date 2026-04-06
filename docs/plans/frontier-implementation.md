@@ -38,7 +38,7 @@ Anthem's competitive gap analysis identified 11 improvements across three tiers.
 
 ## Tier 2: Architectural Upgrades
 
-- [ ] **2a. Clean multi-LLM driver abstraction**
+- [x] **2a. Clean multi-LLM driver abstraction**
   - Files: `internal/agent/claude/driver.go`, `cmd/anthem/main.go`, `internal/config/config.go`
   - Extract the hard-coded `"claude"` binary name in `driver.go` `execute()` into a configurable `binary` field on `Driver`. `NewDriver(pm, logger, binary)` defaults to `"claude"` if empty.
   - Wire `cfg.Agent.Command` from config into `claude.NewDriver(pm, logger, cfg.Agent.Command)` in `main.go`.

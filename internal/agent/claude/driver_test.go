@@ -47,7 +47,7 @@ func makeResultJSONWithText(sessionID string, resultText any) string {
 func TestParseStdoutExtractsResult(t *testing.T) {
 	resultLine := makeResultJSON("sess-1", 0.05, 3, false)
 
-	d := NewDriver(nil, nil)
+	d := NewDriver(nil, nil, "")
 	result, err := d.parseStdout(
 		context.Background(),
 		strings.NewReader(resultLine+"\n"),
@@ -81,7 +81,7 @@ func TestParseStdoutExtractsResult(t *testing.T) {
 func TestParseStdoutErrorResult(t *testing.T) {
 	resultLine := makeResultJSON("sess-2", 0.01, 1, true)
 
-	d := NewDriver(nil, nil)
+	d := NewDriver(nil, nil, "")
 	result, err := d.parseStdout(
 		context.Background(),
 		strings.NewReader(resultLine+"\n"),
@@ -98,7 +98,7 @@ func TestParseStdoutErrorResult(t *testing.T) {
 }
 
 func TestParseStdoutNoResult(t *testing.T) {
-	d := NewDriver(nil, nil)
+	d := NewDriver(nil, nil, "")
 	result, err := d.parseStdout(
 		context.Background(),
 		strings.NewReader("{\"type\":\"system\"}\n"),
@@ -118,7 +118,7 @@ func TestParseStdoutCallsOnResult(t *testing.T) {
 	resultLine := makeResultJSON("sess-3", 0.02, 2, false)
 
 	called := false
-	d := NewDriver(nil, nil)
+	d := NewDriver(nil, nil, "")
 	_, err := d.parseStdout(
 		context.Background(),
 		strings.NewReader(resultLine+"\n"),
@@ -138,7 +138,7 @@ func TestParseStdoutCallsOnResult(t *testing.T) {
 func TestParseStdoutSkipsMalformedLines(t *testing.T) {
 	input := "not json at all\n" + makeResultJSON("sess-4", 0.03, 1, false) + "\n"
 
-	d := NewDriver(nil, nil)
+	d := NewDriver(nil, nil, "")
 	result, err := d.parseStdout(
 		context.Background(),
 		strings.NewReader(input),
@@ -169,7 +169,7 @@ func captureArgs(t *testing.T, fn func(d *Driver)) []string {
 		TerminateFunc: func(_ *exec.Cmd) error { return nil },
 		KillFunc:      func(_ *exec.Cmd) error { return nil },
 	}
-	d := NewDriver(pm, nil)
+	d := NewDriver(pm, nil, "")
 	fn(d)
 	return captured
 }
@@ -258,7 +258,7 @@ func TestContinuePassesOpts(t *testing.T) {
 		TerminateFunc: func(_ *exec.Cmd) error { return nil },
 		KillFunc:      func(_ *exec.Cmd) error { return nil },
 	}
-	d := NewDriver(pm, nil)
+	d := NewDriver(pm, nil, "")
 
 	_, _ = d.Continue(context.Background(), "sess-123", "continue prompt", types.ContinueOpts{
 		WorkspacePath:  "/tmp/ws",
@@ -299,7 +299,7 @@ func TestContinueDefaultPermissionMode(t *testing.T) {
 func TestExtractResultTextString(t *testing.T) {
 	resultLine := makeResultJSONWithText("sess-str", "hello world")
 
-	d := NewDriver(nil, nil)
+	d := NewDriver(nil, nil, "")
 	result, err := d.parseStdout(
 		context.Background(),
 		strings.NewReader(resultLine+"\n"),
@@ -322,7 +322,7 @@ func TestExtractResultTextContentBlocks(t *testing.T) {
 	}
 	resultLine := makeResultJSONWithText("sess-blocks", blocks)
 
-	d := NewDriver(nil, nil)
+	d := NewDriver(nil, nil, "")
 	result, err := d.parseStdout(
 		context.Background(),
 		strings.NewReader(resultLine+"\n"),
@@ -342,7 +342,7 @@ func TestExtractResultTextEmpty(t *testing.T) {
 	// Result event with no "result" field
 	resultLine := makeResultJSON("sess-empty", 0.01, 1, false)
 
-	d := NewDriver(nil, nil)
+	d := NewDriver(nil, nil, "")
 	result, err := d.parseStdout(
 		context.Background(),
 		strings.NewReader(resultLine+"\n"),
@@ -385,7 +385,7 @@ func TestParseStdoutEmptyResultUsesStreamMerge(t *testing.T) {
 	input := string(ev) + "\n" + resultLine + "\n"
 
 	var acc strings.Builder
-	d := NewDriver(nil, nil)
+	d := NewDriver(nil, nil, "")
 	result, err := d.parseStdout(
 		context.Background(),
 		strings.NewReader(input),
@@ -423,7 +423,7 @@ func TestParseStdoutCallsOnStream(t *testing.T) {
 		deltas = append(deltas, delta)
 	}
 
-	d := NewDriver(nil, nil)
+	d := NewDriver(nil, nil, "")
 	result, err := d.parseStdout(
 		context.Background(),
 		strings.NewReader(input),
@@ -469,7 +469,7 @@ func TestParseStdoutCallsOnStreamForStreamEventTextDelta(t *testing.T) {
 		deltas = append(deltas, delta)
 	}
 
-	d := NewDriver(nil, nil)
+	d := NewDriver(nil, nil, "")
 	result, err := d.parseStdout(
 		context.Background(),
 		strings.NewReader(input),
@@ -488,12 +488,49 @@ func TestParseStdoutCallsOnStreamForStreamEventTextDelta(t *testing.T) {
 	}
 }
 
+func TestNewDriverCustomBinary(t *testing.T) {
+	tests := []struct {
+		name   string
+		binary string
+		want   string
+	}{
+		{"default", "", "claude"},
+		{"custom", "my-llm", "my-llm"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := NewDriver(nil, nil, tt.binary)
+			if d.binary != tt.want {
+				t.Errorf("binary = %q, want %q", d.binary, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunUsesCustomBinary(t *testing.T) {
+	var capturedBinary string
+	pm := &MockProcessManager{
+		StartFunc: func(cmd *exec.Cmd) error {
+			capturedBinary = cmd.Args[0]
+			return errCapture
+		},
+		TerminateFunc: func(_ *exec.Cmd) error { return nil },
+		KillFunc:      func(_ *exec.Cmd) error { return nil },
+	}
+	d := NewDriver(pm, nil, "my-custom-llm")
+	_, _ = d.Run(context.Background(), types.RunOpts{Prompt: "test"})
+
+	if capturedBinary != "my-custom-llm" {
+		t.Errorf("binary = %q, want my-custom-llm", capturedBinary)
+	}
+}
+
 func TestParseStdoutOnStreamNilSafe(t *testing.T) {
 	assistant1, _ := json.Marshal(map[string]any{"type": "assistant", "content": "Hello"})
 	resultLine := makeResultJSON("sess-nil", 0.01, 1, false)
 	input := string(assistant1) + "\n" + resultLine + "\n"
 
-	d := NewDriver(nil, nil)
+	d := NewDriver(nil, nil, "")
 	result, err := d.parseStdout(
 		context.Background(),
 		strings.NewReader(input),
