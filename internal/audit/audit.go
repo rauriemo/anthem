@@ -48,32 +48,32 @@ type WaveSummary struct {
 }
 
 type TraceRecord struct {
-	Timestamp      time.Time
-	TraceType      string // "orchestrator", "executor", "reviewer", "lean"
-	TaskID         *string
-	SessionID      *string
-	WaveID         *string
-	PromptHash     *string
-	PromptPreview  *string
+	Timestamp       time.Time
+	TraceType       string // "orchestrator", "executor", "reviewer", "lean"
+	TaskID          *string
+	SessionID       *string
+	WaveID          *string
+	PromptHash      *string
+	PromptPreview   *string
 	ResponsePreview *string
-	TokensIn       int
-	TokensOut      int
-	CostUSD        float64
-	DurationMS     int64
-	ActionsJSON    *string
-	Reasoning      *string
-	ReviewPassed   *bool
-	ReviewFeedback *string
-	Metadata       *string
+	TokensIn        int
+	TokensOut       int
+	CostUSD         float64
+	DurationMS      int64
+	ActionsJSON     *string
+	Reasoning       *string
+	ReviewPassed    *bool
+	ReviewFeedback  *string
+	Metadata        *string
 }
 
 type TraceStats struct {
-	TraceType  string
-	Count      int
-	TotalCost  float64
-	TotalIn    int64
-	TotalOut   int64
-	AvgDurMS   float64
+	TraceType string
+	Count     int
+	TotalCost float64
+	TotalIn   int64
+	TotalOut  int64
+	AvgDurMS  float64
 }
 
 type AuditLogger interface {
@@ -360,23 +360,23 @@ func (l *SQLiteAuditLogger) queryTraceRows(ctx context.Context, query string, ar
 	var traces []TraceRecord
 	for rows.Next() {
 		var (
-			tsStr          string
-			traceType      string
-			taskID         *string
-			sessionID      *string
-			waveID         *string
-			promptHash     *string
-			promptPreview  *string
+			tsStr           string
+			traceType       string
+			taskID          *string
+			sessionID       *string
+			waveID          *string
+			promptHash      *string
+			promptPreview   *string
 			responsePreview *string
-			tokensIn       int
-			tokensOut      int
-			costUSD        float64
-			durationMS     int64
-			actionsJSON    *string
-			reasoning      *string
-			reviewPassed   *int
-			reviewFeedback *string
-			metadata       *string
+			tokensIn        int
+			tokensOut       int
+			costUSD         float64
+			durationMS      int64
+			actionsJSON     *string
+			reasoning       *string
+			reviewPassed    *int
+			reviewFeedback  *string
+			metadata        *string
 		)
 		if err := rows.Scan(&tsStr, &traceType, &taskID, &sessionID, &waveID,
 			&promptHash, &promptPreview, &responsePreview, &tokensIn, &tokensOut,
