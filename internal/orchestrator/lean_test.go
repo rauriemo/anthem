@@ -195,6 +195,68 @@ func TestHandleUserMessage_SystemStatusRoutesToLean(t *testing.T) {
 	}
 }
 
+func TestHandleUserMessage_SystemFastRoutesToLean(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Title: "Task 1", Status: types.StatusQueued, Labels: []string{"todo"}, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	orchRunner := agent.NewMockRunner()
+	orchRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		t.Fatal("orchestrator agent should not be consulted for [system:fast] messages")
+		return nil, nil
+	}
+
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, testLogger())
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Agent.Command = echoCommand(t)
+	cfg.Workspace.Root = ""
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "{{.issue.title}}",
+		Tracker:        trk,
+		Runner:         agent.NewMockRunner(),
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		OrchAgent:      orchAgent,
+		ChannelManager: mgr,
+	})
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		SenderID:    "user-1",
+		ThreadID:    "thread-fast",
+		Text:        "[system:fast] hey there!",
+		Timestamp:   time.Now(),
+	})
+
+	sent := ch.sentMessages()
+	var hasAck, hasStreamDone bool
+	for _, msg := range sent {
+		if msg.Ack {
+			hasAck = true
+		}
+		if msg.StreamDone {
+			hasStreamDone = true
+		}
+	}
+	if !hasAck {
+		t.Error("expected ack message")
+	}
+	if !hasStreamDone {
+		t.Error("expected stream done from lean path")
+	}
+}
+
 func TestHandleUserMessage_NilTrackerRoutesToLean(t *testing.T) {
 	ch := newTestChannel()
 	mgr := channel.NewManager(nil)
@@ -237,6 +299,84 @@ func TestHandleUserMessage_NilTrackerRoutesToLean(t *testing.T) {
 	}
 	if !hasStreamDone {
 		t.Error("expected stream done from lean path (nil tracker)")
+	}
+}
+
+func TestExtractLeanDisplayBlocks_SingleHTML(t *testing.T) {
+	input := "Here is the report:\n\n```prism-display\n{\"kind\":\"html\",\"content\":\"<h1>Hello</h1>\"}\n```\n\nDone."
+	clean, displays := extractLeanDisplayBlocks(input)
+
+	if len(displays) != 1 {
+		t.Fatalf("expected 1 display, got %d", len(displays))
+	}
+	if displays[0]["kind"] != "html" {
+		t.Errorf("expected kind=html, got %v", displays[0]["kind"])
+	}
+	if displays[0]["content"] != "<h1>Hello</h1>" {
+		t.Errorf("unexpected content: %v", displays[0]["content"])
+	}
+	if strings.Contains(clean, "prism-display") {
+		t.Error("display block should be stripped from clean text")
+	}
+	if !strings.Contains(clean, "Here is the report:") {
+		t.Error("surrounding text should be preserved")
+	}
+	if !strings.Contains(clean, "Done.") {
+		t.Error("trailing text should be preserved")
+	}
+}
+
+func TestExtractLeanDisplayBlocks_MultipleBlocks(t *testing.T) {
+	input := "Text before\n```prism-display\n{\"kind\":\"data\",\"title\":\"Table\"}\n```\nMiddle\n```prism-display\n{\"kind\":\"chart\",\"title\":\"Graph\"}\n```\nEnd"
+	clean, displays := extractLeanDisplayBlocks(input)
+
+	if len(displays) != 2 {
+		t.Fatalf("expected 2 displays, got %d", len(displays))
+	}
+	if displays[0]["kind"] != "data" {
+		t.Errorf("first kind = %v, want data", displays[0]["kind"])
+	}
+	if displays[1]["kind"] != "chart" {
+		t.Errorf("second kind = %v, want chart", displays[1]["kind"])
+	}
+	if strings.Contains(clean, "prism-display") {
+		t.Error("display blocks should be stripped")
+	}
+	if !strings.Contains(clean, "Middle") {
+		t.Error("middle text should be preserved")
+	}
+}
+
+func TestExtractLeanDisplayBlocks_NoBlocks(t *testing.T) {
+	input := "Just regular text\nwith no display blocks."
+	clean, displays := extractLeanDisplayBlocks(input)
+
+	if len(displays) != 0 {
+		t.Errorf("expected 0 displays, got %d", len(displays))
+	}
+	if !strings.Contains(clean, "Just regular text") {
+		t.Error("text should pass through unchanged")
+	}
+}
+
+func TestExtractLeanDisplayBlocks_InvalidJSON(t *testing.T) {
+	input := "Before\n```prism-display\nnot valid json\n```\nAfter"
+	clean, displays := extractLeanDisplayBlocks(input)
+
+	if len(displays) != 0 {
+		t.Errorf("invalid JSON should not produce display, got %d", len(displays))
+	}
+	if !strings.Contains(clean, "Before") || !strings.Contains(clean, "After") {
+		t.Error("surrounding text should be preserved even with invalid block")
+	}
+}
+
+func TestExtractLeanDisplayBlocks_MissingKind(t *testing.T) {
+	input := "```prism-display\n{\"content\":\"no kind field\"}\n```"
+	_, displays := extractLeanDisplayBlocks(input)
+
+	if len(displays) != 0 {
+		t.Errorf("JSON without 'kind' should not produce display, got %d", len(displays))
 	}
 }
 

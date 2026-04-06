@@ -1157,8 +1157,8 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		})
 	}
 
-	// Fast path for lightweight status queries
-	if strings.Contains(msg.Text, "[system:status]") {
+	// Fast path for lightweight queries (status checks, /fast messages)
+	if strings.Contains(msg.Text, "[system:status]") || strings.Contains(msg.Text, "[system:fast]") {
 		o.handleLeanMessage(ctx, msg)
 		return
 	}
@@ -1293,6 +1293,17 @@ func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.Incomi
 		prompt.WriteString("\n\n")
 	}
 
+	if msg.ChannelKind == "prism" {
+		prompt.WriteString("## Rich Display Output\n\n")
+		prompt.WriteString("You are responding through Prism, which supports rich visual artifacts. ")
+		prompt.WriteString("To send a visual display, include a fenced block in your response:\n\n")
+		prompt.WriteString("```prism-display\n{\"kind\":\"html\",\"content\":\"<full self-contained HTML>\"}\n```\n\n")
+		prompt.WriteString("Supported kinds: html, markdown, code, data, chart. ")
+		prompt.WriteString("For HTML: inline all CSS/JS, use dark theme (#1e1e1e background, #d4d4d4 text). ")
+		prompt.WriteString("Always include a prism-display block for visual answers (dashboards, reports, tables, code). ")
+		prompt.WriteString("You may also include regular text outside the block for the chat.\n\n")
+	}
+
 	prompt.WriteString("## User Message\n\n")
 	prompt.WriteString(msg.Text)
 
@@ -1313,7 +1324,15 @@ func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.Incomi
 
 	root := o.cfg.Workspace.Root
 	if root != "" && root != "." {
-		cmd.Dir = root
+		absRoot := root
+		if !filepath.IsAbs(root) {
+			if cwd, err := os.Getwd(); err == nil {
+				absRoot = filepath.Join(cwd, root)
+			}
+		}
+		if info, err := os.Stat(absRoot); err == nil && info.IsDir() {
+			cmd.Dir = absRoot
+		}
 	}
 
 	stdout, err := cmd.StdoutPipe()
@@ -1364,8 +1383,65 @@ func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.Incomi
 		}
 	}
 
-	o.sendFollowUp(ctx, msg, strings.TrimRight(fullResponse.String(), "\n"))
+	responseText := fullResponse.String()
+	cleanText, displays := extractLeanDisplayBlocks(responseText)
+
+	for _, comp := range displays {
+		if o.channelMgr != nil {
+			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+				Display:   comp,
+				DisplayID: newDisplayID(),
+				ThreadID:  msg.ThreadID,
+			})
+		}
+	}
+
+	o.sendFollowUp(ctx, msg, strings.TrimRight(cleanText, "\n"))
 	o.recordAudit(ctx, "channel.lean_message", "", strPtr("lean_message"))
+}
+
+// extractLeanDisplayBlocks scans text for ```prism-display fenced blocks
+// containing JSON display component objects. Returns the text with those
+// blocks removed and a slice of parsed display components.
+//
+// Format:
+//
+//	```prism-display
+//	{"kind":"html","content":"<h1>Hello</h1>"}
+//	```
+func extractLeanDisplayBlocks(text string) (string, []map[string]any) {
+	var displays []map[string]any
+	var cleaned strings.Builder
+	lines := strings.Split(text, "\n")
+	inBlock := false
+	var blockBuf strings.Builder
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !inBlock && (trimmed == "```prism-display" || trimmed == "``` prism-display") {
+			inBlock = true
+			blockBuf.Reset()
+			continue
+		}
+		if inBlock {
+			if trimmed == "```" {
+				inBlock = false
+				var comp map[string]any
+				if err := json.Unmarshal([]byte(blockBuf.String()), &comp); err == nil {
+					if _, hasKind := comp["kind"]; hasKind {
+						displays = append(displays, comp)
+					}
+				}
+				continue
+			}
+			blockBuf.WriteString(line)
+			blockBuf.WriteString("\n")
+			continue
+		}
+		cleaned.WriteString(line)
+		cleaned.WriteString("\n")
+	}
+	return cleaned.String(), displays
 }
 
 func buildUserMessageContext(msg channel.IncomingMessage) *UserMessageContext {
