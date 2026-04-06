@@ -611,9 +611,9 @@ func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, a
 				continue
 			}
 			o.claim(task)
-			snap := o.configSnapshot()
+			dsnap := o.configSnapshot()
 			o.wg.Add(1)
-			go o.dispatch(ctx, task, snap)
+			go o.dispatch(ctx, task, dsnap, action.Profile)
 			dispatchedIDs = append(dispatchedIDs, task.ID)
 			o.recordAudit(ctx, "task.dispatched", action.TaskID, strPtr("dispatch"))
 
@@ -1092,13 +1092,17 @@ func (o *Orchestrator) mechanicalDispatch(ctx context.Context, tasks []types.Tas
 
 		o.claim(task)
 		snap := o.configSnapshot()
+		dispatchProfile := ""
+		if ri := o.retryInfo(task.ID); ri != nil && strings.HasPrefix(ri.LastError, "review failed: ") {
+			dispatchProfile = "debugger"
+		}
 		o.wg.Add(1)
-		go o.dispatch(ctx, task, snap)
+		go o.dispatch(ctx, task, snap, dispatchProfile)
 		o.recordAudit(ctx, "task.dispatched.fallback", task.ID, nil)
 	}
 }
 
-func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSnapshot) {
+func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSnapshot, profileNames ...string) {
 	defer o.wg.Done()
 	cfg := snap.cfg
 
@@ -1150,6 +1154,18 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 		}
 	}
 
+	// Resolve agent profile
+	profileName := "coder"
+	if len(profileNames) > 0 && profileNames[0] != "" {
+		profileName = profileNames[0]
+	}
+	var profile *config.AgentProfile
+	if cfg.Agent.Profiles != nil {
+		if p, ok := cfg.Agent.Profiles[profileName]; ok {
+			profile = &p
+		}
+	}
+
 	// Render prompt
 	prompt, err := config.RenderBody(snap.body, map[string]any{
 		"issue": map[string]any{
@@ -1170,6 +1186,12 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 	}
 
 	// Build full prompt: constraints + task template (voice is orchestrator-only, not for executors)
+	if profile != nil && profile.PromptPrefix != "" {
+		prompt = profile.PromptPrefix + "\n\n" + prompt
+	}
+	if profile != nil && profile.PromptSuffix != "" {
+		prompt = prompt + "\n\n" + profile.PromptSuffix
+	}
 	fullPrompt := buildFullPrompt(o.userConstraints, cfg.System.Constraints, prompt)
 
 	// Append reviewer feedback for retries
@@ -1195,7 +1217,7 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 		permMode = "bypassPermissions"
 	}
 
-	result, err := o.runner.Run(ctx, types.RunOpts{
+	runOpts := types.RunOpts{
 		WorkspacePath:  wsPath,
 		Prompt:         fullPrompt,
 		MaxTurns:       cfg.Agent.MaxTurns,
@@ -1205,7 +1227,22 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 		PermissionMode: permMode,
 		DeniedTools:    cfg.Agent.DeniedTools,
 		AdditionalDirs: cfg.Agent.AdditionalDirs,
-	})
+	}
+	if profile != nil {
+		if len(profile.AllowedTools) > 0 {
+			runOpts.AllowedTools = profile.AllowedTools
+		}
+		if len(profile.DeniedTools) > 0 {
+			runOpts.DeniedTools = append(runOpts.DeniedTools, profile.DeniedTools...)
+		}
+		if profile.Model != "" {
+			runOpts.Model = profile.Model
+		}
+		if profile.MaxTurns > 0 {
+			runOpts.MaxTurns = profile.MaxTurns
+		}
+	}
+	result, err := o.runner.Run(ctx, runOpts)
 
 	o.release(task.ID)
 

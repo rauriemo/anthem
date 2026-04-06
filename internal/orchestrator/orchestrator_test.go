@@ -64,8 +64,8 @@ func TestOrchestratorDispatchesTasks(t *testing.T) {
 	if len(dispatched) == 0 {
 		t.Fatal("expected at least one dispatch")
 	}
-	if dispatched[0] != "Work on Fix bug" {
-		t.Errorf("prompt = %q, want 'Work on Fix bug'", dispatched[0])
+	if !strings.Contains(dispatched[0], "Work on Fix bug") {
+		t.Errorf("prompt = %q, should contain 'Work on Fix bug'", dispatched[0])
 	}
 }
 
@@ -1333,6 +1333,94 @@ func TestRiskForActionGating(t *testing.T) {
 	// Wave should NOT be closed because the action was blocked
 	if orch.currentWave != nil && orch.currentWave.Status == "exhausted" {
 		t.Error("close_wave should be blocked by risk gating")
+	}
+}
+
+func TestDispatchWithProfile_AppliesPromptPrefix(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Identifier: "GH-1", Title: "Analyze", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	var capturedPrompt string
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		capturedPrompt = opts.Prompt
+		return &types.RunResult{SessionID: "s1", ExitCode: 0, Duration: time.Millisecond}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 100000
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       runner,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	tasks2 := []types.Task{{ID: "1", Title: "Analyze", Status: types.StatusQueued}}
+	actions := []Action{
+		{Type: ActionDispatch, TaskID: "1", Profile: "architect"},
+	}
+	orch.executeActions(context.Background(), tasks2, actions)
+	orch.wg.Wait()
+
+	if !strings.Contains(capturedPrompt, "architect agent") {
+		t.Errorf("prompt should contain architect profile prefix, got %q", capturedPrompt[:min(100, len(capturedPrompt))])
+	}
+}
+
+func TestDispatchWithProfile_DebuggerOnReviewFail(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Identifier: "GH-1", Title: "Fix", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	var capturedPrompt string
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		capturedPrompt = opts.Prompt
+		return &types.RunResult{SessionID: "s1", ExitCode: 0, Duration: time.Millisecond}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 100000
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       runner,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	// Pre-seed retry info with review failure
+	orch.mu.Lock()
+	orch.retryState["1"] = &RetryInfo{
+		TaskID:      "1",
+		Attempts:    1,
+		NextRetryAt: time.Now().Add(-1 * time.Second),
+		LastError:   "review failed: missing error handling",
+	}
+	orch.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	_ = orch.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	if !strings.Contains(capturedPrompt, "debugger agent") {
+		t.Errorf("review-failed retry should use debugger profile, got prompt starting with %q", capturedPrompt[:min(80, len(capturedPrompt))])
 	}
 }
 

@@ -100,7 +100,7 @@ Anthem's competitive gap analysis identified 11 improvements across three tiers.
   - Log a warning if a single orchestrator consult exceeds 20K tokens.
   - Update tests.
 
-- [ ] **3b. Specialist agent profiles**
+- [x] **3b. Specialist agent profiles**
   - Files: `internal/config/config.go`, `internal/orchestrator/contract.go`, `internal/orchestrator/orchestrator.go`, `internal/orchestrator/orchagent.go`
   - Add `AgentProfile` struct: `PromptPrefix`, `PromptSuffix`, `AllowedTools`, `DeniedTools`, `Model`, `MaxTurns`, `ReviewEnabled`.
   - Add `Profiles map[string]AgentProfile` to `AgentConfig`. Bake default profiles into `DefaultConfig()`: `coder` (default), `architect` (read-only tools), `tester` (test-focused prompt), `debugger` (fix-focused prompt).

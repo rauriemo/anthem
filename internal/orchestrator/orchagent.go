@@ -116,7 +116,7 @@ You are an orchestrator agent -- a stateless allocator. You receive a state snap
 	sections = append(sections, `## Actions
 
 Available action types:
-- dispatch: Start an executor for a task. Required: task_id.
+- dispatch: Start an executor for a task. Required: task_id. Optional: profile (one of "coder", "architect", "tester", "debugger"). Default: "coder". Use "architect" for read-only analysis, "tester" for writing tests, "debugger" for fixing review-failed tasks.
 - skip: Skip a task this wave. Required: task_id, reason.
 - comment: Post a comment on a tracker issue. Required: task_id, body.
 - update_voice: Propose a VOICE.md section update. Required: section_name, section_content.

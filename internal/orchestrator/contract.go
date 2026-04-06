@@ -59,6 +59,7 @@ type SubtaskDef struct {
 type Action struct {
 	Type            ActionType   `json:"type"`
 	TaskID          string       `json:"task_id,omitempty"`
+	Profile         string       `json:"profile,omitempty"`
 	Reason          string       `json:"reason,omitempty"`
 	Body            string       `json:"body,omitempty"`
 	SectionName     string       `json:"section_name,omitempty"`

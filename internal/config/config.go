@@ -68,15 +68,26 @@ type AgentConfig struct {
 	SkipPermissions       bool              `yaml:"skip_permissions"`
 	DeniedTools           []string          `yaml:"denied_tools"`
 	AdditionalDirs        []string          `yaml:"additional_dirs"`
-	ReviewEnabled         bool              `yaml:"review_enabled"`
-	ReviewMaxRetries      int               `yaml:"review_max_retries"`
-	ReviewPrompt          string            `yaml:"review_prompt"`
+	ReviewEnabled         bool                      `yaml:"review_enabled"`
+	ReviewMaxRetries      int                       `yaml:"review_max_retries"`
+	ReviewPrompt          string                    `yaml:"review_prompt"`
+	Profiles              map[string]AgentProfile   `yaml:"profiles,omitempty"`
 }
 
 type MCPServerConfig struct {
 	Name    string   `yaml:"name"`
 	Command string   `yaml:"command"`
 	Args    []string `yaml:"args"`
+}
+
+type AgentProfile struct {
+	PromptPrefix  string   `yaml:"prompt_prefix"`
+	PromptSuffix  string   `yaml:"prompt_suffix"`
+	AllowedTools  []string `yaml:"allowed_tools,omitempty"`
+	DeniedTools   []string `yaml:"denied_tools,omitempty"`
+	Model         string   `yaml:"model,omitempty"`
+	MaxTurns      int      `yaml:"max_turns,omitempty"`
+	ReviewEnabled *bool    `yaml:"review_enabled,omitempty"`
 }
 
 type RuleConfig struct {
@@ -117,6 +128,12 @@ func DefaultConfig() Config {
 			MaxConcurrent:     3,
 			StallTimeoutMS:    300000,
 			MaxRetryBackoffMS: 300000,
+			Profiles: map[string]AgentProfile{
+				"coder":     {PromptPrefix: "You are a coding agent. Write clean, tested code."},
+				"architect": {PromptPrefix: "You are an architect agent. Analyze and design, do not write code.", DeniedTools: []string{"Write", "Edit", "Bash"}},
+				"tester":    {PromptPrefix: "You are a testing agent. Focus on writing comprehensive tests."},
+				"debugger":  {PromptPrefix: "You are a debugger agent. A previous attempt failed. Analyze the feedback carefully and fix the issues."},
+			},
 		},
 		System: SystemConfig{},
 		Orchestrator: OrchestratorConfig{
