@@ -133,7 +133,7 @@ func TestExecuteUpdateVoice_MergeExisting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orchAgent := NewOrchestratorAgent(newNoopRunner(), initial, 10000, testLogger())
+	orchAgent := NewOrchestratorAgent(newNoopRunner(), initial, 10000, 0, testLogger())
 
 	orch := newVoiceTestOrch(t, home)
 	orch.homeDir = home

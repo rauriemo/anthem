@@ -83,17 +83,22 @@ type OrchestratorAgent struct {
 	totalTokens      int
 	totalCostUSD     float64
 	maxContextTokens int
+	maxTurns         int
 }
 
-func NewOrchestratorAgent(runner agent.AgentRunner, voiceContent string, maxContextTokens int, logger *slog.Logger) *OrchestratorAgent {
+func NewOrchestratorAgent(runner agent.AgentRunner, voiceContent string, maxContextTokens int, maxTurns int, logger *slog.Logger) *OrchestratorAgent {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if maxTurns <= 0 {
+		maxTurns = 10
 	}
 	return &OrchestratorAgent{
 		runner:           runner,
 		voiceContent:     voiceContent,
 		logger:           logger,
 		maxContextTokens: maxContextTokens,
+		maxTurns:         maxTurns,
 	}
 }
 
@@ -111,7 +116,7 @@ func buildSystemPrompt(voiceContent string) string {
 
 	sections = append(sections, `## Role
 
-You are an orchestrator agent -- a stateless allocator. You receive a state snapshot of all tasks. You propose actions. The daemon validates and executes them. You never execute directly.`)
+You are an intelligent task orchestrator with codebase access. You receive a state snapshot of all tasks and can use built-in tools (Read, Grep, Glob) to explore the codebase before planning. After analysis, you propose actions as structured JSON. The daemon validates and executes them. You never execute tasks directly — you plan, analyze, and delegate.`)
 
 	sections = append(sections, `## Actions
 
@@ -226,12 +231,14 @@ func (o *OrchestratorAgent) Start(ctx context.Context, state StateSnapshot) ([]A
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		Prompt:         prompt,
 		PermissionMode: "bypassPermissions",
+		MaxTurns:       o.maxTurns,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator start: %w", err)
 	}
 
 	o.recordResult(result)
+	o.warnIfHighTokens(result)
 
 	actions, err := parseActions(result.Output)
 	if err != nil {
@@ -284,6 +291,20 @@ func (o *OrchestratorAgent) DrainCost() (tokensIn int, tokensOut int, costUSD fl
 	t := o.totalCostUSD
 	o.totalCostUSD = 0
 	return 0, 0, t
+}
+
+func (o *OrchestratorAgent) warnIfHighTokens(result *types.RunResult) {
+	if result == nil {
+		return
+	}
+	totalTokens := result.TokensIn + result.TokensOut
+	if totalTokens > 20000 {
+		o.logger.Warn("orchestrator consult exceeded 20K tokens",
+			"tokens_in", result.TokensIn,
+			"tokens_out", result.TokensOut,
+			"total", totalTokens,
+		)
+	}
 }
 
 func (o *OrchestratorAgent) recordResult(result *types.RunResult) {

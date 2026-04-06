@@ -92,7 +92,7 @@ Anthem's competitive gap analysis identified 11 improvements across three tiers.
 
 ## Tier 3: High-Value Competitive Features
 
-- [ ] **3a. Orchestrator codebase awareness**
+- [x] **3a. Orchestrator codebase awareness**
   - Files: `internal/orchestrator/orchagent.go`, `internal/config/config.go`
   - Update `buildSystemPrompt` role section: change from "stateless allocator" to "intelligent task orchestrator with codebase access." Instruct it to use built-in tools (Read, Grep, Glob) to explore before planning, then return JSON actions.
   - Add `OrchestratorMaxTurns int` to `OrchestratorConfig` (default 10). Wire into `RunOpts.MaxTurns` for orchestrator consults.

@@ -29,7 +29,7 @@ func TestStart_ParsesActions(t *testing.T) {
 	output := `{"reasoning": "task 1 is ready, task 2 blocked", "actions": [{"type": "dispatch", "task_id": "1"}, {"type": "skip", "task_id": "2", "reason": "blocked by 1"}]}`
 	runner := mockRunnerWithOutput(output)
 
-	oa := NewOrchestratorAgent(runner, "", 10000, testLogger())
+	oa := NewOrchestratorAgent(runner, "", 10000, 0, testLogger())
 	actions, err := oa.Start(context.Background(), StateSnapshot{
 		Tasks: []TaskSummary{{ID: "1", Title: "T1", Status: "queued"}, {ID: "2", Title: "T2", Status: "queued"}},
 	})
@@ -70,7 +70,7 @@ func TestConsult_ContinuesSession(t *testing.T) {
 		}, nil
 	}
 
-	oa := NewOrchestratorAgent(runner, "", 10000, testLogger())
+	oa := NewOrchestratorAgent(runner, "", 10000, 0, testLogger())
 	oa.sessionID = "orch-sess-1"
 	oa.totalTokens = 50
 
@@ -108,7 +108,7 @@ func TestConsult_RefreshesOnTokenLimit(t *testing.T) {
 		}, nil
 	}
 
-	oa := NewOrchestratorAgent(runner, "", 100, testLogger())
+	oa := NewOrchestratorAgent(runner, "", 100, 0, testLogger())
 	oa.sessionID = "orch-sess-old"
 	oa.totalTokens = 200 // over the 100 limit
 
@@ -154,6 +154,30 @@ func TestParseActions_RawJSON(t *testing.T) {
 	}
 	if actions[0].Type != ActionComment || actions[0].Body != "looks good" {
 		t.Errorf("action = %+v, want comment with body", actions[0])
+	}
+}
+
+func TestParseActions_ToolUseInterleavedOutput(t *testing.T) {
+	output := `I'll check the codebase first.
+
+I found the relevant files. Let me analyze them.
+
+Based on my analysis of the codebase:
+
+{"reasoning": "After reading the code, task 3 needs refactoring", "actions": [{"type": "dispatch", "task_id": "3", "profile": "coder"}]}`
+
+	actions, err := parseActions(output)
+	if err != nil {
+		t.Fatalf("parseActions() error: %v", err)
+	}
+	if len(actions) != 1 {
+		t.Fatalf("expected 1 action, got %d", len(actions))
+	}
+	if actions[0].Type != ActionDispatch || actions[0].TaskID != "3" {
+		t.Errorf("action = %+v, want dispatch task_id=3", actions[0])
+	}
+	if actions[0].Profile != "coder" {
+		t.Errorf("profile = %q, want coder", actions[0].Profile)
 	}
 }
 
@@ -205,7 +229,7 @@ func TestConsultWithRepair_FirstAttemptFails(t *testing.T) {
 		}, nil
 	}
 
-	oa := NewOrchestratorAgent(runner, "", 10000, testLogger())
+	oa := NewOrchestratorAgent(runner, "", 10000, 0, testLogger())
 	oa.sessionID = "sess-repair"
 	oa.totalTokens = 50
 
@@ -263,7 +287,7 @@ func TestConsultWithRepair_BothFail(t *testing.T) {
 		}, nil
 	}
 
-	oa := NewOrchestratorAgent(runner, "", 10000, testLogger())
+	oa := NewOrchestratorAgent(runner, "", 10000, 0, testLogger())
 	oa.sessionID = "sess-fail"
 	oa.totalTokens = 50
 
@@ -302,7 +326,7 @@ func TestConsultWithRepairStreaming_PassesCallback(t *testing.T) {
 		deltas = append(deltas, delta)
 	}
 
-	oa := NewOrchestratorAgent(runner, "", 10000, testLogger())
+	oa := NewOrchestratorAgent(runner, "", 10000, 0, testLogger())
 	actions, err := oa.ConsultWithRepairStreaming(context.Background(), StateSnapshot{
 		Tasks: []TaskSummary{{ID: "1", Title: "T1", Status: "queued"}},
 	}, onStream)
@@ -342,7 +366,7 @@ func TestConsultStreaming_ContinuesSession(t *testing.T) {
 
 	onStream := func(_ string) {}
 
-	oa := NewOrchestratorAgent(runner, "", 10000, testLogger())
+	oa := NewOrchestratorAgent(runner, "", 10000, 0, testLogger())
 	oa.sessionID = "orch-sess-1"
 	oa.totalTokens = 50
 
