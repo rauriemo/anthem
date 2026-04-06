@@ -2,9 +2,7 @@ package orchestrator
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"runtime"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -12,23 +10,28 @@ import (
 	"github.com/rauriemo/anthem/internal/agent"
 	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/config"
+	"github.com/rauriemo/anthem/internal/cost"
 	"github.com/rauriemo/anthem/internal/tracker"
 	"github.com/rauriemo/anthem/internal/types"
 	"github.com/rauriemo/anthem/internal/workspace"
 )
 
-// echoCommand returns a command name that prints its arguments to stdout,
-// cross-platform. On Windows, creates a .bat file in t.TempDir().
-func echoCommand(t *testing.T) string {
-	t.Helper()
-	if runtime.GOOS != "windows" {
-		return "echo"
+func leanRunner(output string) *agent.MockRunner {
+	r := agent.NewMockRunner()
+	r.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		if opts.OnStream != nil {
+			opts.OnStream(output)
+		}
+		return &types.RunResult{
+			SessionID: "lean-sess",
+			ExitCode:  0,
+			Output:    output,
+			CostUSD:   0.01,
+			TokensIn:  50,
+			TokensOut: 20,
+		}, nil
 	}
-	bat := filepath.Join(t.TempDir(), "echo.bat")
-	if err := os.WriteFile(bat, []byte("@echo off\necho %*\n"), 0o644); err != nil {
-		t.Fatalf("failed to create echo.bat: %v", err)
-	}
-	return bat
+	return r
 }
 
 func TestHandleLeanMessage_StreamsAndReplies(t *testing.T) {
@@ -37,13 +40,12 @@ func TestHandleLeanMessage_StreamsAndReplies(t *testing.T) {
 	mgr.Register(ch)
 
 	cfg := config.DefaultConfig()
-	cfg.Agent.Command = echoCommand(t)
 	cfg.Workspace.Root = ""
 
 	orch := New(Opts{
 		Config:         &cfg,
 		TemplateBody:   "",
-		Runner:         agent.NewMockRunner(),
+		Runner:         leanRunner("hello world"),
 		Workspace:      workspace.NewMockWorkspaceManager(),
 		EventBus:       NewMockEventBus(),
 		Logger:         testLogger(),
@@ -98,14 +100,18 @@ func TestHandleLeanMessage_ErrorSendsFollowUp(t *testing.T) {
 	mgr := channel.NewManager(nil)
 	mgr.Register(ch)
 
+	errRunner := agent.NewMockRunner()
+	errRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return nil, errors.New("agent failed")
+	}
+
 	cfg := config.DefaultConfig()
-	cfg.Agent.Command = "nonexistent-command-that-does-not-exist"
 	cfg.Workspace.Root = ""
 
 	orch := New(Opts{
 		Config:         &cfg,
 		TemplateBody:   "",
-		Runner:         agent.NewMockRunner(),
+		Runner:         errRunner,
 		Workspace:      workspace.NewMockWorkspaceManager(),
 		EventBus:       NewMockEventBus(),
 		Logger:         testLogger(),
@@ -132,6 +138,73 @@ func TestHandleLeanMessage_ErrorSendsFollowUp(t *testing.T) {
 	}
 }
 
+func TestHandleLeanMessage_RecordsCost(t *testing.T) {
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = ""
+	ct := cost.NewTracker()
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "",
+		Runner:         leanRunner("response"),
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		ChannelManager: mgr,
+		CostTracker:    ct,
+	})
+
+	orch.handleLeanMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		SenderID:    "user-1",
+		ThreadID:    "thread-cost",
+		Text:        "test",
+		Timestamp:   time.Now(),
+	})
+
+	leanCost := ct.TaskCost(leanCostTaskID)
+	if leanCost < 0.009 || leanCost > 0.011 {
+		t.Errorf("lean cost = %f, want ~0.01", leanCost)
+	}
+}
+
+func TestHandleLeanMessage_MaxTurnsOne(t *testing.T) {
+	var capturedOpts types.RunOpts
+	r := agent.NewMockRunner()
+	r.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		capturedOpts = opts
+		return &types.RunResult{ExitCode: 0, Output: "ok"}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = ""
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "",
+		Runner:       r,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	orch.handleLeanMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		Text:        "test",
+	})
+
+	if capturedOpts.MaxTurns != 1 {
+		t.Errorf("MaxTurns = %d, want 1", capturedOpts.MaxTurns)
+	}
+	if capturedOpts.PermissionMode != "bypassPermissions" {
+		t.Errorf("PermissionMode = %q, want bypassPermissions", capturedOpts.PermissionMode)
+	}
+}
+
 func TestHandleUserMessage_SystemStatusRoutesToLean(t *testing.T) {
 	tasks := []types.Task{
 		{ID: "1", Title: "Task 1", Status: types.StatusQueued, Labels: []string{"todo"}, CreatedAt: time.Now()},
@@ -153,14 +226,13 @@ func TestHandleUserMessage_SystemStatusRoutesToLean(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Tracker.Kind = "github"
 	cfg.Tracker.Repo = "t/r"
-	cfg.Agent.Command = echoCommand(t)
 	cfg.Workspace.Root = ""
 
 	orch := New(Opts{
 		Config:         &cfg,
 		TemplateBody:   "{{.issue.title}}",
 		Tracker:        trk,
-		Runner:         agent.NewMockRunner(),
+		Runner:         leanRunner("status response"),
 		Workspace:      workspace.NewMockWorkspaceManager(),
 		EventBus:       NewMockEventBus(),
 		Logger:         testLogger(),
@@ -177,7 +249,6 @@ func TestHandleUserMessage_SystemStatusRoutesToLean(t *testing.T) {
 	})
 
 	sent := ch.sentMessages()
-	// Should have ack + stream deltas + stream done + follow-up (lean path)
 	var hasAck, hasStreamDone bool
 	for _, msg := range sent {
 		if msg.Ack {
@@ -216,14 +287,13 @@ func TestHandleUserMessage_SystemFastRoutesToLean(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Tracker.Kind = "github"
 	cfg.Tracker.Repo = "t/r"
-	cfg.Agent.Command = echoCommand(t)
 	cfg.Workspace.Root = ""
 
 	orch := New(Opts{
 		Config:         &cfg,
 		TemplateBody:   "{{.issue.title}}",
 		Tracker:        trk,
-		Runner:         agent.NewMockRunner(),
+		Runner:         leanRunner("fast response"),
 		Workspace:      workspace.NewMockWorkspaceManager(),
 		EventBus:       NewMockEventBus(),
 		Logger:         testLogger(),
@@ -263,13 +333,12 @@ func TestHandleUserMessage_NilTrackerRoutesToLean(t *testing.T) {
 	mgr.Register(ch)
 
 	cfg := config.DefaultConfig()
-	cfg.Agent.Command = echoCommand(t)
 	cfg.Workspace.Root = ""
 
 	orch := New(Opts{
 		Config:         &cfg,
 		TemplateBody:   "",
-		Runner:         agent.NewMockRunner(),
+		Runner:         leanRunner("lean response"),
 		Workspace:      workspace.NewMockWorkspaceManager(),
 		EventBus:       NewMockEventBus(),
 		Logger:         testLogger(),
@@ -399,5 +468,28 @@ func TestRun_ChannelOnlyMode(t *testing.T) {
 	err := orch.Run(ctx)
 	if err != context.DeadlineExceeded {
 		t.Errorf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestBuildLeanPrompt_IncludesProjectContext(t *testing.T) {
+	projectCtx := &ProjectContext{ProjectSummary: "A test project."}
+	msg := channel.IncomingMessage{Text: "hello"}
+
+	prompt := buildLeanPrompt(projectCtx, msg)
+
+	if !strings.Contains(prompt, "A test project.") {
+		t.Error("expected project context in prompt")
+	}
+	if !strings.Contains(prompt, "hello") {
+		t.Error("expected user message in prompt")
+	}
+}
+
+func TestBuildLeanPrompt_PrismDisplayInstructions(t *testing.T) {
+	msg := channel.IncomingMessage{Text: "test", ChannelKind: "prism"}
+	prompt := buildLeanPrompt(nil, msg)
+
+	if !strings.Contains(prompt, "prism-display") {
+		t.Error("expected prism display instructions in prompt")
 	}
 }

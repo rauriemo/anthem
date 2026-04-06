@@ -58,7 +58,7 @@ Anthem's competitive gap analysis identified 11 improvements across three tiers.
   - In `buildSystemPrompt` in `orchagent.go`, add instruction that `create_subtasks` accepts `depends_on: ["task-id"]` for execution ordering.
   - Update tests (contract validation, dispatch ordering, wave exhaustion with deps).
 
-- [ ] **2c. Unified lean path through driver**
+- [x] **2c. Unified lean path through driver**
   - Files: `internal/orchestrator/orchestrator.go`
   - Rewrite `handleLeanMessage` to use `o.runner.Run(ctx, types.RunOpts{...})` instead of raw `exec.CommandContext`.
   - Extract existing prompt construction into a `buildLeanPrompt(projectCtx, msg)` helper.

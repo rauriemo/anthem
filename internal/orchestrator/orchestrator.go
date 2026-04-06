@@ -1,8 +1,6 @@
 package orchestrator
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -1352,13 +1349,13 @@ func (o *Orchestrator) sendFollowUp(ctx context.Context, original channel.Incomi
 	})
 }
 
-func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.IncomingMessage) {
-	o.logger.Info("handling lean message", "sender", msg.SenderID, "text_len", len(msg.Text))
+const leanCostTaskID = "__lean__"
 
+func buildLeanPrompt(projectCtx *ProjectContext, msg channel.IncomingMessage) string {
 	var prompt strings.Builder
-	if o.projectCtx != nil && o.projectCtx.ProjectSummary != "" {
+	if projectCtx != nil && projectCtx.ProjectSummary != "" {
 		prompt.WriteString("## Project Context\n\n")
-		prompt.WriteString(o.projectCtx.ProjectSummary)
+		prompt.WriteString(projectCtx.ProjectSummary)
 		prompt.WriteString("\n\n")
 	}
 
@@ -1384,14 +1381,16 @@ func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.Incomi
 		}
 	}
 
-	cmdName := o.cfg.Agent.Command
-	if cmdName == "" {
-		cmdName = "claude"
-	}
+	return prompt.String()
+}
 
-	cmd := exec.CommandContext(ctx, cmdName, "-p", prompt.String(), "--output-format", "text")
+func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.IncomingMessage) {
+	o.logger.Info("handling lean message", "sender", msg.SenderID, "text_len", len(msg.Text))
+
+	promptText := buildLeanPrompt(o.projectCtx, msg)
 
 	root := o.cfg.Workspace.Root
+	wsPath := ""
 	if root != "" && root != "." {
 		absRoot := root
 		if !filepath.IsAbs(root) {
@@ -1400,39 +1399,26 @@ func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.Incomi
 			}
 		}
 		if info, err := os.Stat(absRoot); err == nil && info.IsDir() {
-			cmd.Dir = absRoot
+			wsPath = absRoot
 		}
 	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		o.logger.Error("failed to create stdout pipe for lean message", "error", err)
-		o.sendFollowUp(ctx, msg, "Failed to process your message.")
-		return
-	}
-
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
-
-	if err := cmd.Start(); err != nil {
-		o.logger.Error("failed to start claude -p for lean message", "error", err)
-		o.sendFollowUp(ctx, msg, "Failed to process your message.")
-		return
-	}
-
-	var fullResponse strings.Builder
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 64*1024), 256*1024)
-	for scanner.Scan() {
-		line := scanner.Text() + "\n"
-		fullResponse.WriteString(line)
+	onStream := func(delta string) {
 		if o.channelMgr != nil {
 			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
-				StreamDelta: line,
+				StreamDelta: delta,
 				ThreadID:    msg.ThreadID,
 			})
 		}
 	}
+
+	result, err := o.runner.Run(ctx, types.RunOpts{
+		WorkspacePath:  wsPath,
+		Prompt:         promptText,
+		MaxTurns:       1,
+		PermissionMode: "bypassPermissions",
+		OnStream:       onStream,
+	})
 
 	if o.channelMgr != nil {
 		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
@@ -1441,18 +1427,34 @@ func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.Incomi
 		})
 	}
 
-	if err := cmd.Wait(); err != nil {
-		o.logger.Error("claude -p failed for lean message",
-			"error", err,
-			"stderr", stderrBuf.String(),
-		)
-		if fullResponse.Len() == 0 {
+	if result != nil {
+		o.costTracker.Record(cost.SessionCost{
+			TaskID:    leanCostTaskID,
+			SessionID: result.SessionID,
+			TokensIn:  result.TokensIn,
+			TokensOut: result.TokensOut,
+			CostUSD:   result.CostUSD,
+		})
+	}
+
+	if err != nil {
+		o.logger.Error("lean message agent failed", "error", err)
+		if result == nil || result.Output == "" {
 			o.sendFollowUp(ctx, msg, "Failed to process your message.")
+			var costPtr *float64
+			if result != nil && result.CostUSD > 0 {
+				costPtr = &result.CostUSD
+			}
+			errStr := err.Error()
+			o.recordAuditWithCost(ctx, "channel.lean_message", "", strPtr("lean_message"), costPtr, &errStr)
 			return
 		}
 	}
 
-	responseText := fullResponse.String()
+	responseText := ""
+	if result != nil {
+		responseText = result.Output
+	}
 	cleanText, displays := extractLeanDisplayBlocks(responseText)
 
 	for _, comp := range displays {
@@ -1466,7 +1468,11 @@ func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.Incomi
 	}
 
 	o.sendFollowUp(ctx, msg, strings.TrimRight(cleanText, "\n"))
-	o.recordAudit(ctx, "channel.lean_message", "", strPtr("lean_message"))
+	var costPtr *float64
+	if result != nil && result.CostUSD > 0 {
+		costPtr = &result.CostUSD
+	}
+	o.recordAuditWithCost(ctx, "channel.lean_message", "", strPtr("lean_message"), costPtr, nil)
 }
 
 // extractLeanDisplayBlocks scans text for ```prism-display fenced blocks
