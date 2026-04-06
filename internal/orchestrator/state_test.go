@@ -62,7 +62,7 @@ func TestSaveAndLoadStateRoundtrip(t *testing.T) {
 	ct.Record(cost.SessionCost{TaskID: "task-1", SessionID: "s1", TokensIn: 100, TokensOut: 50, CostUSD: 0.5, TurnsUsed: 3})
 	ct.Record(cost.SessionCost{TaskID: "task-2", SessionID: "s2", TokensIn: 200, TokensOut: 100, CostUSD: 1.5, TurnsUsed: 5})
 
-	if err := SaveState(path, retryState, ct); err != nil {
+	if err := SaveState(path, retryState, ct, nil); err != nil {
 		t.Fatalf("SaveState() error: %v", err)
 	}
 
@@ -167,7 +167,7 @@ func TestSaveStateAtomicWrite(t *testing.T) {
 	path := filepath.Join(dir, "state.json")
 
 	for i := 0; i < 2; i++ {
-		if err := SaveState(path, nil, cost.NewTracker()); err != nil {
+		if err := SaveState(path, nil, cost.NewTracker(), nil); err != nil {
 			t.Fatalf("SaveState() error on iteration %d: %v", i, err)
 		}
 	}
@@ -182,7 +182,7 @@ func TestSaveStateCreatesParentDirectory(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "subdir", "state.json")
 
-	if err := SaveState(path, nil, cost.NewTracker()); err != nil {
+	if err := SaveState(path, nil, cost.NewTracker(), nil); err != nil {
 		t.Fatalf("SaveState() error: %v", err)
 	}
 
@@ -227,7 +227,7 @@ func TestLoadAndReconcileRestoresRetryState(t *testing.T) {
 	ct.Record(cost.SessionCost{TaskID: "task-active", SessionID: "s1", CostUSD: 1.0})
 	ct.Record(cost.SessionCost{TaskID: "task-done", SessionID: "s2", CostUSD: 0.5})
 
-	if err := SaveState(path, retryState, ct); err != nil {
+	if err := SaveState(path, retryState, ct, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -294,7 +294,7 @@ func TestLoadAndReconcileSkipsMissingTasks(t *testing.T) {
 		},
 	}
 
-	if err := SaveState(path, retryState, cost.NewTracker()); err != nil {
+	if err := SaveState(path, retryState, cost.NewTracker(), nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -386,7 +386,7 @@ func TestRunCallsLoadAndReconcile(t *testing.T) {
 	ct := cost.NewTracker()
 	ct.Record(cost.SessionCost{TaskID: "task-1", SessionID: "s1", CostUSD: 1.0})
 
-	if err := SaveState(path, retryState, ct); err != nil {
+	if err := SaveState(path, retryState, ct, nil); err != nil {
 		t.Fatal(err)
 	}
 

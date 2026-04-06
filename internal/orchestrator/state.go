@@ -16,6 +16,7 @@ type OrchestratorState struct {
 	SavedAt      time.Time              `json:"saved_at"`
 	RetryState   map[string]*RetryState `json:"retry_state,omitempty"`
 	CostSessions []cost.SessionCost     `json:"cost_sessions,omitempty"`
+	TaskDeps     map[string][]string    `json:"task_deps,omitempty"`
 }
 
 // RetryState is the JSON-serializable form of RetryInfo.
@@ -39,12 +40,13 @@ func DefaultStatePath() (string, error) {
 
 // SaveState writes the orchestrator's current state to the given path.
 // Uses atomic write (write to temp file, then rename) to avoid corruption.
-func SaveState(path string, retryState map[string]*RetryInfo, costTracker *cost.Tracker) error {
+func SaveState(path string, retryState map[string]*RetryInfo, costTracker *cost.Tracker, taskDeps map[string][]string) error {
 	state := OrchestratorState{
 		Version:      stateVersion,
 		SavedAt:      time.Now(),
 		RetryState:   make(map[string]*RetryState, len(retryState)),
 		CostSessions: costTracker.Sessions(),
+		TaskDeps:     taskDeps,
 	}
 
 	for id, ri := range retryState {

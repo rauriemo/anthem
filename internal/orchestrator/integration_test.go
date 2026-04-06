@@ -598,3 +598,242 @@ func TestBuildStateSnapshot_RecentEvents(t *testing.T) {
 
 	auditLog.Close()
 }
+
+func TestDAGEdges_DispatchBlockedByUnmetDep(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "a", Title: "A", Status: types.StatusRunning, Labels: []string{"todo"}, Priority: 1, CreatedAt: time.Now()},
+		{ID: "b", Title: "B", Status: types.StatusQueued, Labels: []string{"todo"}, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	dispatched := map[string]bool{}
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		dispatched[opts.Prompt] = true
+		return &types.RunResult{SessionID: "s1", ExitCode: 0, Duration: time.Millisecond}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 100000
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       runner,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	// B depends on A
+	orch.mu.Lock()
+	orch.taskDeps["b"] = []string{"a"}
+	orch.mu.Unlock()
+
+	// Mechanical dispatch should skip B since A is not terminal
+	orch.mechanicalDispatch(context.Background(), tasks)
+
+	// Wait for dispatch to finish
+	orch.wg.Wait()
+
+	// Only A should have been dispatched (already running doesn't re-dispatch, but B should be skipped)
+	// Actually A is "running" so it gets skipped too. Let's just verify B was not dispatched
+	orch.mu.Lock()
+	_, bActive := orch.active["b"]
+	orch.mu.Unlock()
+
+	if bActive {
+		t.Error("task B should not be dispatched while dependency A is non-terminal")
+	}
+}
+
+func TestDAGEdges_DispatchAllowedWhenDepMet(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "a", Title: "A", Status: types.StatusCompleted, Labels: []string{"done"}, Priority: 1, CreatedAt: time.Now()},
+		{ID: "b", Title: "B", Status: types.StatusQueued, Labels: []string{"todo"}, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	dispatched := false
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		dispatched = true
+		return &types.RunResult{SessionID: "s1", ExitCode: 0, Duration: time.Millisecond}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 100000
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       runner,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	// B depends on A, but A is completed (terminal)
+	orch.mu.Lock()
+	orch.taskDeps["b"] = []string{"a"}
+	orch.mu.Unlock()
+
+	orch.mechanicalDispatch(context.Background(), tasks)
+	orch.wg.Wait()
+
+	if !dispatched {
+		t.Error("task B should be dispatched when dependency A is terminal")
+	}
+}
+
+func TestDAGEdges_CreateSubtasksStoresDeps(t *testing.T) {
+	trk := tracker.NewMockTracker([]types.Task{
+		{ID: "1", Title: "Parent", Status: types.StatusQueued},
+	})
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       newNoopRunner(),
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	tasks := []types.Task{{ID: "1", Title: "Parent", Status: types.StatusQueued}}
+	actions := []Action{
+		{
+			Type: ActionCreateSubtasks,
+			Subtasks: []SubtaskDef{
+				{Title: "Step 1", Body: "First"},
+				{Title: "Step 2", Body: "Second", DependsOn: []string{"step-1-id"}},
+			},
+		},
+	}
+
+	orch.executeActions(context.Background(), tasks, actions)
+
+	// Check that at least one subtask has deps stored
+	orch.mu.Lock()
+	hasDeps := false
+	for _, deps := range orch.taskDeps {
+		if len(deps) > 0 {
+			hasDeps = true
+		}
+	}
+	orch.mu.Unlock()
+
+	if !hasDeps {
+		t.Error("expected at least one subtask to have stored dependencies")
+	}
+}
+
+func TestDAGEdges_WaveExhaustionIgnoresBlockedByDeps(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "a", Title: "A", Status: types.StatusCompleted},
+		{ID: "b", Title: "B", Status: types.StatusQueued},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	cfg := config.DefaultConfig()
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "",
+		Tracker:      trk,
+		Runner:       newNoopRunner(),
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	// B depends on A (which is still non-terminal from wave perspective, but let's say
+	// it has an in-progress dep). Actually: A is completed, B is queued with unmet dep
+	// on a non-existent task "c" — so depsAreMet returns false.
+	orch.mu.Lock()
+	orch.taskDeps["b"] = []string{"c"}
+	orch.mu.Unlock()
+
+	orch.currentWave = &Wave{
+		ID:              "wave-1",
+		FrontierTaskIDs: []string{"a", "b"},
+		Status:          "active",
+	}
+
+	// A is terminal, B has unmet deps → wave should be exhausted
+	if !orch.isWaveExhausted() {
+		t.Error("wave should be exhausted: A is terminal, B has unmet deps (should not block)")
+	}
+}
+
+func TestDAGEdges_StatePersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	deps := map[string][]string{
+		"task-2": {"task-1"},
+		"task-3": {"task-1", "task-2"},
+	}
+
+	if err := SaveState(path, nil, cost.NewTracker(), deps); err != nil {
+		t.Fatalf("SaveState error: %v", err)
+	}
+
+	state, err := LoadState(path)
+	if err != nil {
+		t.Fatalf("LoadState error: %v", err)
+	}
+
+	if len(state.TaskDeps) != 2 {
+		t.Fatalf("expected 2 task deps, got %d", len(state.TaskDeps))
+	}
+	if len(state.TaskDeps["task-3"]) != 2 {
+		t.Errorf("task-3 deps = %v, want 2 entries", state.TaskDeps["task-3"])
+	}
+}
+
+func TestBuildStateSnapshot_IncludesDependsOn(t *testing.T) {
+	cfg := config.DefaultConfig()
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "",
+		Tracker:      tracker.NewMockTracker(nil),
+		Runner:       newNoopRunner(),
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	orch.mu.Lock()
+	orch.taskDeps["t2"] = []string{"t1"}
+	orch.mu.Unlock()
+
+	tasks := []types.Task{
+		{ID: "t1", Status: types.StatusQueued},
+		{ID: "t2", Status: types.StatusQueued},
+	}
+
+	snap := orch.buildStateSnapshot(tasks)
+
+	var t2Summary *TaskSummary
+	for i := range snap.Tasks {
+		if snap.Tasks[i].ID == "t2" {
+			t2Summary = &snap.Tasks[i]
+			break
+		}
+	}
+	if t2Summary == nil {
+		t.Fatal("expected t2 in snapshot")
+	}
+	if len(t2Summary.DependsOn) != 1 || t2Summary.DependsOn[0] != "t1" {
+		t.Errorf("t2.DependsOn = %v, want [t1]", t2Summary.DependsOn)
+	}
+}

@@ -13,12 +13,13 @@ import (
 )
 
 type TaskSummary struct {
-	ID       string   `json:"id"`
-	Title    string   `json:"title"`
-	Status   string   `json:"status"`
-	Labels   []string `json:"labels,omitempty"`
-	CostUSD  float64  `json:"cost_usd,omitempty"`
-	Priority int      `json:"priority"`
+	ID        string   `json:"id"`
+	Title     string   `json:"title"`
+	Status    string   `json:"status"`
+	Labels    []string `json:"labels,omitempty"`
+	CostUSD   float64  `json:"cost_usd,omitempty"`
+	Priority  int      `json:"priority"`
+	DependsOn []string `json:"depends_on,omitempty"`
 }
 
 type RetrySummary struct {
@@ -120,7 +121,7 @@ Available action types:
 - update_voice: Propose a VOICE.md section update. Required: section_name, section_content.
 - request_approval: Flag a task for human review. Required: task_id.
 - close_wave: Mark the current wave as exhausted. No extra fields.
-- create_subtasks: Create subtasks as new tracker issues. Required: subtasks list with title, body, labels.
+- create_subtasks: Create subtasks as new tracker issues. Required: subtasks list with title, body, labels. Optional: depends_on (list of task IDs) for execution ordering within the wave.
 - promote_knowledge: (schema-only) Promote knowledge to repo. Required: summary.
 - reply: Send a message back to the user through the communication channel. Required: body.
 - display: Push visual content to connected Prism clients. Required: display_kind. Fields vary by kind:

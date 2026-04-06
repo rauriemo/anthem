@@ -60,6 +60,7 @@ type Orchestrator struct {
 	mu         sync.Mutex
 	active     map[string]*ActiveRun
 	retryState map[string]*RetryInfo
+	taskDeps   map[string][]string
 }
 
 type ActiveRun struct {
@@ -112,6 +113,7 @@ func New(opts Opts) *Orchestrator {
 		channelMgr:      opts.ChannelManager,
 		active:          make(map[string]*ActiveRun),
 		retryState:      make(map[string]*RetryInfo),
+		taskDeps:        make(map[string][]string),
 	}
 
 	return o
@@ -237,7 +239,7 @@ func (o *Orchestrator) LoadAndReconcile(ctx context.Context) error {
 		return fmt.Errorf("loading state: %w", err)
 	}
 
-	if len(state.RetryState) == 0 && len(state.CostSessions) == 0 {
+	if len(state.RetryState) == 0 && len(state.CostSessions) == 0 && len(state.TaskDeps) == 0 {
 		o.logger.Debug("no persisted state to restore", "path", o.statePath)
 		return nil
 	}
@@ -245,6 +247,15 @@ func (o *Orchestrator) LoadAndReconcile(ctx context.Context) error {
 	// Restore cost sessions (always safe — no reconciliation needed)
 	if len(state.CostSessions) > 0 {
 		o.costTracker.LoadSessions(state.CostSessions)
+	}
+
+	// Restore task dependencies
+	if len(state.TaskDeps) > 0 {
+		o.mu.Lock()
+		for id, deps := range state.TaskDeps {
+			o.taskDeps[id] = deps
+		}
+		o.mu.Unlock()
 	}
 
 	// Restore retry state, but check each task against the tracker first
@@ -277,6 +288,7 @@ func (o *Orchestrator) LoadAndReconcile(ctx context.Context) error {
 		"retry_restored", restored,
 		"retry_skipped_terminal", skipped,
 		"cost_sessions", len(state.CostSessions),
+		"task_deps", len(state.TaskDeps),
 		"saved_at", state.SavedAt,
 	)
 
@@ -294,9 +306,13 @@ func (o *Orchestrator) saveState() {
 		dup := *ri
 		retrySnapshot[id] = &dup
 	}
+	depsSnapshot := make(map[string][]string, len(o.taskDeps))
+	for id, deps := range o.taskDeps {
+		depsSnapshot[id] = deps
+	}
 	o.mu.Unlock()
 
-	if err := SaveState(o.statePath, retrySnapshot, o.costTracker); err != nil {
+	if err := SaveState(o.statePath, retrySnapshot, o.costTracker, depsSnapshot); err != nil {
 		o.logger.Error("failed to save state", "path", o.statePath, "error", err)
 	} else {
 		o.logger.Info("state saved", "path", o.statePath)
@@ -401,15 +417,26 @@ func (o *Orchestrator) buildStateSnapshot(tasks []types.Task) StateSnapshot {
 		},
 	}
 
+	o.mu.Lock()
+	depsSnapshot := make(map[string][]string, len(o.taskDeps))
+	for k, v := range o.taskDeps {
+		depsSnapshot[k] = v
+	}
+	o.mu.Unlock()
+
 	for _, t := range tasks {
-		snap.Tasks = append(snap.Tasks, TaskSummary{
+		ts := TaskSummary{
 			ID:       t.ID,
 			Title:    t.Title,
 			Status:   string(t.Status),
 			Labels:   t.Labels,
 			CostUSD:  o.costTracker.TaskCost(t.ID),
 			Priority: t.Priority,
-		})
+		}
+		if deps, ok := depsSnapshot[t.ID]; ok {
+			ts.DependsOn = deps
+		}
+		snap.Tasks = append(snap.Tasks, ts)
 	}
 
 	o.mu.Lock()
@@ -473,6 +500,27 @@ func snapshotHash(snap StateSnapshot) string {
 	return fmt.Sprintf("%x", h[:8])
 }
 
+// depsAreMet returns true if all dependency task IDs for the given task have
+// reached a terminal status. If the task has no deps, returns true.
+func (o *Orchestrator) depsAreMet(taskID string) bool {
+	o.mu.Lock()
+	deps := o.taskDeps[taskID]
+	o.mu.Unlock()
+	if len(deps) == 0 {
+		return true
+	}
+	for _, depID := range deps {
+		task, err := o.tracker.GetTask(context.Background(), depID)
+		if err != nil || task == nil {
+			return false
+		}
+		if !task.Status.IsTerminal() {
+			return false
+		}
+	}
+	return true
+}
+
 func (o *Orchestrator) isWaveExhausted() bool {
 	if o.currentWave == nil || o.currentWave.Status == "exhausted" {
 		return false
@@ -482,9 +530,15 @@ func (o *Orchestrator) isWaveExhausted() bool {
 		if err != nil || task == nil {
 			continue
 		}
-		if !task.Status.IsTerminal() && task.Status != types.StatusBlocked && task.Status != types.StatusNeedsApproval {
-			return false
+		if task.Status.IsTerminal() || task.Status == types.StatusBlocked || task.Status == types.StatusNeedsApproval {
+			continue
 		}
+		// Tasks with unmet deps that are waiting on non-terminal deps
+		// should not prevent wave exhaustion
+		if !o.depsAreMet(id) {
+			continue
+		}
+		return false
 	}
 	return true
 }
@@ -529,6 +583,10 @@ func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, a
 		case ActionDispatch:
 			task, ok := taskMap[action.TaskID]
 			if !ok {
+				continue
+			}
+			if !o.depsAreMet(task.ID) {
+				o.logger.Debug("dispatch: task has unmet dependencies, skipping", "task_id", task.ID)
 				continue
 			}
 			o.mu.Lock()
@@ -576,6 +634,12 @@ func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, a
 					continue
 				}
 				o.logger.Info("created subtask", "id", createdID, "title", sub.Title)
+				if len(sub.DependsOn) > 0 {
+					o.mu.Lock()
+					o.taskDeps[createdID] = sub.DependsOn
+					o.mu.Unlock()
+					o.logger.Info("registered task dependencies", "id", createdID, "depends_on", sub.DependsOn)
+				}
 			}
 			o.recordAudit(ctx, "subtasks.created", "", strPtr("create_subtasks"))
 
@@ -790,6 +854,11 @@ func (o *Orchestrator) mechanicalDispatch(ctx context.Context, tasks []types.Tas
 
 		if !o.isRetryEligible(task.ID) {
 			o.logger.Debug("task in backoff, skipping", "task_id", task.ID)
+			continue
+		}
+
+		if !o.depsAreMet(task.ID) {
+			o.logger.Debug("task has unmet dependencies, skipping", "task_id", task.ID)
 			continue
 		}
 

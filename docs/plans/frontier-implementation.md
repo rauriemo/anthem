@@ -45,7 +45,7 @@ Anthem's competitive gap analysis identified 11 improvements across three tiers.
   - Document in config.go that `agent.command` now drives the main driver binary, not just the lean path.
   - Update driver tests.
 
-- [ ] **2b. DAG edges inside waves**
+- [x] **2b. DAG edges inside waves**
   - Files: `internal/orchestrator/contract.go`, `internal/orchestrator/orchagent.go`, `internal/orchestrator/orchestrator.go`, `internal/orchestrator/state.go`
   - Add `DependsOn []string json:"depends_on,omitempty"` to `SubtaskDef` in `contract.go`.
   - Add `DependsOn []string json:"depends_on,omitempty"` to `TaskSummary` in `orchagent.go`.

@@ -49,9 +49,10 @@ var allActionTypes = []ActionType{
 
 // SubtaskDef defines a subtask to be created by the create_subtasks action.
 type SubtaskDef struct {
-	Title  string   `json:"title"`
-	Body   string   `json:"body"`
-	Labels []string `json:"labels,omitempty"`
+	Title     string   `json:"title"`
+	Body      string   `json:"body"`
+	Labels    []string `json:"labels,omitempty"`
+	DependsOn []string `json:"depends_on,omitempty"`
 }
 
 // Action is a single proposal from the orchestrator agent to the daemon.
