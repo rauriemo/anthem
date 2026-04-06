@@ -23,7 +23,7 @@ Anthem's competitive gap analysis identified 11 improvements across three tiers.
   - Populate `RecentEvents` in `buildStateSnapshot` by querying the last N audit events (e.g., 10).
   - Update tests.
 
-- [ ] **1b. Fix SQL event type mismatch**
+- [x] **1b. Fix SQL event type mismatch**
   - File: `internal/audit/audit.go`
   - `SummaryForWave` queries `event_type IN ('dispatch','completed','failed')` but live code records `task.dispatched`, `task.completed`, `task.failed`. Update the SQL to match the actual event type strings.
   - Update tests.

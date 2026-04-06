@@ -56,10 +56,10 @@ func TestQueryFilter(t *testing.T) {
 	ctx := context.Background()
 
 	events := []AuditEvent{
-		{Timestamp: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), EventType: "dispatch", TaskID: strPtr("task-1"), WaveID: strPtr("wave-1")},
-		{Timestamp: time.Date(2026, 1, 1, 0, 0, 1, 0, time.UTC), EventType: "completed", TaskID: strPtr("task-2"), WaveID: strPtr("wave-1")},
-		{Timestamp: time.Date(2026, 1, 1, 0, 0, 2, 0, time.UTC), EventType: "dispatch", TaskID: strPtr("task-3"), WaveID: strPtr("wave-2")},
-		{Timestamp: time.Date(2026, 1, 1, 0, 0, 3, 0, time.UTC), EventType: "failed", TaskID: strPtr("task-1"), WaveID: strPtr("wave-2")},
+		{Timestamp: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), EventType: "task.dispatched", TaskID: strPtr("task-1"), WaveID: strPtr("wave-1")},
+		{Timestamp: time.Date(2026, 1, 1, 0, 0, 1, 0, time.UTC), EventType: "task.completed", TaskID: strPtr("task-2"), WaveID: strPtr("wave-1")},
+		{Timestamp: time.Date(2026, 1, 1, 0, 0, 2, 0, time.UTC), EventType: "task.dispatched", TaskID: strPtr("task-3"), WaveID: strPtr("wave-2")},
+		{Timestamp: time.Date(2026, 1, 1, 0, 0, 3, 0, time.UTC), EventType: "task.failed", TaskID: strPtr("task-1"), WaveID: strPtr("wave-2")},
 	}
 	for i, ev := range events {
 		if err := logger.Record(ctx, ev); err != nil {
@@ -72,14 +72,14 @@ func TestQueryFilter(t *testing.T) {
 		filter QueryFilter
 		want   int
 	}{
-		{"by event_type dispatch", QueryFilter{EventType: "dispatch"}, 2},
-		{"by event_type completed", QueryFilter{EventType: "completed"}, 1},
+		{"by event_type task.dispatched", QueryFilter{EventType: "task.dispatched"}, 2},
+		{"by event_type task.completed", QueryFilter{EventType: "task.completed"}, 1},
 		{"by task_id task-1", QueryFilter{TaskID: "task-1"}, 2},
 		{"by wave_id wave-1", QueryFilter{WaveID: "wave-1"}, 2},
 		{"by wave_id wave-2", QueryFilter{WaveID: "wave-2"}, 2},
 		{"since filter", QueryFilter{Since: time.Date(2026, 1, 1, 0, 0, 2, 0, time.UTC)}, 2},
 		{"with limit", QueryFilter{Limit: 1}, 1},
-		{"combined filter", QueryFilter{EventType: "dispatch", WaveID: "wave-1"}, 1},
+		{"combined filter", QueryFilter{EventType: "task.dispatched", WaveID: "wave-1"}, 1},
 	}
 
 	for _, tt := range tests {
@@ -136,10 +136,10 @@ func TestSummaryForWave(t *testing.T) {
 	ctx := context.Background()
 
 	events := []AuditEvent{
-		{Timestamp: time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC), EventType: "dispatch", WaveID: strPtr("wave-1"), CostUSD: f64Ptr(0.05)},
-		{Timestamp: time.Date(2026, 1, 1, 10, 1, 0, 0, time.UTC), EventType: "dispatch", WaveID: strPtr("wave-1"), CostUSD: f64Ptr(0.10)},
-		{Timestamp: time.Date(2026, 1, 1, 10, 2, 0, 0, time.UTC), EventType: "completed", WaveID: strPtr("wave-1"), CostUSD: f64Ptr(0.03)},
-		{Timestamp: time.Date(2026, 1, 1, 10, 3, 0, 0, time.UTC), EventType: "failed", WaveID: strPtr("wave-1"), CostUSD: f64Ptr(0.02)},
+		{Timestamp: time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC), EventType: "task.dispatched", WaveID: strPtr("wave-1"), CostUSD: f64Ptr(0.05)},
+		{Timestamp: time.Date(2026, 1, 1, 10, 1, 0, 0, time.UTC), EventType: "task.dispatched", WaveID: strPtr("wave-1"), CostUSD: f64Ptr(0.10)},
+		{Timestamp: time.Date(2026, 1, 1, 10, 2, 0, 0, time.UTC), EventType: "task.completed", WaveID: strPtr("wave-1"), CostUSD: f64Ptr(0.03)},
+		{Timestamp: time.Date(2026, 1, 1, 10, 3, 0, 0, time.UTC), EventType: "task.failed", WaveID: strPtr("wave-1"), CostUSD: f64Ptr(0.02)},
 	}
 	for i, ev := range events {
 		if err := logger.Record(ctx, ev); err != nil {

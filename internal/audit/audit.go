@@ -169,9 +169,9 @@ func (l *SQLiteAuditLogger) RecentByTask(ctx context.Context, taskID string, lim
 func (l *SQLiteAuditLogger) SummaryForWave(ctx context.Context, waveID string) (*WaveSummary, error) {
 	row := l.db.QueryRowContext(ctx,
 		`SELECT
-			COALESCE(SUM(CASE WHEN event_type = 'dispatch' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN event_type = 'completed' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN event_type = 'failed' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN event_type IN ('task.dispatched', 'task.dispatched.fallback') THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN event_type = 'task.completed' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN event_type = 'task.failed' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(cost_usd), 0),
 			COALESCE(MIN(timestamp), ''),
 			COALESCE(MAX(timestamp), '')
