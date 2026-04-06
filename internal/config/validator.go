@@ -7,7 +7,6 @@ import (
 
 var validTrackerKinds = map[string]bool{
 	"github":     true,
-	"linear":     true,
 	"local_json": true,
 }
 
@@ -30,7 +29,7 @@ func Validate(cfg *Config) error {
 		if cfg.Tracker.Kind == "" {
 			errs = append(errs, fmt.Errorf("tracker.kind is required"))
 		} else if !validTrackerKinds[cfg.Tracker.Kind] {
-			errs = append(errs, fmt.Errorf("tracker.kind %q is not valid (github, linear, local_json)", cfg.Tracker.Kind))
+			errs = append(errs, fmt.Errorf("tracker.kind %q is not valid (github, local_json)", cfg.Tracker.Kind))
 		}
 
 		if cfg.Tracker.Kind == "github" && cfg.Tracker.Repo == "" {

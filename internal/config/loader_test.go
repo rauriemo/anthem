@@ -124,9 +124,6 @@ Task: {{.Title}}`,
 				if cfg.Agent.MaxConcurrentPerLabel["planning"] != 1 {
 					t.Errorf("max_concurrent_per_label[planning] = %d", cfg.Agent.MaxConcurrentPerLabel["planning"])
 				}
-				if cfg.System.WorkflowChangesRequireApproval {
-					t.Error("system.workflow_changes_require_approval should be false")
-				}
 				if len(cfg.System.Constraints) != 1 || cfg.System.Constraints[0] != "Run tests before merging" {
 					t.Errorf("system.constraints = %v", cfg.System.Constraints)
 				}
@@ -156,9 +153,7 @@ body`,
 				if cfg.Agent.MaxConcurrent != 3 {
 					t.Errorf("default agent.max_concurrent = %d, want 3", cfg.Agent.MaxConcurrent)
 				}
-				if !cfg.System.WorkflowChangesRequireApproval {
-					t.Error("default system.workflow_changes_require_approval should be true")
-				}
+				// system defaults are all zero-values now
 			},
 		},
 		{

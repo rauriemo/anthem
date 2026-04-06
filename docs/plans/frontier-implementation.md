@@ -28,7 +28,7 @@ Anthem's competitive gap analysis identified 11 improvements across three tiers.
   - `SummaryForWave` queries `event_type IN ('dispatch','completed','failed')` but live code records `task.dispatched`, `task.completed`, `task.failed`. Update the SQL to match the actual event type strings.
   - Update tests.
 
-- [ ] **1c. Remove or implement dead config/code**
+- [x] **1c. Remove or implement dead config/code**
   - Files: `internal/orchestrator/orchestrator.go`, `internal/config/config.go`, `internal/config/validator.go`, `internal/orchestrator/contract.go`, `internal/rules/engine.go`, `cmd/anthem/main.go`
   - `require_plan` rule action: validated in config but no enforcement branch in `mechanicalDispatch`. Add enforcement: skip dispatch if no plan comment on issue, add `needs-plan` label, publish `task.needs_plan` event.
   - `workflow_changes_require_approval`: config field exists, never referenced. Remove from config struct and validator.

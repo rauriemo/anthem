@@ -90,8 +90,8 @@ type RuleMatch struct {
 }
 
 type SystemConfig struct {
-	WorkflowChangesRequireApproval bool     `yaml:"workflow_changes_require_approval"`
 	Constraints                    []string `yaml:"constraints"`
+	RequireApprovalForRiskyActions bool     `yaml:"require_approval_for_risky_actions"`
 }
 
 type OrchestratorConfig struct {
@@ -115,9 +115,7 @@ func DefaultConfig() Config {
 			StallTimeoutMS:    300000,
 			MaxRetryBackoffMS: 300000,
 		},
-		System: SystemConfig{
-			WorkflowChangesRequireApproval: true,
-		},
+		System: SystemConfig{},
 		Orchestrator: OrchestratorConfig{
 			Enabled:          true,
 			MaxContextTokens: 80000,

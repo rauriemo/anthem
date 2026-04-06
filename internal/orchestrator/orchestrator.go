@@ -502,9 +502,23 @@ func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, a
 
 	var dispatchedIDs []string
 
+	snap := o.configSnapshot()
+	requireApproval := snap.cfg.System.RequireApprovalForRiskyActions
+
 	for _, action := range actions {
 		if err := ValidateAction(action, validIDs); err != nil {
 			o.logger.Warn("invalid orchestrator action, skipping", "action", action.Type, "error", err)
+			continue
+		}
+
+		risk := RiskForAction(action.Type)
+		if risk == RiskHigh {
+			o.logger.Warn("high-risk action proposed", "action", action.Type, "task_id", action.TaskID)
+		}
+		if requireApproval && risk != RiskLow {
+			o.logger.Warn("skipping risky action (require_approval_for_risky_actions is set)",
+				"action", action.Type, "risk", risk)
+			o.recordAudit(ctx, "action.blocked_by_risk", action.TaskID, strPtr(string(action.Type)))
 			continue
 		}
 
@@ -805,6 +819,21 @@ func (o *Orchestrator) mechanicalDispatch(ctx context.Context, tasks []types.Tas
 				if r.AutoAssignee != "" {
 					_ = o.tracker.AddComment(ctx, task.ID, fmt.Sprintf("Auto-assigned to @%s", r.AutoAssignee))
 					o.logger.Info("auto-assigned task", "task_id", task.ID, "assignee", r.AutoAssignee)
+				}
+			case rules.ActionRequirePlan:
+				hasPlanApproved := false
+				for _, l := range task.Labels {
+					if l == "plan-approved" {
+						hasPlanApproved = true
+						break
+					}
+				}
+				if !hasPlanApproved {
+					o.logger.Info("task requires plan, skipping",
+						"task_id", task.ID, "identifier", task.Identifier)
+					_ = o.tracker.AddLabel(ctx, task.ID, "needs-plan")
+					o.publish(types.Event{Type: "task.needs_plan", TaskID: task.ID})
+					skip = true
 				}
 			case rules.ActionMaxCost:
 				if r.MaxCost > 0 {

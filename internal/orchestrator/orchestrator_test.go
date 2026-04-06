@@ -1196,3 +1196,176 @@ func TestNoResultEventTriggersRetry(t *testing.T) {
 		t.Error("task should not be completed when no result event was produced")
 	}
 }
+
+func TestRequirePlanSkipsTaskWithoutPlanApproval(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Identifier: "GH-1", Title: "Needs plan", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	dispatched := false
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		dispatched = true
+		return &types.RunResult{SessionID: "s1", ExitCode: 0}, nil
+	}
+
+	events := NewMockEventBus()
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 1000
+	cfg.Rules = []config.RuleConfig{
+		{Match: config.RuleMatch{Labels: []string{"todo"}}, Action: "require_plan"},
+	}
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       runner,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     events,
+		Logger:       testLogger(),
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_ = orch.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	if dispatched {
+		t.Error("task should not be dispatched without plan-approved label")
+	}
+
+	task, _ := trk.GetTask(context.Background(), "1")
+	hasNeedsPlan := false
+	for _, l := range task.Labels {
+		if l == "needs-plan" {
+			hasNeedsPlan = true
+		}
+	}
+	if !hasNeedsPlan {
+		t.Error("expected needs-plan label to be added")
+	}
+
+	hasEvent := false
+	for _, ev := range events.Published {
+		if ev.Type == "task.needs_plan" {
+			hasEvent = true
+		}
+	}
+	if !hasEvent {
+		t.Error("expected task.needs_plan event")
+	}
+}
+
+func TestRequirePlanAllowsWithPlanApprovedLabel(t *testing.T) {
+	tasks := []types.Task{
+		{ID: "1", Identifier: "GH-1", Title: "Has plan", Labels: []string{"todo", "plan-approved"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},
+	}
+	trk := tracker.NewMockTracker(tasks)
+
+	dispatched := false
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		dispatched = true
+		return &types.RunResult{SessionID: "s1", ExitCode: 0, Duration: time.Millisecond}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Polling.IntervalMS = 1000
+	cfg.Rules = []config.RuleConfig{
+		{Match: config.RuleMatch{Labels: []string{"todo"}}, Action: "require_plan"},
+	}
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       runner,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_ = orch.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	if !dispatched {
+		t.Error("task with plan-approved label should be dispatched")
+	}
+}
+
+func TestRiskForActionGating(t *testing.T) {
+	trk := tracker.NewMockTracker([]types.Task{
+		{ID: "1", Title: "T1", Status: types.StatusQueued},
+	})
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.System.RequireApprovalForRiskyActions = true
+
+	events := NewMockEventBus()
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       newNoopRunner(),
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     events,
+		Logger:       testLogger(),
+	})
+
+	tasks := []types.Task{{ID: "1", Title: "T1", Status: types.StatusQueued}}
+
+	// close_wave is medium risk — should be blocked
+	actions := []Action{
+		{Type: ActionCloseWave},
+	}
+	orch.executeActions(context.Background(), tasks, actions)
+
+	// Wave should NOT be closed because the action was blocked
+	if orch.currentWave != nil && orch.currentWave.Status == "exhausted" {
+		t.Error("close_wave should be blocked by risk gating")
+	}
+}
+
+func TestRiskForActionAllowsLowRisk(t *testing.T) {
+	trk := tracker.NewMockTracker([]types.Task{
+		{ID: "1", Title: "T1", Status: types.StatusQueued},
+	})
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.System.RequireApprovalForRiskyActions = true
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "{{.issue.title}}",
+		Tracker:      trk,
+		Runner:       newNoopRunner(),
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	tasks := []types.Task{{ID: "1", Title: "T1", Status: types.StatusQueued}}
+
+	// comment is low risk — should pass through
+	actions := []Action{
+		{Type: ActionComment, TaskID: "1", Body: "hello"},
+	}
+	orch.executeActions(context.Background(), tasks, actions)
+
+	comments := trk.Comments["1"]
+	if len(comments) == 0 || comments[0] != "hello" {
+		t.Errorf("low-risk comment should pass through, got comments: %v", comments)
+	}
+}

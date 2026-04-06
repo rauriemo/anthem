@@ -32,7 +32,6 @@ rules:
     approval_label: "approved"
 
 system:
-  workflow_changes_require_approval: true
   constraints:
     - "Follow the project existing code style and conventions"
     - "Run tests before opening a PR"
