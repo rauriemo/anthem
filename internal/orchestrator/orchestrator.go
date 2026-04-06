@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -139,23 +142,32 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	o.publish(types.Event{Type: "orchestrator.started"})
 
-	interval := time.Duration(o.cfg.Polling.IntervalMS) * time.Millisecond
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	if o.tracker != nil {
+		interval := time.Duration(o.cfg.Polling.IntervalMS) * time.Millisecond
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
 
-	// Run first tick immediately
-	o.tick(ctx)
+		// Run first tick immediately
+		o.tick(ctx)
 
-	for {
-		select {
-		case <-ctx.Done():
-			o.logger.Info("orchestrator stopping, starting graceful shutdown")
-			o.Shutdown()
-			o.publish(types.Event{Type: "orchestrator.stopped"})
-			return ctx.Err()
-		case <-ticker.C:
-			o.tick(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				o.logger.Info("orchestrator stopping, starting graceful shutdown")
+				o.Shutdown()
+				o.publish(types.Event{Type: "orchestrator.stopped"})
+				return ctx.Err()
+			case <-ticker.C:
+				o.tick(ctx)
+			}
 		}
+	} else {
+		o.logger.Info("no tracker configured, running in channel-only mode")
+		<-ctx.Done()
+		o.logger.Info("orchestrator stopping, starting graceful shutdown")
+		o.Shutdown()
+		o.publish(types.Event{Type: "orchestrator.stopped"})
+		return ctx.Err()
 	}
 }
 
@@ -1145,6 +1157,17 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		})
 	}
 
+	// Fast path for lightweight status queries
+	if strings.Contains(msg.Text, "[system:status]") {
+		o.handleLeanMessage(ctx, msg)
+		return
+	}
+
+	if o.tracker == nil {
+		o.handleLeanMessage(ctx, msg)
+		return
+	}
+
 	tasks, err := o.tracker.ListActive(ctx)
 	if err != nil {
 		o.logger.Error("failed to fetch tasks for user message", "error", err)
@@ -1157,7 +1180,7 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	snap.SourceChannel = msg.ChannelKind
 
 	if o.orchAgent == nil {
-		o.sendFollowUp(ctx, msg, "Orchestrator agent is not enabled.")
+		o.handleLeanMessage(ctx, msg)
 		return
 	}
 
@@ -1258,6 +1281,91 @@ func (o *Orchestrator) sendFollowUp(ctx context.Context, original channel.Incomi
 		ThreadID:  original.ThreadID,
 		EventType: "channel.followup",
 	})
+}
+
+func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.IncomingMessage) {
+	o.logger.Info("handling lean message", "sender", msg.SenderID, "text_len", len(msg.Text))
+
+	var prompt strings.Builder
+	if o.projectCtx != nil && o.projectCtx.ProjectSummary != "" {
+		prompt.WriteString("## Project Context\n\n")
+		prompt.WriteString(o.projectCtx.ProjectSummary)
+		prompt.WriteString("\n\n")
+	}
+
+	prompt.WriteString("## User Message\n\n")
+	prompt.WriteString(msg.Text)
+
+	if len(msg.Files) > 0 {
+		umc := buildUserMessageContext(msg)
+		for _, f := range umc.Files {
+			prompt.WriteString("\n\n## Attached File\n\n")
+			prompt.WriteString(f)
+		}
+	}
+
+	cmdName := o.cfg.Agent.Command
+	if cmdName == "" {
+		cmdName = "claude"
+	}
+
+	cmd := exec.CommandContext(ctx, cmdName, "-p", prompt.String(), "--output-format", "text")
+
+	root := o.cfg.Workspace.Root
+	if root != "" && root != "." {
+		cmd.Dir = root
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		o.logger.Error("failed to create stdout pipe for lean message", "error", err)
+		o.sendFollowUp(ctx, msg, "Failed to process your message.")
+		return
+	}
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		o.logger.Error("failed to start claude -p for lean message", "error", err)
+		o.sendFollowUp(ctx, msg, "Failed to process your message.")
+		return
+	}
+
+	var fullResponse strings.Builder
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 256*1024)
+	for scanner.Scan() {
+		line := scanner.Text() + "\n"
+		fullResponse.WriteString(line)
+		if o.channelMgr != nil {
+			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+				StreamDelta: line,
+				ThreadID:    msg.ThreadID,
+			})
+		}
+	}
+
+	if o.channelMgr != nil {
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			StreamDone: true,
+			ThreadID:   msg.ThreadID,
+		})
+	}
+
+	if err := cmd.Wait(); err != nil {
+		o.logger.Error("claude -p failed for lean message",
+			"error", err,
+			"stderr", stderrBuf.String(),
+		)
+		if fullResponse.Len() == 0 {
+			o.sendFollowUp(ctx, msg, "Failed to process your message.")
+			return
+		}
+	}
+
+	o.sendFollowUp(ctx, msg, strings.TrimRight(fullResponse.String(), "\n"))
+	o.recordAudit(ctx, "channel.lean_message", "", strPtr("lean_message"))
 }
 
 func buildUserMessageContext(msg channel.IncomingMessage) *UserMessageContext {

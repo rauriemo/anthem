@@ -402,6 +402,8 @@ func versionCmd() *cobra.Command {
 
 func createTracker(ctx context.Context, cfg *config.Config, logger *slog.Logger) (tracker.IssueTracker, error) {
 	switch cfg.Tracker.Kind {
+	case "":
+		return nil, nil
 	case "github":
 		owner, repo, err := ghtracker.ParseRepo(cfg.Tracker.Repo)
 		if err != nil {
