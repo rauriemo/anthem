@@ -122,7 +122,12 @@ func runCmd() *cobra.Command {
 			pm := claude.NewPlatformProcessManager()
 			runner := claude.NewDriver(pm, logger, cfg.Agent.Command)
 
-			ws := workspace.NewManager(cfg.Workspace.Root, cfg.Hooks, logger)
+			var ws workspace.WorkspaceManager
+			if cfg.Workspace.Shared {
+				ws = workspace.NewSharedManager(cfg.Workspace.Root, cfg.Hooks, logger)
+			} else {
+				ws = workspace.NewManager(cfg.Workspace.Root, cfg.Hooks, logger)
+			}
 
 			events := orchestrator.NewEventBus(logger)
 

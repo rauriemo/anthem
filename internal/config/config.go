@@ -44,7 +44,8 @@ type PollingConfig struct {
 }
 
 type WorkspaceConfig struct {
-	Root string `yaml:"root"`
+	Root   string `yaml:"root"`
+	Shared bool   `yaml:"shared"`
 }
 
 type HooksConfig struct {
@@ -132,7 +133,7 @@ func DefaultConfig() Config {
 		Agent: AgentConfig{
 			Command:           "claude",
 			MaxTurns:          5,
-			MaxConcurrent:     3,
+			MaxConcurrent:     15,
 			StallTimeoutMS:    300000,
 			MaxRetryBackoffMS: 300000,
 			ReviewMaxTurns:    3,

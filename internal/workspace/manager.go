@@ -25,6 +25,7 @@ type WorkspaceManager interface {
 // and runs lifecycle hooks.
 type Manager struct {
 	root   string
+	shared bool
 	hooks  config.HooksConfig
 	logger *slog.Logger
 }
@@ -40,7 +41,23 @@ func NewManager(root string, hooks config.HooksConfig, logger *slog.Logger) *Man
 	}
 }
 
+// NewSharedManager creates a workspace manager where all tasks share the
+// project root directory instead of getting per-task subdirectories.
+func NewSharedManager(root string, hooks config.HooksConfig, logger *slog.Logger) *Manager {
+	m := NewManager(root, hooks, logger)
+	m.shared = true
+	return m
+}
+
 func (m *Manager) Prepare(ctx context.Context, task types.Task) (string, error) {
+	if m.shared {
+		absPath, err := filepath.Abs(m.root)
+		if err != nil {
+			return "", fmt.Errorf("resolving workspace path: %w", err)
+		}
+		return absPath, nil
+	}
+
 	wsPath := filepath.Join(m.root, task.ID)
 
 	absPath, err := filepath.Abs(wsPath)
@@ -86,6 +103,9 @@ func (m *Manager) RunHook(ctx context.Context, hookName string, workspacePath st
 }
 
 func (m *Manager) Cleanup(_ context.Context, taskID string) error {
+	if m.shared {
+		return nil
+	}
 	wsPath := filepath.Join(m.root, taskID)
 
 	absPath, err := filepath.Abs(wsPath)
@@ -106,7 +126,7 @@ func (m *Manager) Cleanup(_ context.Context, taskID string) error {
 
 // CleanupTerminal removes workspace directories for tasks in terminal states.
 func (m *Manager) CleanupTerminal(terminalTaskIDs []string) {
-	if len(terminalTaskIDs) == 0 {
+	if m.shared || len(terminalTaskIDs) == 0 {
 		return
 	}
 
