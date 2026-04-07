@@ -283,6 +283,41 @@ Respond with a single JSON object containing 'reasoning' (string) and 'actions' 
 	return strings.Join(sections, "\n\n")
 }
 
+// buildPlanSystemPrompt builds a system prompt for plan/synthesis modes that
+// omits all display/HTML instructions. This prevents the LLM from defaulting
+// to HTML output when it should produce structured anthem-plan markdown.
+func buildPlanSystemPrompt(voiceContent string) string {
+	var sections []string
+
+	if voiceContent != "" {
+		sections = append(sections, voiceContent)
+		sections = append(sections, voice.SelfEvolutionInstruction())
+	}
+
+	sections = append(sections, `## Role
+
+You are an intelligent task orchestrator with codebase access. You receive a state snapshot of all tasks and can use built-in tools (Read, Grep, Glob) to explore the codebase before planning. In plan mode your output is plain markdown text — not JSON actions, not HTML, not display artifacts. You research thoroughly and produce structured plans.`)
+
+	sections = append(sections, `## Project Context
+
+The state snapshot includes a "project" field containing:
+- file_tree: the project's directory structure showing all source files
+- project_summary: contents of CLAUDE.md with design decisions and current status
+- architecture: contents of docs/plans/architecture.md with system design
+- implementation: contents of docs/plans/implementation.md with build plan and phase status
+
+Use this context to:
+- Understand the codebase structure when decomposing features into subtasks
+- Reference specific files and modules when writing subtask descriptions
+- Respect architectural decisions documented in the project summary
+- Understand what has been built (completed phases) vs what is planned (future phases)
+- Write subtask bodies that reference the correct file paths and existing patterns
+
+The "knowledge" field (if present) contains summaries from previous runs — architectural discoveries, recurring patterns, and solved edge cases. Use these to inform planning.`)
+
+	return strings.Join(sections, "\n\n")
+}
+
 func (o *OrchestratorAgent) Start(ctx context.Context, state StateSnapshot) ([]Action, error) {
 	prompt := buildSystemPrompt(o.voiceContent) + "\n\n## Current State\n\n" + state.Serialize()
 
@@ -542,8 +577,6 @@ const planModePromptSuffix = `
 
 ## Plan Mode
 
-**OVERRIDE**: Ignore ALL previous display/HTML instructions. In plan mode you do NOT produce display actions, you do NOT output HTML, and you do NOT default to html kind. Your output is plain markdown text sent through the chat, NOT a visual artifact. The "empty reply body" rule does NOT apply here — your entire output goes in the text response.
-
 You are in PLANNING mode. The user wants a well-researched, evidence-based plan before any work begins. You have READ-ONLY access — write tools (Write, Edit, MultiEdit) are disabled.
 
 ### Stage 1: Research (MANDATORY)
@@ -601,7 +634,7 @@ The create_subtasks action is the ONLY way work gets dispatched to executors. If
 
 // ConsultPlan runs a plan-mode consultation. The LLM returns markdown, not JSON actions.
 func (o *OrchestratorAgent) ConsultPlan(ctx context.Context, state StateSnapshot, model string, onStream func(string)) (string, error) {
-	prompt := buildSystemPrompt(o.voiceContent) + planModePromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
+	prompt := buildPlanSystemPrompt(o.voiceContent) + planModePromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
 
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		Prompt:         prompt,
@@ -675,8 +708,6 @@ Examples of good explore requests:
 const synthesisPromptSuffix = `
 
 ## Synthesis Mode
-
-**OVERRIDE**: Ignore ALL previous display/HTML instructions. In synthesis mode you do NOT produce display actions, you do NOT output HTML, and you do NOT default to html kind. Your output is plain markdown text sent through the chat, NOT a visual artifact. The "empty reply body" rule does NOT apply here — your entire output goes in the text response.
 
 You are in SYNTHESIS mode. Explorer agents have investigated the codebase in parallel and their findings are provided below. Your job is to synthesize these findings into a well-structured plan.
 
@@ -825,7 +856,7 @@ func truncateForSummary(s string, maxLen int) string {
 
 // ScoutPlan runs the scout phase: identifies areas needing deep research.
 func (o *OrchestratorAgent) ScoutPlan(ctx context.Context, state StateSnapshot, model string, onStream func(string)) ([]ExploreRequest, string, error) {
-	prompt := buildSystemPrompt(o.voiceContent) + scoutPromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
+	prompt := buildPlanSystemPrompt(o.voiceContent) + scoutPromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
 
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		Prompt:         prompt,
@@ -879,7 +910,7 @@ func (o *OrchestratorAgent) SynthesizePlan(ctx context.Context, state StateSnaps
 		}
 	}
 
-	prompt := buildSystemPrompt(o.voiceContent) + synthesisPromptSuffix + findingsText.String() + "\n\n## Current State\n\n" + state.Serialize()
+	prompt := buildPlanSystemPrompt(o.voiceContent) + synthesisPromptSuffix + findingsText.String() + "\n\n## Current State\n\n" + state.Serialize()
 
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		Prompt:         prompt,
