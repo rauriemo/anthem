@@ -2208,7 +2208,6 @@ func extractPlanBlock(output string) string {
 	return output[start : start+end]
 }
 
-
 const explorerCostTaskID = "__explorer__"
 
 func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.IncomingMessage, model string) {
@@ -2761,4 +2760,3 @@ func buildPlanCard(planContent, planPath string) string {
 	data, _ := json.Marshal(card)
 	return "[plan-card]" + string(data) + "[/plan-card]"
 }
-

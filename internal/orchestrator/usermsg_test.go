@@ -43,20 +43,6 @@ func (c *testChannel) sentMessages() []channel.OutgoingMessage {
 	return cp
 }
 
-func (c *testChannel) sentDisplays() []map[string]any {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var displays []map[string]any
-	for _, msg := range c.sent {
-		if msg.Display != nil {
-			if m, ok := msg.Display.(map[string]any); ok {
-				displays = append(displays, m)
-			}
-		}
-	}
-	return displays
-}
-
 func TestHandleUserMessage_ConsultsAndReplies(t *testing.T) {
 	tasks := []types.Task{
 		{ID: "1", Title: "Task 1", Status: types.StatusQueued, Labels: []string{"todo"}, CreatedAt: time.Now()},
