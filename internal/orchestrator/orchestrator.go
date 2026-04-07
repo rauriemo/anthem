@@ -2387,6 +2387,10 @@ func (o *Orchestrator) finalizePlan(ctx context.Context, msg channel.IncomingMes
 			DisplayID: newDisplayID(),
 			ThreadID:  msg.ThreadID,
 		})
+
+		if planPath != "" {
+			o.sendFollowUp(ctx, msg, buildPlanCard(planContent, planPath))
+		}
 	}
 
 	o.recordAudit(ctx, "channel.plan_proposed", "", strPtr("plan"))
@@ -2685,4 +2689,61 @@ func extractPlanTitle(content string) string {
 		}
 	}
 	return ""
+}
+
+// extractPlanOverview returns the first non-empty paragraph after the H1 heading.
+func extractPlanOverview(content string) string {
+	lines := strings.Split(content, "\n")
+	pastTitle := false
+	var para []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !pastTitle {
+			if strings.HasPrefix(trimmed, "# ") {
+				pastTitle = true
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			break
+		}
+		if trimmed == "" {
+			if len(para) > 0 {
+				break
+			}
+			continue
+		}
+		para = append(para, trimmed)
+	}
+	return strings.Join(para, " ")
+}
+
+var taskHeadingRe = regexp.MustCompile(`^###\s+\d+[\.\)]\s*(.+)`)
+
+// extractPlanTasks returns the titles of numbered ### task headings.
+func extractPlanTasks(content string) []string {
+	var tasks []string
+	for _, line := range strings.Split(content, "\n") {
+		if m := taskHeadingRe.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			tasks = append(tasks, m[1])
+		}
+	}
+	return tasks
+}
+
+// buildPlanCard serializes plan metadata as a [plan-card] tagged JSON string
+// for Prism to render as a Cursor-style card in the chat.
+func buildPlanCard(planContent, planPath string) string {
+	title := extractPlanTitle(planContent)
+	if title == "" {
+		title = "Plan"
+	}
+	card := map[string]any{
+		"title":    title,
+		"overview": extractPlanOverview(planContent),
+		"tasks":    extractPlanTasks(planContent),
+		"planPath": planPath,
+	}
+	data, _ := json.Marshal(card)
+	return "[plan-card]" + string(data) + "[/plan-card]"
 }

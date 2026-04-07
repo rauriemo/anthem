@@ -359,6 +359,151 @@ func TestExtractPlanTitle(t *testing.T) {
 	}
 }
 
+func TestExtractPlanOverview(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "paragraph after title",
+			input: "# My Plan\n\nThis is the overview paragraph.\n\n## Tasks\n",
+			want:  "This is the overview paragraph.",
+		},
+		{
+			name:  "multi-line paragraph",
+			input: "# My Plan\n\nFirst line\nsecond line\n\n## Tasks\n",
+			want:  "First line second line",
+		},
+		{
+			name:  "no paragraph",
+			input: "# My Plan\n\n## Tasks\n",
+			want:  "",
+		},
+		{
+			name:  "no heading",
+			input: "Just some text\n",
+			want:  "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractPlanOverview(tt.input)
+			if got != tt.want {
+				t.Errorf("extractPlanOverview() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractPlanTasks(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "numbered headings with dots",
+			input: "## Tasks\n\n### 1. Setup project\n\n### 2. Add tests\n\n### 3. Deploy\n",
+			want:  []string{"Setup project", "Add tests", "Deploy"},
+		},
+		{
+			name:  "numbered headings with parens",
+			input: "### 1) First thing\n### 2) Second thing\n",
+			want:  []string{"First thing", "Second thing"},
+		},
+		{
+			name:  "no task headings",
+			input: "# Plan\n\n## Overview\n\nSome text.\n",
+			want:  nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractPlanTasks(tt.input)
+			if len(got) != len(tt.want) {
+				t.Fatalf("extractPlanTasks() returned %d tasks, want %d: %v", len(got), len(tt.want), got)
+			}
+			for i, task := range got {
+				if task != tt.want[i] {
+					t.Errorf("task[%d] = %q, want %q", i, task, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestBuildPlanCard(t *testing.T) {
+	content := "# My Plan\n\nThis is the overview.\n\n## Tasks\n\n### 1. Do X\n### 2. Do Y\n"
+	card := buildPlanCard(content, "/plans/test.md")
+
+	if !strings.HasPrefix(card, "[plan-card]") {
+		t.Errorf("expected [plan-card] prefix, got %q", card[:30])
+	}
+	if !strings.HasSuffix(card, "[/plan-card]") {
+		t.Errorf("expected [/plan-card] suffix, got %q", card[len(card)-30:])
+	}
+	if !strings.Contains(card, `"title":"My Plan"`) {
+		t.Error("card missing title")
+	}
+	if !strings.Contains(card, `"overview":"This is the overview."`) {
+		t.Error("card missing overview")
+	}
+	if !strings.Contains(card, `"Do X"`) || !strings.Contains(card, `"Do Y"`) {
+		t.Error("card missing tasks")
+	}
+	if !strings.Contains(card, `"planPath":"/plans/test.md"`) {
+		t.Error("card missing planPath")
+	}
+}
+
+func TestFinalizePlan_SendsPlanCard(t *testing.T) {
+	planOutput := "```anthem-plan\n# Coverage Plan\n\nOverview text here.\n\n## Tasks\n\n### 1. Add unit tests\n### 2. Fix linter\n```\n"
+
+	orchRunner := agent.NewMockRunner()
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		if strings.Contains(opts.Prompt, "Scout Mode") {
+			return &types.RunResult{
+				SessionID: "scout-s1",
+				Output:    `{"reasoning": "simple", "explores": [], "user_message": ""}`,
+				TokensIn:  10, TokensOut: 5,
+			}, nil
+		}
+		return &types.RunResult{
+			SessionID: "plan-s1",
+			Output:    planOutput,
+			TokensIn:  100, TokensOut: 50,
+		}, nil
+	}
+
+	orch, ch := newPlanTestOrch(t, orchRunner)
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "prism",
+		SenderID:    "user-1",
+		ThreadID:    "t1",
+		Text:        "[system:plan] Create coverage plan",
+		Timestamp:   time.Now(),
+	})
+
+	sent := ch.sentMessages()
+	var foundCard bool
+	for _, msg := range sent {
+		if strings.Contains(msg.Text, "[plan-card]") && strings.Contains(msg.Text, "[/plan-card]") {
+			foundCard = true
+			if !strings.Contains(msg.Text, `"title":"Coverage Plan"`) {
+				t.Errorf("plan card missing title, got %q", msg.Text)
+			}
+			if !strings.Contains(msg.Text, `"Add unit tests"`) {
+				t.Errorf("plan card missing tasks, got %q", msg.Text)
+			}
+		}
+	}
+	if !foundCard {
+		t.Error("expected a [plan-card] message to be sent after plan finalization")
+	}
+}
+
 func TestPlanModePromptContents(t *testing.T) {
 	checks := []string{
 		"PLANNING mode",
