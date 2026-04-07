@@ -131,10 +131,10 @@ On Windows, if Smart App Control blocks `go run`, build and run the binary direc
 - **Config hot-reload**: edit WORKFLOW.md while running
 - **Graceful shutdown**: drains agents, releases claims, saves state on Ctrl+C
 - **Cross-platform**: Windows (Job Objects), macOS/Linux (process groups)
-- **Plan / Agent / Build modes**: orchestrator supports three channel modes — Plan (format-agnostic planning — produces rich HTML for visual analysis or structured markdown for task plans), Agent (full JSON actions with plan context), and Build (approved plan → GitHub issue creation). Mode selected by `[system:plan]` / `[system:build]` tags; default is agent
+- **Plan / Agent / Build modes**: orchestrator supports three channel modes — Plan (markdown-only planning using a dedicated prompt that omits JSON actions and HTML display), Agent (full JSON actions with plan context), and Build (approved plan → GitHub issue creation). Mode selected by `[system:plan]` / `[system:build]` tags; default is agent
 - **Plan-card in chat**: after plan finalization, the orchestrator sends a structured plan-card to the channel — rendered in Prism as a UI card with title, task list, "View Plan" link, model dropdown, and "Build" button for one-click dispatch
 - **Model selection**: `[model:claude-xxx]` tags in messages select the Claude model for any path (lean, plan, build, agent). Supports Sonnet, Opus, Haiku across versions
-- **Plan storage**: markdown plans saved to `~/.anthem/plans/{project-slug}/` with YAML frontmatter; HTML plans broadcast as display artifacts (not saved to disk). Plan history and latest draft injected into agent-mode context for seamless plan-to-agent handoff
+- **Plan storage**: markdown plans saved to `~/.anthem/plans/{project-slug}/` with YAML frontmatter. Plan history and latest draft injected into agent-mode context for seamless plan-to-agent handoff
 - **Auto-label on subtask creation**: newly created subtasks auto-receive the first configured active label (e.g. `todo`) if not already present, ensuring immediate visibility in kanban and dispatch
 - **Dependency ordinal remapping**: `depends_on` in `create_subtasks` uses 1-based ordinals (e.g. `[1, 2]`); the daemon remaps to real GitHub issue IDs after creation
 
@@ -252,7 +252,7 @@ Plan mode uses a **three-phase explorer architecture** for deep, evidence-based 
 
 For trivial requests (scout returns 0 explores), plan mode falls back to a single-run consultation using `plan_max_turns`. All plan mode agents are read-only -- write tools (Write, Edit, MultiEdit) are denied.
 
-Plan output is **format-agnostic**: the synthesize phase can produce rich HTML (for data-rich reports with metrics, charts, and tables) or structured markdown (for simple task plans via `anthem-plan` fenced blocks). In either case, a **plan-card** is sent to the channel for rendering in Prism's chat UI with a "Build" button for one-click dispatch.
+Plan output is **markdown-only**: plan mode uses `buildPlanSystemPrompt` which omits JSON actions and HTML display instructions, ensuring the LLM produces structured markdown via `anthem-plan` fenced blocks. After finalization, a **plan-card** is sent to the channel for rendering in Prism's chat UI with a "Build" button for one-click dispatch. All plans are saved to `~/.anthem/plans/`, ensuring plan context is always available when switching to agent or build mode.
 
 ### Agent Profiles and Harnesses
 
@@ -440,7 +440,7 @@ The orchestrator evolves VOICE.md via the `update_voice` action as it learns pre
 | `~/.anthem/state.json` | Persisted retry queue and cost data |
 | `~/.anthem/audit.db` | SQLite audit log |
 | `~/.anthem/voice-changelog.md` | Log of VOICE.md changes |
-| `~/.anthem/plans/` | Stored plan artifacts (markdown with YAML frontmatter); HTML plans are display-only artifacts (not saved to disk) |
+| `~/.anthem/plans/` | Stored plan artifacts (markdown with YAML frontmatter) |
 
 ## Troubleshooting
 
@@ -460,7 +460,7 @@ The orchestrator evolves VOICE.md via the `update_voice` action as it learns pre
 Anthem uses a **hybrid architecture** inspired by [OpenAI Symphony](https://github.com/openai/symphony):
 
 - **Go daemon** (Phases 1-2): polling, process management, workspace isolation, retry, state persistence, config hot-reload. Validates and executes actions — never makes judgment calls.
-- **Orchestrator agent** (Phase 3a+): three modes of operation — **Plan** (format-agnostic planning — rich HTML for visual analysis or structured markdown stored to `~/.anthem/plans/`; always sends a plan-card to chat), **Agent** (JSON actions with full plan + project context, can edit code directly via Claude Code), and **Build** (plan → subtask issue creation). Falls back to mechanical dispatch on failure.
+- **Orchestrator agent** (Phase 3a+): three modes of operation — **Plan** (markdown-only planning stored to `~/.anthem/plans/`; sends a plan-card to chat with Build button), **Agent** (JSON actions with full plan + project context, can edit code directly via Claude Code), and **Build** (plan → subtask issue creation). Falls back to mechanical dispatch on failure.
 - **Channel system** (Phase 3b): two-way communication via pluggable adapters (Slack, [Dispatch](https://github.com/rauriemo/dispatch) voice, and [Prism](https://github.com/rauriemo/prism) visual workstation). Users send feature requests by text, voice, or file attachment; orchestrator decomposes into subtasks.
 - **Executor agents**: headless Claude Code workers with specialist profiles (coder, architect, tester, debugger). Post-execution reviewer loop with automatic debugger retry.
 - **Audit log + maintenance**: append-only SQLite at `~/.anthem/audit.db` with decision traces. Scanner detects health signals and notifies via channels.
