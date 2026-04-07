@@ -11,6 +11,8 @@ test.txt
 *.out
 cov_*
 coverage/
+coverage_*
+harness
 
 # Claude Code local config
 .claude/

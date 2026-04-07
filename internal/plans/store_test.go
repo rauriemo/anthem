@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSaveAndLoad(t *testing.T) {
@@ -123,11 +124,12 @@ func TestList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	time.Sleep(50 * time.Millisecond) // ensure distinct timestamps on low-resolution clocks
 	pathB, err := store.Save("owner/repo", "Plan B", "body b")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Bump Plan B's Updated so it sorts first.
+	time.Sleep(50 * time.Millisecond)
 	if err := store.Update(pathB, "body b updated"); err != nil {
 		t.Fatal(err)
 	}
