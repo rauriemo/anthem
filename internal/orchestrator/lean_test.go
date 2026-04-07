@@ -221,7 +221,7 @@ func TestHandleUserMessage_SystemStatusRoutesToLean(t *testing.T) {
 	mgr := channel.NewManager(nil)
 	mgr.Register(ch)
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, 0, 0, testLogger())
 
 	cfg := config.DefaultConfig()
 	cfg.Tracker.Kind = "github"
@@ -282,7 +282,7 @@ func TestHandleUserMessage_SystemFastRoutesToLean(t *testing.T) {
 	mgr := channel.NewManager(nil)
 	mgr.Register(ch)
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, 0, 0, testLogger())
 
 	cfg := config.DefaultConfig()
 	cfg.Tracker.Kind = "github"

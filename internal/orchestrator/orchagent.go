@@ -93,6 +93,30 @@ func (s StateSnapshot) Serialize() string {
 	return string(b)
 }
 
+// ExploreRequest is emitted by the scout phase to request a focused research subagent.
+type ExploreRequest struct {
+	Query string `json:"query"`
+	Scope string `json:"scope"`
+	Focus string `json:"focus"`
+}
+
+// ExploreResult carries findings from a single explorer subagent.
+type ExploreResult struct {
+	Query     string   `json:"query"`
+	FilesRead []string `json:"files_examined,omitempty"`
+	Findings  string   `json:"findings"`
+	Gaps      []string `json:"gaps,omitempty"`
+	Summary   string   `json:"summary"`
+	Error     string   `json:"error,omitempty"`
+}
+
+// scoutResponse is the JSON output from the scout phase.
+type scoutResponse struct {
+	Reasoning   string           `json:"reasoning"`
+	Explores    []ExploreRequest `json:"explores"`
+	UserMessage string           `json:"user_message"`
+}
+
 type OrchestratorAgent struct {
 	runner           agent.AgentRunner
 	voiceContent     string
@@ -103,9 +127,11 @@ type OrchestratorAgent struct {
 	maxContextTokens int
 	maxTurns         int
 	planMaxTurns     int
+	explorerMaxTurns int
+	maxExplorers     int
 }
 
-func NewOrchestratorAgent(runner agent.AgentRunner, voiceContent string, maxContextTokens int, maxTurns int, planMaxTurns int, logger *slog.Logger) *OrchestratorAgent {
+func NewOrchestratorAgent(runner agent.AgentRunner, voiceContent string, maxContextTokens int, maxTurns int, planMaxTurns int, explorerMaxTurns int, maxExplorers int, logger *slog.Logger) *OrchestratorAgent {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -115,6 +141,12 @@ func NewOrchestratorAgent(runner agent.AgentRunner, voiceContent string, maxCont
 	if planMaxTurns <= 0 {
 		planMaxTurns = 25
 	}
+	if explorerMaxTurns <= 0 {
+		explorerMaxTurns = 10
+	}
+	if maxExplorers <= 0 {
+		maxExplorers = 5
+	}
 	return &OrchestratorAgent{
 		runner:           runner,
 		voiceContent:     voiceContent,
@@ -122,6 +154,8 @@ func NewOrchestratorAgent(runner agent.AgentRunner, voiceContent string, maxCont
 		maxContextTokens: maxContextTokens,
 		maxTurns:         maxTurns,
 		planMaxTurns:     planMaxTurns,
+		explorerMaxTurns: explorerMaxTurns,
+		maxExplorers:     maxExplorers,
 	}
 }
 
@@ -607,4 +641,231 @@ func (o *OrchestratorAgent) ConsultBuild(ctx context.Context, state StateSnapsho
 		return nil, fmt.Errorf("build consult: parsing actions: %w", err)
 	}
 	return actions, nil
+}
+
+// --- Explorer subagent prompts ---
+
+const scoutPromptSuffix = `
+
+## Scout Mode
+
+You are in SCOUT mode. Your job is to understand the user's request and identify which areas of the codebase need deep investigation. You are NOT producing a plan yet.
+
+Steps:
+1. Read the project file tree and key modules to understand the codebase structure.
+2. Based on the user's request, identify 1-5 areas that need focused research by a specialist explorer agent.
+3. For each area, write a focused research question, a directory scope, and a focus category.
+
+Focus categories: "tests" (test coverage analysis), "security" (input validation, auth, path traversal), "architecture" (code structure, dependencies, patterns), "dependencies" (imports, package relationships), "patterns" (coding conventions, similar implementations to follow).
+
+If the request is trivially simple (e.g. rename a variable, fix a typo) and needs NO deep research, return an empty explores array.
+
+Respond with JSON only:
+{"reasoning": "...", "explores": [{"query": "...", "scope": "...", "focus": "..."}], "user_message": "Brief message to the user about what you are researching (shown while explorers run)"}
+
+Examples of good explore requests:
+- {"query": "What test coverage exists for authentication endpoints and middleware?", "scope": "backend/tests/", "focus": "tests"}
+- {"query": "How is file serving implemented? Check path validation, allowed roots, traversal prevention.", "scope": "backend/", "focus": "security"}
+- {"query": "What patterns does the frontend use for state management and API calls?", "scope": "frontend/src/", "focus": "architecture"}`
+
+const synthesisPromptSuffix = `
+
+## Synthesis Mode
+
+You are in SYNTHESIS mode. Explorer agents have investigated the codebase in parallel and their findings are provided below. Your job is to synthesize these findings into a well-structured plan.
+
+CRITICAL: Every claim in your plan MUST be backed by explorer findings. Do not add tasks based on assumptions — only on verified evidence from the research below.
+
+Produce a structured markdown plan:
+- A title heading (# Title)
+- A "## Analysis" section summarizing key findings from the explorers, citing specific files, functions, and line numbers they reported
+- A "## Tasks" section with numbered subsections (### 1. Task Title) each with:
+  - **Labels:** always start with "todo", then descriptive labels
+  - **Profile:** recommended executor profile (coder, architect, tester, debugger)
+  - **Depends on:** task numbers this depends on, or "none"
+  - **Description:** detailed implementation steps referencing specific files and code the explorers actually found
+- If explorers reported gaps or errors, note them in the Analysis section
+- If an existing plan draft is in the state, refine it using the new research rather than starting from scratch
+- Do NOT output JSON actions. Do NOT create issues, dispatch, or execute anything.
+- Wrap the plan in: ` + "```anthem-plan\n...\n```" + `
+- You may include conversational commentary outside the fenced block.`
+
+// BuildExplorerPrompt constructs a focused prompt for a single explorer subagent.
+func BuildExplorerPrompt(req ExploreRequest, fileTree string) string {
+	var b strings.Builder
+	b.WriteString("## Codebase Research Agent\n\n")
+	b.WriteString("You are a focused research agent investigating ONE specific question. Be thorough and exhaustive.\n\n")
+	b.WriteString("### Research Question\n\n")
+	b.WriteString(req.Query)
+	b.WriteString("\n\n### Focus Area\n\n")
+	b.WriteString(req.Focus)
+	b.WriteString("\n\n### Scope\n\n")
+	b.WriteString("Investigate within: " + req.Scope)
+	b.WriteString("\n\n### Instructions\n\n")
+	b.WriteString("- Use Read, Grep, Glob to explore the codebase exhaustively within your scope\n")
+	b.WriteString("- Check EVERY relevant file, do not assume or skip\n")
+	b.WriteString("- Cite specific file paths, function names, and line numbers\n")
+	b.WriteString("- Do NOT make recommendations or create plans — just report what you find\n")
+	b.WriteString("- Report what EXISTS, what is MISSING, and what PATTERNS you observe\n\n")
+	b.WriteString("### Output Format\n\n")
+	b.WriteString("End your response with a structured findings block:\n")
+	b.WriteString("```explorer-findings\n")
+	b.WriteString(`{"query": "your question", "files_examined": ["path1", "path2"], "findings": "detailed findings text", "gaps": ["gap1", "gap2"], "summary": "one paragraph summary"}`)
+	b.WriteString("\n```\n")
+	if fileTree != "" {
+		b.WriteString("\n### Project File Tree\n\n```\n")
+		b.WriteString(fileTree)
+		b.WriteString("\n```\n")
+	}
+	return b.String()
+}
+
+// parseScoutResponse extracts explore requests from the scout's JSON output.
+func parseScoutResponse(output string) (*scoutResponse, error) {
+	start := strings.Index(output, "{")
+	if start == -1 {
+		return nil, fmt.Errorf("no JSON object found in scout output")
+	}
+
+	depth := 0
+	end := -1
+	for i := start; i < len(output); i++ {
+		switch output[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				end = i + 1
+				break
+			}
+		}
+		if end != -1 {
+			break
+		}
+	}
+	if end == -1 {
+		return nil, fmt.Errorf("unmatched braces in scout output")
+	}
+
+	var resp scoutResponse
+	if err := json.Unmarshal([]byte(output[start:end]), &resp); err != nil {
+		return nil, fmt.Errorf("parsing scout response: %w", err)
+	}
+	return &resp, nil
+}
+
+// parseExplorerFindings extracts the explorer-findings JSON block from explorer output.
+func parseExplorerFindings(output string) (*ExploreResult, error) {
+	const marker = "```explorer-findings"
+	idx := strings.Index(output, marker)
+	if idx == -1 {
+		return &ExploreResult{
+			Findings: output,
+			Summary:  truncateForSummary(output, 500),
+		}, nil
+	}
+	start := idx + len(marker)
+	if start < len(output) && output[start] == '\n' {
+		start++
+	}
+	endMarker := strings.Index(output[start:], "```")
+	var jsonStr string
+	if endMarker == -1 {
+		jsonStr = output[start:]
+	} else {
+		jsonStr = output[start : start+endMarker]
+	}
+	jsonStr = strings.TrimSpace(jsonStr)
+
+	var result ExploreResult
+	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+		return &ExploreResult{
+			Findings: output,
+			Summary:  truncateForSummary(output, 500),
+		}, nil
+	}
+	return &result, nil
+}
+
+func truncateForSummary(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// ScoutPlan runs the scout phase: identifies areas needing deep research.
+func (o *OrchestratorAgent) ScoutPlan(ctx context.Context, state StateSnapshot, model string, onStream func(string)) ([]ExploreRequest, string, error) {
+	prompt := buildSystemPrompt(o.voiceContent) + scoutPromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
+
+	result, err := o.runner.Run(ctx, types.RunOpts{
+		Prompt:         prompt,
+		Model:          model,
+		PermissionMode: "bypassPermissions",
+		MaxTurns:       8,
+		DeniedTools:    []string{"Write", "Edit", "MultiEdit"},
+		OnStream:       onStream,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("scout plan: %w", err)
+	}
+
+	o.recordResult(result)
+
+	resp, err := parseScoutResponse(result.Output)
+	if err != nil {
+		o.logger.Warn("scout response parse failed, falling back to single-run plan", "error", err)
+		return nil, "", err
+	}
+
+	cap := o.maxExplorers
+	if len(resp.Explores) > cap {
+		resp.Explores = resp.Explores[:cap]
+	}
+
+	return resp.Explores, resp.UserMessage, nil
+}
+
+// SynthesizePlan runs the synthesis phase: produces a plan from explorer findings.
+func (o *OrchestratorAgent) SynthesizePlan(ctx context.Context, state StateSnapshot, findings []ExploreResult, model string, onStream func(string)) (string, error) {
+	var findingsText strings.Builder
+	findingsText.WriteString("\n\n## Explorer Findings\n\n")
+	for i, f := range findings {
+		findingsText.WriteString(fmt.Sprintf("### Explorer %d: %s\n\n", i+1, f.Query))
+		if f.Error != "" {
+			findingsText.WriteString(fmt.Sprintf("**Error:** %s\n\n", f.Error))
+			continue
+		}
+		if f.Summary != "" {
+			findingsText.WriteString(fmt.Sprintf("**Summary:** %s\n\n", f.Summary))
+		}
+		if f.Findings != "" {
+			findingsText.WriteString(f.Findings + "\n\n")
+		}
+		if len(f.Gaps) > 0 {
+			findingsText.WriteString("**Gaps:** " + strings.Join(f.Gaps, "; ") + "\n\n")
+		}
+		if len(f.FilesRead) > 0 {
+			findingsText.WriteString(fmt.Sprintf("**Files examined:** %d\n\n", len(f.FilesRead)))
+		}
+	}
+
+	prompt := buildSystemPrompt(o.voiceContent) + synthesisPromptSuffix + findingsText.String() + "\n\n## Current State\n\n" + state.Serialize()
+
+	result, err := o.runner.Run(ctx, types.RunOpts{
+		Prompt:         prompt,
+		Model:          model,
+		PermissionMode: "bypassPermissions",
+		MaxTurns:       o.planMaxTurns,
+		DeniedTools:    []string{"Write", "Edit", "MultiEdit"},
+		OnStream:       onStream,
+	})
+	if err != nil {
+		return "", fmt.Errorf("synthesize plan: %w", err)
+	}
+
+	o.recordResult(result)
+	o.warnIfHighTokens(result)
+	return result.Output, nil
 }

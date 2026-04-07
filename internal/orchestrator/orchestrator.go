@@ -2235,6 +2235,8 @@ func extractPlanBlock(output string) string {
 	return output[start : start+end]
 }
 
+const explorerCostTaskID = "__explorer__"
+
 func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.IncomingMessage, model string) {
 	o.logger.Info("handling plan message", "sender", msg.SenderID, "text_len", len(msg.Text))
 
@@ -2255,7 +2257,68 @@ func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.Incomi
 		}
 	}
 
-	// Build snapshot with plan context
+	snap := o.buildPlanSnapshot(ctx, msg, cleanText)
+
+	// Phase 1: Scout — identify areas needing deep research
+	explores, userMsg, scoutErr := o.orchAgent.ScoutPlan(ctx, snap, model, onStream)
+	o.recordOrchCost()
+
+	if o.channelMgr != nil {
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			StreamDone: true,
+			ThreadID:   msg.ThreadID,
+		})
+	}
+
+	// Fallback: if scout failed or returned 0 explores, use single-run ConsultPlan
+	if scoutErr != nil || len(explores) == 0 {
+		if scoutErr != nil {
+			o.logger.Warn("scout phase failed, falling back to single-run plan", "error", scoutErr)
+		} else {
+			o.logger.Info("scout returned 0 explores, using single-run plan mode")
+		}
+		o.handlePlanFallback(ctx, msg, snap, model, onStream)
+		return
+	}
+
+	// Send scout message to user while explorers run
+	if userMsg != "" {
+		o.sendFollowUp(ctx, msg, userMsg)
+	}
+
+	// Phase 2: Run explorer subagents in parallel
+	o.logger.Info("launching explorer subagents", "count", len(explores))
+	fileTree := ""
+	if snap.Project != nil {
+		fileTree = snap.Project.FileTree
+	}
+	findings := o.runExplorers(ctx, explores, model, fileTree, func(status string) {
+		o.sendFollowUp(ctx, msg, status)
+	})
+
+	// Phase 3: Synthesize plan from explorer findings
+	o.logger.Info("synthesizing plan from explorer findings", "findings_count", len(findings))
+	output, err := o.orchAgent.SynthesizePlan(ctx, snap, findings, model, onStream)
+	o.recordOrchCost()
+
+	if o.channelMgr != nil {
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			StreamDone: true,
+			ThreadID:   msg.ThreadID,
+		})
+	}
+
+	if err != nil {
+		o.logger.Warn("synthesis phase failed, falling back to single-run plan", "error", err)
+		o.handlePlanFallback(ctx, msg, snap, model, onStream)
+		return
+	}
+
+	o.finalizePlan(ctx, msg, output)
+}
+
+// buildPlanSnapshot constructs the state snapshot with plan context for plan mode.
+func (o *Orchestrator) buildPlanSnapshot(ctx context.Context, msg channel.IncomingMessage, cleanText string) StateSnapshot {
 	var tasks []types.Task
 	if o.tracker != nil {
 		var err error
@@ -2268,7 +2331,6 @@ func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.Incomi
 	snap.UserMessage = &UserMessageContext{Text: cleanText}
 	snap.SourceChannel = msg.ChannelKind
 
-	// Load active plan draft and history
 	if o.planStore != nil {
 		slug := o.projectSlug()
 		if draft, err := o.planStore.LatestDraft(slug); err == nil && draft != nil {
@@ -2289,7 +2351,11 @@ func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.Incomi
 			}
 		}
 	}
+	return snap
+}
 
+// handlePlanFallback runs the original single-run ConsultPlan path.
+func (o *Orchestrator) handlePlanFallback(ctx context.Context, msg channel.IncomingMessage, snap StateSnapshot, model string, onStream func(string)) {
 	output, err := o.orchAgent.ConsultPlan(ctx, snap, model, onStream)
 	o.recordOrchCost()
 
@@ -2306,13 +2372,16 @@ func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.Incomi
 		return
 	}
 
-	// Extract the plan block from the LLM output
+	o.finalizePlan(ctx, msg, output)
+}
+
+// finalizePlan extracts, saves, and broadcasts the plan artifact.
+func (o *Orchestrator) finalizePlan(ctx context.Context, msg channel.IncomingMessage, output string) {
 	planContent := extractPlanBlock(output)
 	if planContent == "" {
 		planContent = output
 	}
 
-	// Save or update the plan file
 	var planPath string
 	if o.planStore != nil {
 		slug := o.projectSlug()
@@ -2334,7 +2403,6 @@ func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.Incomi
 		}
 	}
 
-	// Send plan as a display artifact with kind "plan"
 	if o.channelMgr != nil {
 		component := map[string]any{
 			"kind":     "plan",
@@ -2349,6 +2417,61 @@ func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.Incomi
 	}
 
 	o.recordAudit(ctx, "channel.plan_proposed", "", strPtr("plan"))
+}
+
+// runExplorers spawns parallel Claude Code processes for focused codebase research.
+func (o *Orchestrator) runExplorers(ctx context.Context, reqs []ExploreRequest, model string, fileTree string, onStatus func(string)) []ExploreResult {
+	results := make([]ExploreResult, len(reqs))
+	var wg sync.WaitGroup
+
+	for i, req := range reqs {
+		wg.Add(1)
+		go func(idx int, r ExploreRequest) {
+			defer wg.Done()
+
+			prompt := BuildExplorerPrompt(r, fileTree)
+
+			o.logger.Info("explorer started", "index", idx, "focus", r.Focus, "scope", r.Scope)
+
+			result, err := o.runner.Run(ctx, types.RunOpts{
+				Prompt:         prompt,
+				Model:          model,
+				PermissionMode: "bypassPermissions",
+				MaxTurns:       o.orchAgent.explorerMaxTurns,
+				DeniedTools:    []string{"Write", "Edit", "MultiEdit"},
+			})
+
+			if err != nil {
+				o.logger.Warn("explorer failed", "index", idx, "error", err)
+				results[idx] = ExploreResult{
+					Query: r.Query,
+					Error: fmt.Sprintf("explorer failed: %v", err),
+				}
+				onStatus(fmt.Sprintf("Explorer %d/%d failed: %s", idx+1, len(reqs), r.Focus))
+				return
+			}
+
+			if o.costTracker != nil {
+				o.costTracker.Record(cost.SessionCost{
+					TaskID:    explorerCostTaskID,
+					SessionID: result.SessionID,
+					TokensIn:  result.TokensIn,
+					TokensOut: result.TokensOut,
+					CostUSD:   result.CostUSD,
+				})
+			}
+
+			findings, _ := parseExplorerFindings(result.Output)
+			findings.Query = r.Query
+			results[idx] = *findings
+
+			o.logger.Info("explorer completed", "index", idx, "focus", r.Focus, "files_read", len(findings.FilesRead))
+			onStatus(fmt.Sprintf("Explorer %d/%d complete: %s", idx+1, len(reqs), r.Focus))
+		}(i, req)
+	}
+
+	wg.Wait()
+	return results
 }
 
 func (o *Orchestrator) handleBuildMessage(ctx context.Context, msg channel.IncomingMessage, model string) {

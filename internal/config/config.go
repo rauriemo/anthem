@@ -115,6 +115,8 @@ type OrchestratorConfig struct {
 	StallTimeoutMS   int  `yaml:"stall_timeout_ms"`
 	MaxTurns         int  `yaml:"max_turns"`
 	PlanMaxTurns     int  `yaml:"plan_max_turns"`
+	ExplorerMaxTurns int  `yaml:"explorer_max_turns"`
+	MaxExplorers     int  `yaml:"max_explorers"`
 }
 
 type ServerConfig struct {
@@ -137,6 +139,7 @@ func DefaultConfig() Config {
 				"architect": {PromptPrefix: "You are an architect agent. Analyze and design, do not write code.", DeniedTools: []string{"Write", "Edit", "Bash"}},
 				"tester":    {PromptPrefix: "You are a testing agent. Focus on writing comprehensive tests."},
 				"debugger":  {PromptPrefix: "You are a debugger agent. A previous attempt failed. Analyze the feedback carefully and fix the issues."},
+				"explorer":  {PromptPrefix: "You are a codebase research agent. Investigate thoroughly, cite specific files and line numbers. Do not modify any files.", DeniedTools: []string{"Write", "Edit", "MultiEdit"}},
 			},
 		},
 		System: SystemConfig{},
@@ -146,6 +149,8 @@ func DefaultConfig() Config {
 			StallTimeoutMS:   60000,
 			MaxTurns:         10,
 			PlanMaxTurns:     25,
+			ExplorerMaxTurns: 10,
+			MaxExplorers:     5,
 		},
 		Maintenance: MaintenanceConfig{
 			ScanIntervalMS:        600000,

@@ -25,7 +25,7 @@ func newPlanTestOrch(t *testing.T, orchRunner *agent.MockRunner) (*Orchestrator,
 	mgr := channel.NewManager(nil)
 	mgr.Register(ch)
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 10, 25, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 10, 25, 10, 5, testLogger())
 
 	cfg := config.DefaultConfig()
 	cfg.Tracker.Kind = "github"
@@ -57,9 +57,19 @@ func TestHandlePlanMessage_RoutesCorrectly(t *testing.T) {
 	planOutput := "Here's a plan:\n```anthem-plan\n# My Plan\n\n## Tasks\n\n### 1. Do X\n- **Labels:** area:backend\n```\n"
 
 	orchRunner := agent.NewMockRunner()
+	callCount := 0
 	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		callCount++
+		if strings.Contains(opts.Prompt, "Scout Mode") {
+			// Scout phase: return empty explores to trigger fallback
+			return &types.RunResult{
+				SessionID: "scout-s1",
+				Output:    `{"reasoning": "simple request", "explores": [], "user_message": ""}`,
+				TokensIn:  50, TokensOut: 20,
+			}, nil
+		}
 		if !strings.Contains(opts.Prompt, "PLANNING mode") {
-			t.Error("expected plan mode prompt suffix")
+			t.Error("expected plan mode prompt suffix on fallback")
 		}
 		return &types.RunResult{
 			SessionID: "plan-s1",
@@ -102,7 +112,14 @@ func TestHandlePlanMessage_RoutesCorrectly(t *testing.T) {
 
 func TestHandlePlanMessage_SavesPlanFile(t *testing.T) {
 	orchRunner := agent.NewMockRunner()
-	orchRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		if strings.Contains(opts.Prompt, "Scout Mode") {
+			return &types.RunResult{
+				SessionID: "scout-s1",
+				Output:    `{"reasoning": "simple", "explores": [], "user_message": ""}`,
+				TokensIn:  10, TokensOut: 5,
+			}, nil
+		}
 		return &types.RunResult{
 			SessionID: "plan-s1",
 			Output:    "```anthem-plan\n# Feature X\n\n## Tasks\n\n### 1. Task A\n```",
@@ -135,10 +152,7 @@ func TestHandlePlanMessage_SavesPlanFile(t *testing.T) {
 func TestHandleBuildMessage_CreatesSubtasks(t *testing.T) {
 	orchRunner := agent.NewMockRunner()
 
-	// First call is from Save (plan creation), second from build
-	callCount := 0
 	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
-		callCount++
 		if strings.Contains(opts.Prompt, "Build Mode") {
 			return &types.RunResult{
 				SessionID: "build-s1",
@@ -149,7 +163,13 @@ func TestHandleBuildMessage_CreatesSubtasks(t *testing.T) {
 				TokensIn: 100, TokensOut: 80,
 			}, nil
 		}
-		// Plan mode call
+		if strings.Contains(opts.Prompt, "Scout Mode") {
+			return &types.RunResult{
+				SessionID: "scout-s1",
+				Output:    `{"reasoning": "simple", "explores": [], "user_message": ""}`,
+				TokensIn:  10, TokensOut: 5,
+			}, nil
+		}
 		return &types.RunResult{
 			SessionID: "plan-s1",
 			Output:    "```anthem-plan\n# Build Test\n\n## Tasks\n\n### 1. Task A\n```",
@@ -241,6 +261,13 @@ func TestHandleBuildMessage_NoTracker_FallsBackToDraft(t *testing.T) {
 			return &types.RunResult{
 				SessionID: "build-s1",
 				Output:    `{"reasoning": "building", "actions": [{"type": "reply", "body": "Done."}]}`,
+				TokensIn:  10, TokensOut: 5,
+			}, nil
+		}
+		if strings.Contains(opts.Prompt, "Scout Mode") {
+			return &types.RunResult{
+				SessionID: "scout-s1",
+				Output:    `{"reasoning": "simple", "explores": [], "user_message": ""}`,
 				TokensIn:  10, TokensOut: 5,
 			}, nil
 		}
@@ -351,6 +378,36 @@ func TestPlanModePromptContents(t *testing.T) {
 	}
 }
 
+func TestScoutPromptContents(t *testing.T) {
+	checks := []string{
+		"Scout Mode",
+		"explores",
+		"query",
+		"scope",
+		"focus",
+		"trivially simple",
+	}
+	for _, check := range checks {
+		if !strings.Contains(scoutPromptSuffix, check) {
+			t.Errorf("scoutPromptSuffix missing %q", check)
+		}
+	}
+}
+
+func TestSynthesisPromptContents(t *testing.T) {
+	checks := []string{
+		"Synthesis Mode",
+		"Explorer agents",
+		"anthem-plan",
+		"MUST be backed by explorer findings",
+	}
+	for _, check := range checks {
+		if !strings.Contains(synthesisPromptSuffix, check) {
+			t.Errorf("synthesisPromptSuffix missing %q", check)
+		}
+	}
+}
+
 func TestConsultPlan_UsesPlanMaxTurns(t *testing.T) {
 	orchRunner := agent.NewMockRunner()
 	var capturedOpts types.RunOpts
@@ -363,7 +420,7 @@ func TestConsultPlan_UsesPlanMaxTurns(t *testing.T) {
 		}, nil
 	}
 
-	oa := NewOrchestratorAgent(orchRunner, "", 100000, 10, 25, testLogger())
+	oa := NewOrchestratorAgent(orchRunner, "", 100000, 10, 25, 10, 5, testLogger())
 	_, err := oa.ConsultPlan(context.Background(), StateSnapshot{}, "", nil)
 	if err != nil {
 		t.Fatalf("ConsultPlan() error: %v", err)
@@ -381,6 +438,150 @@ func TestConsultPlan_UsesPlanMaxTurns(t *testing.T) {
 		if capturedOpts.DeniedTools[i] != tool {
 			t.Errorf("ConsultPlan DeniedTools[%d] = %q, want %q", i, capturedOpts.DeniedTools[i], tool)
 		}
+	}
+}
+
+func TestScoutPlan_ParsesExploreRequests(t *testing.T) {
+	orchRunner := agent.NewMockRunner()
+	orchRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{
+			SessionID: "scout-s1",
+			Output: `{"reasoning": "Need to check tests and security", "explores": [
+				{"query": "Check test coverage for auth", "scope": "backend/tests/", "focus": "tests"},
+				{"query": "Check path traversal prevention", "scope": "backend/", "focus": "security"}
+			], "user_message": "Researching your codebase..."}`,
+			TokensIn: 50, TokensOut: 30,
+		}, nil
+	}
+
+	oa := NewOrchestratorAgent(orchRunner, "", 100000, 10, 25, 10, 5, testLogger())
+	explores, userMsg, err := oa.ScoutPlan(context.Background(), StateSnapshot{}, "", nil)
+	if err != nil {
+		t.Fatalf("ScoutPlan() error: %v", err)
+	}
+	if len(explores) != 2 {
+		t.Fatalf("expected 2 explores, got %d", len(explores))
+	}
+	if explores[0].Focus != "tests" {
+		t.Errorf("explore[0].Focus = %q, want tests", explores[0].Focus)
+	}
+	if explores[1].Focus != "security" {
+		t.Errorf("explore[1].Focus = %q, want security", explores[1].Focus)
+	}
+	if userMsg != "Researching your codebase..." {
+		t.Errorf("user_message = %q, want 'Researching your codebase...'", userMsg)
+	}
+}
+
+func TestScoutPlan_CapsAtMaxExplorers(t *testing.T) {
+	orchRunner := agent.NewMockRunner()
+	orchRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{
+			SessionID: "scout-s1",
+			Output: `{"reasoning": "many areas", "explores": [
+				{"query": "q1", "scope": ".", "focus": "tests"},
+				{"query": "q2", "scope": ".", "focus": "security"},
+				{"query": "q3", "scope": ".", "focus": "architecture"}
+			], "user_message": ""}`,
+			TokensIn: 50, TokensOut: 30,
+		}, nil
+	}
+
+	oa := NewOrchestratorAgent(orchRunner, "", 100000, 10, 25, 10, 2, testLogger())
+	explores, _, err := oa.ScoutPlan(context.Background(), StateSnapshot{}, "", nil)
+	if err != nil {
+		t.Fatalf("ScoutPlan() error: %v", err)
+	}
+	if len(explores) != 2 {
+		t.Errorf("expected explores capped at 2 (maxExplorers), got %d", len(explores))
+	}
+}
+
+func TestParseExplorerFindings(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantSum string
+		wantErr bool
+	}{
+		{
+			name:    "valid findings block",
+			input:   "Some text\n```explorer-findings\n{\"query\": \"test q\", \"findings\": \"found X\", \"summary\": \"X exists\"}\n```\nMore text",
+			wantSum: "X exists",
+		},
+		{
+			name:    "no findings block falls back to raw output",
+			input:   "Just raw text about what I found",
+			wantSum: "Just raw text about what I found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := parseExplorerFindings(tt.input)
+			if err != nil {
+				t.Fatalf("parseExplorerFindings() error: %v", err)
+			}
+			if result.Summary != tt.wantSum {
+				t.Errorf("summary = %q, want %q", result.Summary, tt.wantSum)
+			}
+		})
+	}
+}
+
+func TestBuildExplorerPrompt(t *testing.T) {
+	req := ExploreRequest{
+		Query: "Check test coverage",
+		Scope: "backend/tests/",
+		Focus: "tests",
+	}
+	prompt := BuildExplorerPrompt(req, "src/\n  main.go\n  lib/")
+	checks := []string{
+		"Research Agent",
+		"Check test coverage",
+		"tests",
+		"backend/tests/",
+		"explorer-findings",
+		"main.go",
+	}
+	for _, check := range checks {
+		if !strings.Contains(prompt, check) {
+			t.Errorf("explorer prompt missing %q", check)
+		}
+	}
+}
+
+func TestSynthesizePlan_IncludesFindings(t *testing.T) {
+	orchRunner := agent.NewMockRunner()
+	var capturedPrompt string
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		capturedPrompt = opts.Prompt
+		return &types.RunResult{
+			SessionID: "synth-s1",
+			Output:    "```anthem-plan\n# Synthesized Plan\n```",
+			TokensIn:  50, TokensOut: 30,
+		}, nil
+	}
+
+	oa := NewOrchestratorAgent(orchRunner, "", 100000, 10, 25, 10, 5, testLogger())
+	findings := []ExploreResult{
+		{Query: "Check tests", Summary: "No tests for /api/costs", Findings: "Detailed finding text"},
+		{Query: "Check security", Error: "explorer timed out"},
+	}
+	output, err := oa.SynthesizePlan(context.Background(), StateSnapshot{}, findings, "", nil)
+	if err != nil {
+		t.Fatalf("SynthesizePlan() error: %v", err)
+	}
+	if !strings.Contains(output, "Synthesized Plan") {
+		t.Error("expected plan output from synthesis")
+	}
+	if !strings.Contains(capturedPrompt, "No tests for /api/costs") {
+		t.Error("synthesis prompt should include explorer findings summary")
+	}
+	if !strings.Contains(capturedPrompt, "explorer timed out") {
+		t.Error("synthesis prompt should include explorer errors")
+	}
+	if !strings.Contains(capturedPrompt, "Synthesis Mode") {
+		t.Error("synthesis prompt should include synthesis mode suffix")
 	}
 }
 

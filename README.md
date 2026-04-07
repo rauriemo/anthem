@@ -236,12 +236,20 @@ orchestrator:
   enabled: true                 # false = mechanical dispatch only
   max_context_tokens: 80000     # Token threshold before session refresh
   max_turns: 10                 # Turn budget for agent/build mode consults
-  plan_max_turns: 25            # Turn budget for plan mode (research-heavy)
+  plan_max_turns: 25            # Fallback turn budget for simple plan requests
+  explorer_max_turns: 10        # Turn budget per explorer subagent
+  max_explorers: 5              # Max parallel explorer subagents
 ```
 
 When enabled, the orchestrator agent (a persistent Claude session) plans task dispatch in waves. When disabled or on failure, Anthem falls back to mechanical dispatch.
 
-Plan mode gets a separate, higher turn budget (`plan_max_turns`, default 25) to support deep codebase research before synthesizing a plan. Plan mode is also read-only -- write tools (Write, Edit, MultiEdit) are denied, ensuring the agent explores without accidentally modifying files.
+Plan mode uses a **three-phase explorer architecture** for deep, evidence-based planning:
+
+1. **Scout** (8 turns) -- the plan agent reads the file tree, identifies 1-5 areas needing focused research
+2. **Explore** (parallel) -- the Go daemon spawns parallel Claude Code processes, one per area, each with a focused research question and read-only tools
+3. **Synthesize** (10 turns) -- the plan agent receives all explorer findings and produces a plan backed by verified evidence
+
+For trivial requests (scout returns 0 explores), plan mode falls back to a single-run consultation using `plan_max_turns`. All plan mode agents are read-only -- write tools (Write, Edit, MultiEdit) are denied.
 
 ### Agent Profiles
 
