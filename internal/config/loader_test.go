@@ -150,8 +150,8 @@ body`,
 				if cfg.Agent.Command != "claude" {
 					t.Errorf("default agent.command = %q, want claude", cfg.Agent.Command)
 				}
-				if cfg.Agent.MaxConcurrent != 3 {
-					t.Errorf("default agent.max_concurrent = %d, want 3", cfg.Agent.MaxConcurrent)
+				if cfg.Agent.MaxConcurrent != 15 {
+					t.Errorf("default agent.max_concurrent = %d, want 15", cfg.Agent.MaxConcurrent)
 				}
 				// system defaults are all zero-values now
 			},
