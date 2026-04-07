@@ -25,7 +25,7 @@ func newPlanTestOrch(t *testing.T, orchRunner *agent.MockRunner) (*Orchestrator,
 	mgr := channel.NewManager(nil)
 	mgr.Register(ch)
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 10, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 10, 25, testLogger())
 
 	cfg := config.DefaultConfig()
 	cfg.Tracker.Kind = "github"
@@ -335,14 +335,51 @@ func TestExtractPlanTitle(t *testing.T) {
 func TestPlanModePromptContents(t *testing.T) {
 	checks := []string{
 		"PLANNING mode",
+		"READ-ONLY",
+		"Stage 1: Research",
+		"Stage 2: Synthesis",
+		"MUST explore",
+		"at least 5 tool calls",
 		"Do NOT output JSON actions",
 		"anthem-plan",
-		"create issues",
 		"todo",
 	}
 	for _, check := range checks {
 		if !strings.Contains(planModePromptSuffix, check) {
 			t.Errorf("planModePromptSuffix missing %q", check)
+		}
+	}
+}
+
+func TestConsultPlan_UsesPlanMaxTurns(t *testing.T) {
+	orchRunner := agent.NewMockRunner()
+	var capturedOpts types.RunOpts
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		capturedOpts = opts
+		return &types.RunResult{
+			SessionID: "plan-s1",
+			Output:    "```anthem-plan\n# Test\n```",
+			TokensIn:  10, TokensOut: 5,
+		}, nil
+	}
+
+	oa := NewOrchestratorAgent(orchRunner, "", 100000, 10, 25, testLogger())
+	_, err := oa.ConsultPlan(context.Background(), StateSnapshot{}, "", nil)
+	if err != nil {
+		t.Fatalf("ConsultPlan() error: %v", err)
+	}
+
+	if capturedOpts.MaxTurns != 25 {
+		t.Errorf("ConsultPlan MaxTurns = %d, want 25 (planMaxTurns)", capturedOpts.MaxTurns)
+	}
+
+	wantDenied := []string{"Write", "Edit", "MultiEdit"}
+	if len(capturedOpts.DeniedTools) != len(wantDenied) {
+		t.Fatalf("ConsultPlan DeniedTools = %v, want %v", capturedOpts.DeniedTools, wantDenied)
+	}
+	for i, tool := range wantDenied {
+		if capturedOpts.DeniedTools[i] != tool {
+			t.Errorf("ConsultPlan DeniedTools[%d] = %q, want %q", i, capturedOpts.DeniedTools[i], tool)
 		}
 	}
 }

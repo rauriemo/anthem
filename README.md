@@ -235,9 +235,13 @@ In `dontAsk` mode (the default), only tools in `allowed_tools` are auto-approved
 orchestrator:
   enabled: true                 # false = mechanical dispatch only
   max_context_tokens: 80000     # Token threshold before session refresh
+  max_turns: 10                 # Turn budget for agent/build mode consults
+  plan_max_turns: 25            # Turn budget for plan mode (research-heavy)
 ```
 
 When enabled, the orchestrator agent (a persistent Claude session) plans task dispatch in waves. When disabled or on failure, Anthem falls back to mechanical dispatch.
+
+Plan mode gets a separate, higher turn budget (`plan_max_turns`, default 25) to support deep codebase research before synthesizing a plan. Plan mode is also read-only -- write tools (Write, Edit, MultiEdit) are denied, ensuring the agent explores without accidentally modifying files.
 
 ### Agent Profiles
 

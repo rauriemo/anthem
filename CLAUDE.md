@@ -54,7 +54,7 @@ These are the source of truth for what to build and how.
 - **Executor-reviewer loop (Phase 4)**: After executor completion, an optional reviewer agent checks the output. If it flags issues, the task re-enters the retry queue with feedback. Opt-in via `review_enabled: true` in WORKFLOW.md `agent:` block. `review_max_turns` (default 3) gives the reviewer enough turns to read files and verify. `review_max_retries` (default 1) prevents infinite loops.
 - **Specialist agent profiles (Phase 4)**: Named profiles (architect, coder, tester, debugger) with different prompt templates, tool configs, and model settings. The orchestrator selects a profile when dispatching via `profile` field on the `dispatch` action. Reviewer-failed retries automatically use the `debugger` profile.
 - **Decision trace system (Phase 4)**: `traces` table in `audit.db` captures every LLM interaction (orchestrator consults, executor runs, reviewer judgments, lean messages) with prompt/response previews, token counts, cost, duration, and linked task/wave/session IDs. Query methods enable post-hoc debugging of agent decisions.
-- **Orchestrator codebase awareness (Phase 4)**: The orchestrator agent uses Claude Code's built-in tools (Read, Grep, Glob) during planning instead of working blind from static docs. The prompt role changes from "stateless allocator" to "intelligent orchestrator with codebase access." `orchestrator.max_turns` config (default 10) controls exploration depth.
+- **Orchestrator codebase awareness (Phase 4)**: The orchestrator agent uses Claude Code's built-in tools (Read, Grep, Glob) during planning instead of working blind from static docs. The prompt role changes from "stateless allocator" to "intelligent orchestrator with codebase access." `orchestrator.max_turns` config (default 10) controls exploration depth for agent/build mode. `orchestrator.plan_max_turns` (default 25) gives plan mode a separate, higher turn budget for research-heavy consultations. Plan mode is read-only (Write/Edit/MultiEdit denied) and enforces a research-first workflow with a minimum 5-tool-call floor before plan synthesis.
 
 ## Coding Standards
 
@@ -152,6 +152,7 @@ These are the source of truth for what to build and how.
 - DependsOn ordinal remapping: `create_subtasks` uses 1-based ordinals in `depends_on`; daemon remaps to real GitHub issue IDs in a two-pass creation flow.
 - Strengthened build-mode prompt: explicitly requires `create_subtasks` action emission, forbids completion hallucination.
 - Plan context injection in agent mode: `ActivePlan` (latest draft) and `PlanHistory` (all plans) injected into StateSnapshot for seamless plan-to-agent handoff.
+- Plan mode deep research: separate `plan_max_turns` config (default 25) gives plan mode a higher turn budget than agent/build (default 10). Plan mode prompt rewritten to enforce research-first workflow: Stage 1 (mandatory codebase exploration with minimum 5 tool calls) then Stage 2 (evidence-based plan synthesis). Write tools denied in plan mode via `DeniedTools` on `RunOpts`.
 
 Update this section as phases are completed.
 

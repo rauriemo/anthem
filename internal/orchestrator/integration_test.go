@@ -91,7 +91,7 @@ func TestTick_DirtySnapshotGating(t *testing.T) {
 	cfg.Tracker.Repo = "t/r"
 	cfg.Polling.IntervalMS = 100
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, testLogger())
 
 	orch := New(Opts{
 		Config:       &cfg,
@@ -153,7 +153,7 @@ func TestTick_FiltersReplyAndDisplayFromPollingCycle(t *testing.T) {
 	cfg.Tracker.Repo = "t/r"
 	cfg.Polling.IntervalMS = 100
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, testLogger())
 
 	orch := New(Opts{
 		Config:         &cfg,
@@ -266,7 +266,7 @@ func TestTick_OrchestratorFallback(t *testing.T) {
 	cfg.Tracker.Repo = "t/r"
 	cfg.Polling.IntervalMS = 100000
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, testLogger())
 
 	orch := New(Opts{
 		Config:       &cfg,

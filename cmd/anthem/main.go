@@ -203,7 +203,7 @@ func runCmd() *cobra.Command {
 			var orchAgent *orchestrator.OrchestratorAgent
 			if cfg.Orchestrator.Enabled {
 				orchAgent = orchestrator.NewOrchestratorAgent(
-					runner, voiceContent, cfg.Orchestrator.MaxContextTokens, cfg.Orchestrator.MaxTurns, logger,
+					runner, voiceContent, cfg.Orchestrator.MaxContextTokens, cfg.Orchestrator.MaxTurns, cfg.Orchestrator.PlanMaxTurns, logger,
 				)
 			}
 

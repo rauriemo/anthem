@@ -114,6 +114,7 @@ type OrchestratorConfig struct {
 	MaxContextTokens int  `yaml:"max_context_tokens"`
 	StallTimeoutMS   int  `yaml:"stall_timeout_ms"`
 	MaxTurns         int  `yaml:"max_turns"`
+	PlanMaxTurns     int  `yaml:"plan_max_turns"`
 }
 
 type ServerConfig struct {
@@ -144,6 +145,7 @@ func DefaultConfig() Config {
 			MaxContextTokens: 80000,
 			StallTimeoutMS:   60000,
 			MaxTurns:         10,
+			PlanMaxTurns:     25,
 		},
 		Maintenance: MaintenanceConfig{
 			ScanIntervalMS:        600000,

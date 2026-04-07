@@ -102,14 +102,18 @@ type OrchestratorAgent struct {
 	totalCostUSD     float64
 	maxContextTokens int
 	maxTurns         int
+	planMaxTurns     int
 }
 
-func NewOrchestratorAgent(runner agent.AgentRunner, voiceContent string, maxContextTokens int, maxTurns int, logger *slog.Logger) *OrchestratorAgent {
+func NewOrchestratorAgent(runner agent.AgentRunner, voiceContent string, maxContextTokens int, maxTurns int, planMaxTurns int, logger *slog.Logger) *OrchestratorAgent {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if maxTurns <= 0 {
 		maxTurns = 10
+	}
+	if planMaxTurns <= 0 {
+		planMaxTurns = 25
 	}
 	return &OrchestratorAgent{
 		runner:           runner,
@@ -117,6 +121,7 @@ func NewOrchestratorAgent(runner agent.AgentRunner, voiceContent string, maxCont
 		logger:           logger,
 		maxContextTokens: maxContextTokens,
 		maxTurns:         maxTurns,
+		planMaxTurns:     planMaxTurns,
 	}
 }
 
@@ -503,20 +508,36 @@ const planModePromptSuffix = `
 
 ## Plan Mode
 
-You are in PLANNING mode. The user wants to collaborate on a plan before any work begins.
+You are in PLANNING mode. The user wants a well-researched, evidence-based plan before any work begins. You have READ-ONLY access — write tools (Write, Edit, MultiEdit) are disabled.
 
-1. Analyze the codebase thoroughly using the project context and your tools before proposing tasks.
-2. Return a structured markdown plan (NOT the usual JSON actions format). Use this format:
-   - A title heading (# Title)
-   - A "## Tasks" section containing numbered subsections (### 1. Task Title) each with:
-     - **Labels:** comma-separated labels; always start with "todo" for tracker pickup, then add descriptive labels (e.g. todo, area:frontend, priority:high)
-     - **Profile:** recommended executor profile (coder, architect, tester, debugger)
-     - **Depends on:** task numbers this depends on, or "none"
-     - **Description:** detailed implementation steps referencing specific files, functions, and patterns
-3. If an existing plan draft is included in the state, refine it based on the user's feedback rather than starting from scratch.
-4. Do NOT output JSON actions. Do NOT create issues, dispatch, or execute anything.
-5. Wrap your entire markdown plan in a fenced block: ` + "```anthem-plan\n...\n```" + `
-6. You may include a brief conversational reply outside the fenced block.`
+### Stage 1: Research (MANDATORY)
+
+Before writing ANY plan, you MUST explore the codebase using your tools. You MUST make at least 5 tool calls (Read, Grep, Glob, Bash) before producing any plan output. This is non-negotiable.
+
+Research checklist — verify each of these for the area in question:
+- File structure and key modules in the affected area
+- Existing implementations and patterns to follow
+- Test coverage for files you will propose changing (look for test files, check what is and is not covered)
+- Dependencies and imports that may be affected
+- Configuration or environment requirements
+- Similar patterns elsewhere in the codebase that should stay consistent
+
+Do NOT skip this stage. Do NOT generate a plan from memory or the project context summary alone. The user chose Plan mode specifically for deep analysis.
+
+### Stage 2: Synthesis
+
+Only after thorough research, produce a structured markdown plan:
+- A title heading (# Title)
+- A "## Analysis" section summarizing what you found during research, citing specific files, functions, and line numbers
+- A "## Tasks" section with numbered subsections (### 1. Task Title) each with:
+  - **Labels:** always start with "todo", then descriptive labels (e.g. todo, area:frontend, priority:high)
+  - **Profile:** recommended executor profile (coder, architect, tester, debugger)
+  - **Depends on:** task numbers this depends on, or "none"
+  - **Description:** detailed implementation steps referencing specific files and code you actually read, not assumed
+- If an existing plan draft is in the state, refine it based on the user's feedback rather than starting from scratch.
+- Do NOT output JSON actions. Do NOT create issues, dispatch, or execute anything.
+- Wrap the plan in: ` + "```anthem-plan\n...\n```" + `
+- You may include conversational commentary outside the fenced block.`
 
 const buildModePromptSuffix = `
 
@@ -550,7 +571,8 @@ func (o *OrchestratorAgent) ConsultPlan(ctx context.Context, state StateSnapshot
 		Prompt:         prompt,
 		Model:          model,
 		PermissionMode: "bypassPermissions",
-		MaxTurns:       o.maxTurns,
+		MaxTurns:       o.planMaxTurns,
+		DeniedTools:    []string{"Write", "Edit", "MultiEdit"},
 		OnStream:       onStream,
 	})
 	if err != nil {
