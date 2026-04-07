@@ -164,7 +164,7 @@ func DefaultConfig() Config {
 					SkillRefs:    []string{"anthem://code-review"},
 				},
 				"test-explorer": {
-					PromptPrefix: "You are a test coverage analysis agent. Examine every test file, identify untested code paths, missing edge cases, and coverage gaps. Cite specific files and line numbers. Do not modify any files.",
+					PromptPrefix: "You are a test coverage analysis agent. Go beyond zero-coverage files: look INSIDE partially tested files for uncovered critical paths. Distinguish route/endpoint tests from service/helper tests — a tested service does NOT mean its endpoint is tested. Flag security-critical code (input validation, auth checks, path traversal guards) that lacks dedicated tests. Cite specific files, function names, and line numbers. Do not modify any files.",
 					DeniedTools:  []string{"Write", "Edit", "MultiEdit"},
 					SkillRefs:    []string{"anthem://test-verifier", "anthem://tdd-classicist"},
 				},

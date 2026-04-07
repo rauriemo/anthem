@@ -663,6 +663,8 @@ If the request is trivially simple (e.g. rename a variable, fix a typo) and need
 Respond with JSON only:
 {"reasoning": "...", "explores": [{"query": "...", "scope": "...", "focus": "..."}], "user_message": "Brief message to the user about what you are researching (shown while explorers run)"}
 
+Cross-focus rule: When the user asks about test coverage or test plans, ALWAYS include at least one "security" focus explore to verify that security boundaries have dedicated tests.
+
 Examples of good explore requests:
 - {"query": "What test coverage exists for authentication endpoints and middleware?", "scope": "backend/tests/", "focus": "tests"}
 - {"query": "How is file serving implemented? Check path validation, allowed roots, traversal prevention.", "scope": "backend/", "focus": "security"}
@@ -690,6 +692,27 @@ Produce a structured markdown plan:
 - Wrap the plan in: ` + "```anthem-plan\n...\n```" + `
 - You may include conversational commentary outside the fenced block.`
 
+// focusSpecificInstructions returns additional prompt guidance based on the
+// explorer's focus category. Empty string for focus types with no extra guidance.
+func focusSpecificInstructions(focus string) string {
+	switch focus {
+	case "tests":
+		return "\n### Test Coverage Deep-Dive\n\n" +
+			"- For each source file, check if route handlers/endpoints have dedicated tests — not just the underlying services or helpers\n" +
+			"- Flag files where service-layer tests exist but the endpoint/route that calls them has NO test\n" +
+			"- Check for security-critical functions (input validation, auth checks, path traversal guards) that lack dedicated tests\n" +
+			"- Look INSIDE partially tested files for uncovered critical paths, not just files with zero tests\n\n"
+	case "security":
+		return "\n### Security Boundary Audit\n\n" +
+			"- Check every input validation function, path traversal guard, authentication middleware, and authorization check\n" +
+			"- For each security boundary, verify a dedicated test exists that exercises both allowed and denied cases\n" +
+			"- Flag any security-critical function with zero test coverage as CRITICAL\n" +
+			"- Check for hardcoded secrets, unsafe deserialization, and command injection vectors\n\n"
+	default:
+		return "\n"
+	}
+}
+
 // BuildExplorerPrompt constructs a focused prompt for a single explorer subagent.
 func BuildExplorerPrompt(req ExploreRequest, fileTree string) string {
 	var b strings.Builder
@@ -706,8 +729,9 @@ func BuildExplorerPrompt(req ExploreRequest, fileTree string) string {
 	b.WriteString("- Check EVERY relevant file, do not assume or skip\n")
 	b.WriteString("- Cite specific file paths, function names, and line numbers\n")
 	b.WriteString("- Do NOT make recommendations or create plans — just report what you find\n")
-	b.WriteString("- Report what EXISTS, what is MISSING, and what PATTERNS you observe\n\n")
-	b.WriteString("### Output Format\n\n")
+	b.WriteString("- Report what EXISTS, what is MISSING, and what PATTERNS you observe\n")
+	b.WriteString(focusSpecificInstructions(req.Focus))
+	b.WriteString("\n### Output Format\n\n")
 	b.WriteString("End your response with a structured findings block:\n")
 	b.WriteString("```explorer-findings\n")
 	b.WriteString(`{"query": "your question", "files_examined": ["path1", "path2"], "findings": "detailed findings text", "gaps": ["gap1", "gap2"], "summary": "one paragraph summary"}`)

@@ -386,6 +386,8 @@ func TestScoutPromptContents(t *testing.T) {
 		"scope",
 		"focus",
 		"trivially simple",
+		"test coverage",
+		"security",
 	}
 	for _, check := range checks {
 		if !strings.Contains(scoutPromptSuffix, check) {
@@ -546,6 +548,68 @@ func TestBuildExplorerPrompt(t *testing.T) {
 	for _, check := range checks {
 		if !strings.Contains(prompt, check) {
 			t.Errorf("explorer prompt missing %q", check)
+		}
+	}
+}
+
+func TestBuildExplorerPrompt_TestsFocusInstructions(t *testing.T) {
+	req := ExploreRequest{
+		Query: "What test coverage exists?",
+		Scope: "backend/",
+		Focus: "tests",
+	}
+	prompt := BuildExplorerPrompt(req, "")
+	checks := []string{
+		"route handlers/endpoints have dedicated tests",
+		"service-layer tests exist but the endpoint/route",
+		"security-critical functions",
+		"partially tested files",
+	}
+	for _, check := range checks {
+		if !strings.Contains(prompt, check) {
+			t.Errorf("tests focus prompt missing %q", check)
+		}
+	}
+}
+
+func TestBuildExplorerPrompt_SecurityFocusInstructions(t *testing.T) {
+	req := ExploreRequest{
+		Query: "Audit security boundaries",
+		Scope: "backend/",
+		Focus: "security",
+	}
+	prompt := BuildExplorerPrompt(req, "")
+	checks := []string{
+		"input validation function",
+		"path traversal guard",
+		"authentication middleware",
+		"zero test coverage as CRITICAL",
+	}
+	for _, check := range checks {
+		if !strings.Contains(prompt, check) {
+			t.Errorf("security focus prompt missing %q", check)
+		}
+	}
+}
+
+func TestBuildExplorerPrompt_DefaultFocusNoExtra(t *testing.T) {
+	req := ExploreRequest{
+		Query: "How is the code structured?",
+		Scope: "src/",
+		Focus: "architecture",
+	}
+	prompt := BuildExplorerPrompt(req, "")
+
+	forbidden := []string{
+		"route handlers/endpoints have dedicated tests",
+		"path traversal guard",
+		"zero test coverage as CRITICAL",
+		"Test Coverage Deep-Dive",
+		"Security Boundary Audit",
+	}
+	for _, check := range forbidden {
+		if strings.Contains(prompt, check) {
+			t.Errorf("architecture focus prompt should NOT contain %q", check)
 		}
 	}
 }

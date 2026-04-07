@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rauriemo/anthem/internal/agent"
@@ -296,6 +297,30 @@ func TestDefaultConfig_ProfilesWithNoSkills(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefaultConfig_TestExplorerPromptSharpened(t *testing.T) {
+	cfg := config.DefaultConfig()
+	profile, ok := cfg.Agent.Profiles["test-explorer"]
+	if !ok {
+		t.Fatal("test-explorer profile not found in defaults")
+	}
+
+	checks := []string{
+		"partially tested",
+		"route/endpoint tests",
+		"security-critical",
+		"service does NOT mean its endpoint is tested",
+	}
+	for _, check := range checks {
+		if !containsCI(profile.PromptPrefix, check) {
+			t.Errorf("test-explorer prompt missing %q", check)
+		}
+	}
+}
+
+func containsCI(s, substr string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
 
 func TestResolveProfile_EmbeddedSkillsExtractedToWorkspace(t *testing.T) {
