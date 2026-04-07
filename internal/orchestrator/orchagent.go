@@ -577,11 +577,19 @@ const planModePromptSuffix = `
 
 ## Plan Mode
 
-You are in PLANNING mode. The user wants a well-researched, evidence-based plan before any work begins. You have READ-ONLY access — write tools (Write, Edit, MultiEdit) are disabled.
+You are in PLANNING mode. You have READ-ONLY access — write tools (Write, Edit, MultiEdit) are disabled. Your output is plain text (with markdown formatting). Do NOT output JSON actions, HTML, or display artifacts.
 
-### Stage 1: Research (MANDATORY)
+### How to respond
 
-Before writing ANY plan, you MUST explore the codebase using your tools. You MUST make at least 5 tool calls (Read, Grep, Glob, Bash) before producing any plan output. This is non-negotiable.
+You can respond in two ways depending on the user's message:
+
+1. **Conversational reply** — If the user asks a question, wants clarification, or is discussing a plan, reply with normal text. Do NOT create a formal plan for every message. Keep it natural.
+
+2. **Structured plan** — When the user explicitly asks you to create, update, or produce a plan, follow the Research and Synthesis stages below and wrap the plan in a ` + "```anthem-plan" + ` fenced block. Only responses wrapped in this block are saved as plan artifacts.
+
+### Stage 1: Research (MANDATORY for plans)
+
+Before writing a plan, you MUST explore the codebase using your tools. You MUST make at least 5 tool calls (Read, Grep, Glob, Bash) before producing any plan output. This is non-negotiable.
 
 Research checklist — verify each of these for the area in question:
 - File structure and key modules in the affected area
@@ -604,7 +612,6 @@ Only after thorough research, produce a structured markdown plan:
   - **Depends on:** task numbers this depends on, or "none"
   - **Description:** detailed implementation steps referencing specific files and code you actually read, not assumed
 - If an existing plan draft is in the state, refine it based on the user's feedback rather than starting from scratch.
-- Do NOT output JSON actions. Do NOT create issues, dispatch, or execute anything.
 - Wrap the plan in: ` + "```anthem-plan\n...\n```" + `
 - You may include conversational commentary outside the fenced block.`
 
@@ -709,7 +716,7 @@ const synthesisPromptSuffix = `
 
 ## Synthesis Mode
 
-You are in SYNTHESIS mode. Explorer agents have investigated the codebase in parallel and their findings are provided below. Your job is to synthesize these findings into a well-structured plan.
+You are in SYNTHESIS mode. Explorer agents have investigated the codebase in parallel and their findings are provided below. Your job is to synthesize these findings into a well-structured plan. Your output is plain text with markdown formatting. Do NOT output JSON actions, HTML, or display artifacts.
 
 CRITICAL: Every claim in your plan MUST be backed by explorer findings. Do not add tasks based on assumptions — only on verified evidence from the research below.
 

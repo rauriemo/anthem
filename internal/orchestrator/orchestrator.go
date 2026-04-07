@@ -2440,7 +2440,7 @@ func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.Incomi
 		return
 	}
 
-	o.finalizePlan(ctx, msg, output)
+	o.handlePlanOutput(ctx, msg, output)
 }
 
 // buildPlanSnapshot constructs the state snapshot with plan context for plan mode.
@@ -2498,7 +2498,25 @@ func (o *Orchestrator) handlePlanFallback(ctx context.Context, msg channel.Incom
 		return
 	}
 
-	o.finalizePlan(ctx, msg, output)
+	o.handlePlanOutput(ctx, msg, output)
+}
+
+// handlePlanOutput routes plan mode output: if it contains a structured
+// anthem-plan block it gets saved as a plan artifact with a PlanCard;
+// otherwise it's sent as a plain text reply (conversational plan discussion).
+func (o *Orchestrator) handlePlanOutput(ctx context.Context, msg channel.IncomingMessage, output string) {
+	if extractPlanBlock(output) != "" {
+		o.finalizePlan(ctx, msg, output)
+		return
+	}
+
+	// No structured plan block — treat as conversational text reply
+	clean := sanitizePlanOutput(output)
+	if clean == "" {
+		clean = output
+	}
+	o.sendFollowUp(ctx, msg, clean)
+	o.recordAudit(ctx, "channel.plan_reply", "", strPtr("plan"))
 }
 
 // finalizePlan extracts, saves, and broadcasts the plan artifact.

@@ -587,10 +587,59 @@ func TestFinalizePlan_SendsPlanCard(t *testing.T) {
 	}
 }
 
+func TestHandlePlanOutput_ConversationalReply(t *testing.T) {
+	orchRunner := agent.NewMockRunner()
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		if strings.Contains(opts.Prompt, "Scout Mode") {
+			return &types.RunResult{
+				SessionID: "scout-s1",
+				Output:    `{"reasoning": "simple question", "explores": [], "user_message": ""}`,
+				TokensIn:  10, TokensOut: 5,
+			}, nil
+		}
+		// Return conversational text, no anthem-plan block
+		return &types.RunResult{
+			SessionID: "plan-s1",
+			Output:    "The current test coverage looks good. You have 15 test files covering the main API endpoints. I'd suggest focusing on the WebSocket handler next.",
+			TokensIn:  80, TokensOut: 40,
+		}, nil
+	}
+
+	orch, ch := newPlanTestOrch(t, orchRunner)
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "prism",
+		SenderID:    "user-1",
+		ThreadID:    "t1",
+		Text:        "[system:plan] How does the test coverage look?",
+		Timestamp:   time.Now(),
+	})
+
+	sent := ch.sentMessages()
+	var foundReply bool
+	var foundCard bool
+	for _, msg := range sent {
+		if strings.Contains(msg.Text, "test coverage looks good") {
+			foundReply = true
+		}
+		if strings.Contains(msg.Text, "[plan-card]") {
+			foundCard = true
+		}
+	}
+	if !foundReply {
+		t.Error("expected conversational text reply for non-plan output")
+	}
+	if foundCard {
+		t.Error("did not expect a plan card for conversational reply")
+	}
+}
+
 func TestPlanModePromptContents(t *testing.T) {
 	checks := []string{
 		"PLANNING mode",
 		"READ-ONLY",
+		"Conversational reply",
+		"Structured plan",
 		"Stage 1: Research",
 		"Stage 2: Synthesis",
 		"MUST explore",
