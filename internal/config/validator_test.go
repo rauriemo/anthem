@@ -153,6 +153,37 @@ func TestValidate(t *testing.T) {
 			},
 			wantErr: "workspace.root is required",
 		},
+		{
+			name: "profile with unknown mcp_ref",
+			modify: func(c *Config) {
+				c.Agent.MCPServers = map[string]MCPServerConfig{
+					"unity": {Command: "npx"},
+				}
+				c.Agent.Profiles["bad"] = AgentProfile{
+					MCPRefs: []string{"nonexistent"},
+				}
+			},
+			wantErr: "unknown mcp_server",
+		},
+		{
+			name: "profile with valid mcp_ref",
+			modify: func(c *Config) {
+				c.Agent.MCPServers = map[string]MCPServerConfig{
+					"unity": {Command: "npx"},
+				}
+				c.Agent.Profiles["good"] = AgentProfile{
+					MCPRefs: []string{"unity"},
+				}
+			},
+		},
+		{
+			name: "profile mcp_refs empty registry no error",
+			modify: func(c *Config) {
+				c.Agent.Profiles["empty"] = AgentProfile{
+					MCPRefs: []string{"anything"},
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

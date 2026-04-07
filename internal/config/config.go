@@ -54,31 +54,31 @@ type HooksConfig struct {
 }
 
 type AgentConfig struct {
-	Command               string                  `yaml:"command"`
-	MaxTurns              int                     `yaml:"max_turns"`
-	MaxConcurrent         int                     `yaml:"max_concurrent"`
-	MaxConcurrentPerLabel map[string]int          `yaml:"max_concurrent_per_label"`
-	StallTimeoutMS        int                     `yaml:"stall_timeout_ms"`
-	MaxRetryBackoffMS     int                     `yaml:"max_retry_backoff_ms"`
-	AllowedTools          []string                `yaml:"allowed_tools"`
-	Model                 string                  `yaml:"model"`
-	MCPServers            []MCPServerConfig       `yaml:"mcp_servers"`
-	Skills                []string                `yaml:"skills"`
-	PermissionMode        string                  `yaml:"permission_mode"`
-	SkipPermissions       bool                    `yaml:"skip_permissions"`
-	DeniedTools           []string                `yaml:"denied_tools"`
-	AdditionalDirs        []string                `yaml:"additional_dirs"`
-	ReviewEnabled         bool                    `yaml:"review_enabled"`
-	ReviewMaxTurns        int                     `yaml:"review_max_turns"`
-	ReviewMaxRetries      int                     `yaml:"review_max_retries"`
-	ReviewPrompt          string                  `yaml:"review_prompt"`
-	Profiles              map[string]AgentProfile `yaml:"profiles,omitempty"`
+	Command               string                       `yaml:"command"`
+	MaxTurns              int                          `yaml:"max_turns"`
+	MaxConcurrent         int                          `yaml:"max_concurrent"`
+	MaxConcurrentPerLabel map[string]int               `yaml:"max_concurrent_per_label"`
+	StallTimeoutMS        int                          `yaml:"stall_timeout_ms"`
+	MaxRetryBackoffMS     int                          `yaml:"max_retry_backoff_ms"`
+	AllowedTools          []string                     `yaml:"allowed_tools"`
+	Model                 string                       `yaml:"model"`
+	MCPServers            map[string]MCPServerConfig   `yaml:"mcp_servers"`
+	Skills                []string                     `yaml:"skills"`
+	PermissionMode        string                       `yaml:"permission_mode"`
+	SkipPermissions       bool                         `yaml:"skip_permissions"`
+	DeniedTools           []string                     `yaml:"denied_tools"`
+	AdditionalDirs        []string                     `yaml:"additional_dirs"`
+	ReviewEnabled         bool                         `yaml:"review_enabled"`
+	ReviewMaxTurns        int                          `yaml:"review_max_turns"`
+	ReviewMaxRetries      int                          `yaml:"review_max_retries"`
+	ReviewPrompt          string                       `yaml:"review_prompt"`
+	Profiles              map[string]AgentProfile      `yaml:"profiles,omitempty"`
 }
 
 type MCPServerConfig struct {
-	Name    string   `yaml:"name"`
-	Command string   `yaml:"command"`
-	Args    []string `yaml:"args"`
+	Command string            `yaml:"command"`
+	Args    []string          `yaml:"args"`
+	Env     map[string]string `yaml:"env,omitempty"`
 }
 
 type AgentProfile struct {
@@ -89,6 +89,8 @@ type AgentProfile struct {
 	Model         string   `yaml:"model,omitempty"`
 	MaxTurns      int      `yaml:"max_turns,omitempty"`
 	ReviewEnabled *bool    `yaml:"review_enabled,omitempty"`
+	MCPRefs       []string `yaml:"mcp_refs,omitempty"`
+	SkillRefs     []string `yaml:"skill_refs,omitempty"`
 }
 
 type RuleConfig struct {
@@ -135,11 +137,13 @@ func DefaultConfig() Config {
 			MaxRetryBackoffMS: 300000,
 			ReviewMaxTurns:    3,
 			Profiles: map[string]AgentProfile{
-				"coder":     {PromptPrefix: "You are a coding agent. Write clean, tested code."},
-				"architect": {PromptPrefix: "You are an architect agent. Analyze and design, do not write code.", DeniedTools: []string{"Write", "Edit", "Bash"}},
-				"tester":    {PromptPrefix: "You are a testing agent. Focus on writing comprehensive tests."},
-				"debugger":  {PromptPrefix: "You are a debugger agent. A previous attempt failed. Analyze the feedback carefully and fix the issues."},
-				"explorer":  {PromptPrefix: "You are a codebase research agent. Investigate thoroughly, cite specific files and line numbers. Do not modify any files.", DeniedTools: []string{"Write", "Edit", "MultiEdit"}},
+				"coder":             {PromptPrefix: "You are a coding agent. Write clean, tested code."},
+				"architect":         {PromptPrefix: "You are an architect agent. Analyze and design, do not write code.", DeniedTools: []string{"Write", "Edit", "Bash"}},
+				"tester":            {PromptPrefix: "You are a testing agent. Focus on writing comprehensive tests."},
+				"debugger":          {PromptPrefix: "You are a debugger agent. A previous attempt failed. Analyze the feedback carefully and fix the issues."},
+				"explorer":          {PromptPrefix: "You are a codebase research agent. Investigate thoroughly, cite specific files and line numbers. Do not modify any files.", DeniedTools: []string{"Write", "Edit", "MultiEdit"}},
+				"security-explorer": {PromptPrefix: "You are a security research agent. Audit for OWASP Top 10, CWE-25 path traversal, injection flaws, authentication bypasses, and insecure defaults. Cite specific files and line numbers. Do not modify any files.", DeniedTools: []string{"Write", "Edit", "MultiEdit"}},
+				"test-explorer":     {PromptPrefix: "You are a test coverage analysis agent. Examine every test file, identify untested code paths, missing edge cases, and coverage gaps. Cite specific files and line numbers. Do not modify any files.", DeniedTools: []string{"Write", "Edit", "MultiEdit"}},
 			},
 		},
 		System: SystemConfig{},

@@ -23,6 +23,7 @@ import (
 	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/cost"
+	"github.com/rauriemo/anthem/internal/harness"
 	"github.com/rauriemo/anthem/internal/plans"
 	"github.com/rauriemo/anthem/internal/rules"
 	"github.com/rauriemo/anthem/internal/tracker"
@@ -1256,36 +1257,8 @@ func (o *Orchestrator) dispatch(ctx context.Context, task types.Task, snap cfgSn
 	// Run agent
 	o.publish(types.Event{Type: "agent.started", TaskID: task.ID})
 
-	permMode := cfg.Agent.PermissionMode
-	if cfg.Agent.SkipPermissions {
-		permMode = "bypassPermissions"
-	}
-
-	runOpts := types.RunOpts{
-		WorkspacePath:  wsPath,
-		Prompt:         fullPrompt,
-		MaxTurns:       cfg.Agent.MaxTurns,
-		AllowedTools:   cfg.Agent.AllowedTools,
-		Model:          cfg.Agent.Model,
-		StallTimeoutMS: cfg.Agent.StallTimeoutMS,
-		PermissionMode: permMode,
-		DeniedTools:    cfg.Agent.DeniedTools,
-		AdditionalDirs: cfg.Agent.AdditionalDirs,
-	}
-	if profile != nil {
-		if len(profile.AllowedTools) > 0 {
-			runOpts.AllowedTools = profile.AllowedTools
-		}
-		if len(profile.DeniedTools) > 0 {
-			runOpts.DeniedTools = append(runOpts.DeniedTools, profile.DeniedTools...)
-		}
-		if profile.Model != "" {
-			runOpts.Model = profile.Model
-		}
-		if profile.MaxTurns > 0 {
-			runOpts.MaxTurns = profile.MaxTurns
-		}
-	}
+	runOpts, _ := o.resolveProfile(profileName, wsPath)
+	runOpts.Prompt = fullPrompt
 	result, err := o.runner.Run(ctx, runOpts)
 
 	o.release(task.ID)
@@ -2419,6 +2392,93 @@ func (o *Orchestrator) finalizePlan(ctx context.Context, msg channel.IncomingMes
 	o.recordAudit(ctx, "channel.plan_proposed", "", strPtr("plan"))
 }
 
+// focusToProfile maps an ExploreRequest.Focus category to a profile name.
+func focusToProfile(focus string) string {
+	switch focus {
+	case "security":
+		return "security-explorer"
+	case "tests":
+		return "test-explorer"
+	default:
+		return "explorer"
+	}
+}
+
+// resolveProfile builds RunOpts by merging base config with a named profile,
+// then prepares the workspace with MCP config and skills.
+func (o *Orchestrator) resolveProfile(profileName string, wsPath string) (types.RunOpts, error) {
+	cfg := o.cfg
+
+	permMode := cfg.Agent.PermissionMode
+	if cfg.Agent.SkipPermissions {
+		permMode = "bypassPermissions"
+	}
+
+	opts := types.RunOpts{
+		WorkspacePath:  wsPath,
+		MaxTurns:       cfg.Agent.MaxTurns,
+		AllowedTools:   cfg.Agent.AllowedTools,
+		Model:          cfg.Agent.Model,
+		StallTimeoutMS: cfg.Agent.StallTimeoutMS,
+		PermissionMode: permMode,
+		DeniedTools:    append([]string{}, cfg.Agent.DeniedTools...),
+		AdditionalDirs: cfg.Agent.AdditionalDirs,
+	}
+
+	var profile *config.AgentProfile
+	if cfg.Agent.Profiles != nil {
+		if p, ok := cfg.Agent.Profiles[profileName]; ok {
+			profile = &p
+		}
+	}
+
+	if profile != nil {
+		if len(profile.AllowedTools) > 0 {
+			opts.AllowedTools = profile.AllowedTools
+		}
+		if len(profile.DeniedTools) > 0 {
+			opts.DeniedTools = append(opts.DeniedTools, profile.DeniedTools...)
+		}
+		if profile.Model != "" {
+			opts.Model = profile.Model
+		}
+		if profile.MaxTurns > 0 {
+			opts.MaxTurns = profile.MaxTurns
+		}
+	}
+
+	// Resolve MCP servers: profile refs looked up in the global registry
+	var profileMCPRefs []string
+	if profile != nil {
+		profileMCPRefs = profile.MCPRefs
+	}
+	mcpServers := harness.ResolveMCPServers(cfg.Agent.MCPServers, nil, profileMCPRefs)
+	if err := harness.WriteMCPConfig(wsPath, mcpServers); err != nil {
+		o.logger.Warn("failed to write MCP config", "profile", profileName, "error", err)
+	}
+
+	// Resolve skills: global baseline + profile refs
+	var profileSkillRefs []string
+	if profile != nil {
+		profileSkillRefs = profile.SkillRefs
+	}
+	allSkills := harness.ResolveSkillRefs(cfg.Agent.Skills, profileSkillRefs)
+	if err := harness.PrepareSkills(wsPath, allSkills, o.builtinSkillsDir(), o.logger); err != nil {
+		o.logger.Warn("failed to prepare skills", "profile", profileName, "error", err)
+	}
+
+	return opts, nil
+}
+
+// builtinSkillsDir returns the path to Anthem's built-in skill templates.
+func (o *Orchestrator) builtinSkillsDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".anthem", "skills")
+}
+
 // runExplorers spawns parallel Claude Code processes for focused codebase research.
 func (o *Orchestrator) runExplorers(ctx context.Context, reqs []ExploreRequest, model string, fileTree string, onStatus func(string)) []ExploreResult {
 	results := make([]ExploreResult, len(reqs))
@@ -2433,13 +2493,14 @@ func (o *Orchestrator) runExplorers(ctx context.Context, reqs []ExploreRequest, 
 
 			o.logger.Info("explorer started", "index", idx, "focus", r.Focus, "scope", r.Scope)
 
-			result, err := o.runner.Run(ctx, types.RunOpts{
-				Prompt:         prompt,
-				Model:          model,
-				PermissionMode: "bypassPermissions",
-				MaxTurns:       o.orchAgent.explorerMaxTurns,
-				DeniedTools:    []string{"Write", "Edit", "MultiEdit"},
-			})
+			profileName := focusToProfile(r.Focus)
+			opts, _ := o.resolveProfile(profileName, "")
+			opts.Prompt = prompt
+			opts.Model = model
+			opts.PermissionMode = "bypassPermissions"
+			opts.MaxTurns = o.orchAgent.explorerMaxTurns
+
+			result, err := o.runner.Run(ctx, opts)
 
 			if err != nil {
 				o.logger.Warn("explorer failed", "index", idx, "error", err)

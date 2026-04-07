@@ -114,7 +114,6 @@ type RunOpts struct {
 	Prompt         string
 	MaxTurns       int
 	AllowedTools   []string
-	MCPConfig      string
 	Model          string
 	StallTimeoutMS int
 	PermissionMode string

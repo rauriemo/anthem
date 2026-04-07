@@ -65,5 +65,13 @@ func Validate(cfg *Config) error {
 		}
 	}
 
+	for name, profile := range cfg.Agent.Profiles {
+		for _, ref := range profile.MCPRefs {
+			if _, ok := cfg.Agent.MCPServers[ref]; !ok && len(cfg.Agent.MCPServers) > 0 {
+				errs = append(errs, fmt.Errorf("profile %q references unknown mcp_server %q", name, ref))
+			}
+		}
+	}
+
 	return errors.Join(errs...)
 }

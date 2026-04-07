@@ -251,26 +251,52 @@ Plan mode uses a **three-phase explorer architecture** for deep, evidence-based 
 
 For trivial requests (scout returns 0 explores), plan mode falls back to a single-run consultation using `plan_max_turns`. All plan mode agents are read-only -- write tools (Write, Edit, MultiEdit) are denied.
 
-### Agent Profiles
+### Agent Profiles and Harnesses
+
+Anthem uses a three-layer "Registry + Reference" architecture for agent configuration:
 
 ```yaml
 agent:
+  # Layer 1: MCP Server Registry (capabilities — define once)
+  mcp_servers:
+    unity:
+      command: "npx"
+      args: ["-y", "@anthropic/unity-mcp-server"]
+    semgrep:
+      command: "semgrep-mcp"
+      args: ["--config", "auto"]
+
+  # Layer 2: Skill Registry (knowledge — define once)
+  skills:
+    - "anthem://owasp-checklist"
+    - "./skills/unity-patterns"
+
+  # Layer 3: Profiles (compose by reference)
   profiles:
     coder:
       prompt_prefix: "You are a coding agent. Write clean, tested code."
     architect:
-      prompt_prefix: "You are an architect agent. Analyze and design, do not write code."
+      prompt_prefix: "You are an architect agent. Analyze and design."
       denied_tools: ["Write", "Edit", "Bash"]
-    tester:
-      prompt_prefix: "You are a testing agent. Focus on writing comprehensive tests."
-    debugger:
-      prompt_prefix: "You are a debugger agent. A previous attempt failed. Analyze the feedback carefully and fix the issues."
+    security-explorer:
+      prompt_prefix: "You are a security research agent..."
+      mcp_refs: ["semgrep"]
+      skill_refs: ["anthem://owasp-checklist"]
+      denied_tools: ["Write", "Edit", "MultiEdit"]
+    unity-designer:
+      prompt_prefix: "You are a Unity game designer agent..."
+      mcp_refs: ["unity"]
+      skill_refs: ["./skills/unity-patterns"]
+      model: "opus"
+
   review_enabled: true
   review_max_turns: 3
   review_max_retries: 1
 ```
 
-The orchestrator selects a profile when dispatching via `profile` on the `dispatch` action. Reviewer-failed retries automatically use the `debugger` profile. Four default profiles ship out of the box.
+**MCP servers** are external tools (Unity Editor, semgrep, databases) registered by name. **Skills** are SKILL.md knowledge packages (OWASP checklists, coding patterns) Claude Code discovers automatically. **Profiles** compose these by reference — `mcp_refs` and `skill_refs` point to registry entries. Adding a new agent type (animator, database agent, image generator) requires only a YAML profile entry.
+
+Before each agent launch, Anthem writes `.mcp.json` and copies skills to `.claude/skills/` in the workspace. Claude Code auto-discovers both via its native three-level progressive loading.
 
 ### Channels
 
