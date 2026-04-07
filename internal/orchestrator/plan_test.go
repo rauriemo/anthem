@@ -308,6 +308,56 @@ func TestHandleBuildMessage_NoTracker_FallsBackToDraft(t *testing.T) {
 	}
 }
 
+func TestHandleBuildMessage_InlineContent(t *testing.T) {
+	orchRunner := agent.NewMockRunner()
+	var capturedPrompt string
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		if strings.Contains(opts.Prompt, "Build Mode") {
+			capturedPrompt = opts.Prompt
+			return &types.RunResult{
+				SessionID: "build-s1",
+				Output:    `{"reasoning": "building from inline", "actions": [{"type": "reply", "body": "Built from inline content."}]}`,
+				TokensIn:  10, TokensOut: 5,
+			}, nil
+		}
+		if strings.Contains(opts.Prompt, "Scout Mode") {
+			return &types.RunResult{
+				SessionID: "scout-s1",
+				Output:    `{"reasoning": "simple", "explores": [], "user_message": ""}`,
+				TokensIn:  10, TokensOut: 5,
+			}, nil
+		}
+		return &types.RunResult{
+			SessionID: "plan-s1",
+			Output:    "```anthem-plan\n# Inline Test\n```",
+			TokensIn:  10, TokensOut: 5,
+		}, nil
+	}
+
+	orch, ch := newPlanTestOrch(t, orchRunner)
+
+	// Send build with inline content (path + newline + content), simulating PlanView
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "prism",
+		SenderID:    "user-1",
+		ThreadID:    "t1",
+		Text:        "[system:build] /nonexistent/path.md\n# Inline Plan\n\n## Tasks\n\n### 1. Do thing",
+		Timestamp:   time.Now(),
+	})
+
+	// Verify the inline content was used (not a file load error)
+	sent := ch.sentMessages()
+	for _, msg := range sent {
+		if strings.Contains(msg.Text, "Could not load") {
+			t.Error("should not attempt file load when inline content is provided")
+		}
+	}
+
+	if !strings.Contains(capturedPrompt, "Inline Plan") {
+		t.Error("expected inline plan content in the build prompt")
+	}
+}
+
 func TestExtractPlanBlock(t *testing.T) {
 	tests := []struct {
 		name  string

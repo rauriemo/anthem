@@ -2556,16 +2556,31 @@ func (o *Orchestrator) handleBuildMessage(ctx context.Context, msg channel.Incom
 	o.logger.Info("handling build message", "sender", msg.SenderID, "text_len", len(msg.Text))
 
 	cleanText := strings.Replace(msg.Text, "[system:build]", "", 1)
-	planPath := strings.TrimSpace(cleanText)
+	cleanText = strings.TrimSpace(cleanText)
+
+	// The build message may carry inline content after the path (newline-separated).
+	// Format: "<planPath>\n<content>" or just "<planPath>"
+	var planPath, inlineContent string
+	if idx := strings.Index(cleanText, "\n"); idx != -1 {
+		planPath = strings.TrimSpace(cleanText[:idx])
+		inlineContent = strings.TrimSpace(cleanText[idx+1:])
+	} else {
+		planPath = cleanText
+	}
 
 	if o.orchAgent == nil {
 		o.sendFollowUp(ctx, msg, "Build mode requires the orchestrator agent to be configured.")
 		return
 	}
 
-	// Load the plan content
+	// Load the plan content — prefer inline content, then disk, then latest draft
 	var planContent string
-	if o.planStore != nil && planPath != "" {
+	if inlineContent != "" {
+		planContent = inlineContent
+		if o.planStore != nil && planPath != "" {
+			_ = o.planStore.SetStatus(planPath, plans.StatusBuilding)
+		}
+	} else if o.planStore != nil && planPath != "" {
 		plan, err := o.planStore.Load(planPath)
 		if err != nil {
 			o.logger.Warn("failed to load plan for build", "path", planPath, "error", err)
@@ -2575,7 +2590,6 @@ func (o *Orchestrator) handleBuildMessage(ctx context.Context, msg channel.Incom
 		planContent = plan.Body
 		_ = o.planStore.SetStatus(planPath, plans.StatusBuilding)
 	} else if o.planStore != nil {
-		// Fall back to latest draft
 		draft, err := o.planStore.LatestDraft(o.projectSlug())
 		if err != nil || draft == nil {
 			o.sendFollowUp(ctx, msg, "No plan found to build. Create a plan first using Plan mode.")
@@ -2625,7 +2639,7 @@ func (o *Orchestrator) handleBuildMessage(ctx context.Context, msg channel.Incom
 
 	if err != nil {
 		o.logger.Warn("build consult failed", "error", err)
-		o.sendFollowUp(ctx, msg, "Build failed. The orchestrator could not process the plan.")
+		o.sendFollowUp(ctx, msg, fmt.Sprintf("Build failed: %v", err))
 		if o.planStore != nil && planPath != "" {
 			_ = o.planStore.SetStatus(planPath, plans.StatusDraft)
 		}
