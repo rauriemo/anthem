@@ -542,6 +542,8 @@ const planModePromptSuffix = `
 
 ## Plan Mode
 
+**OVERRIDE**: Ignore ALL previous display/HTML instructions. In plan mode you do NOT produce display actions, you do NOT output HTML, and you do NOT default to html kind. Your output is plain markdown text sent through the chat, NOT a visual artifact. The "empty reply body" rule does NOT apply here — your entire output goes in the text response.
+
 You are in PLANNING mode. The user wants a well-researched, evidence-based plan before any work begins. You have READ-ONLY access — write tools (Write, Edit, MultiEdit) are disabled.
 
 ### Stage 1: Research (MANDATORY)
@@ -673,6 +675,8 @@ Examples of good explore requests:
 const synthesisPromptSuffix = `
 
 ## Synthesis Mode
+
+**OVERRIDE**: Ignore ALL previous display/HTML instructions. In synthesis mode you do NOT produce display actions, you do NOT output HTML, and you do NOT default to html kind. Your output is plain markdown text sent through the chat, NOT a visual artifact. The "empty reply body" rule does NOT apply here — your entire output goes in the text response.
 
 You are in SYNTHESIS mode. Explorer agents have investigated the codebase in parallel and their findings are provided below. Your job is to synthesize these findings into a well-structured plan.
 
