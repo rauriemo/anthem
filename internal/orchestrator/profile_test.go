@@ -251,7 +251,7 @@ func TestDefaultConfig_ProfileSkillRefs(t *testing.T) {
 	cfg := config.DefaultConfig()
 
 	tests := []struct {
-		profile   string
+		profile    string
 		wantSkills []string
 	}{
 		{"coder", []string{"anthem://commit-hygiene", "anthem://go-cli"}},
