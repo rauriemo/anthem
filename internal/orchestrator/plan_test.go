@@ -341,6 +341,89 @@ func TestExtractPlanBlock(t *testing.T) {
 	}
 }
 
+func TestSanitizePlanOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "anthem-plan block extracted",
+			raw:  "Some preamble\n```anthem-plan\n# My Plan\n\n## Tasks\n```\nTrailing",
+			want: "# My Plan\n\n## Tasks",
+		},
+		{
+			name: "pure JSON action response stripped",
+			raw:  `{"reasoning": "I analyzed the codebase.", "actions": [{"type": "create_subtasks"}]}`,
+			want: "I analyzed the codebase.",
+		},
+		{
+			name: "markdown with embedded JSON block stripped",
+			raw:  "# Plan Title\n\nSome analysis.\n\n{\"reasoning\": \"test\", \"actions\": [{\"type\": \"display\"}]}\n\n## Next Steps\n\nDo stuff.",
+			want: "# Plan Title\n\nSome analysis.\n\n\n## Next Steps\n\nDo stuff.",
+		},
+		{
+			name: "HTML block stripped",
+			raw:  "# Plan\n\n<!DOCTYPE html>\n<html><body>Rich content</body></html>\n\n## Tasks\n\n- Item 1",
+			want: "# Plan\n\n\n## Tasks\n\n- Item 1",
+		},
+		{
+			name: "clean markdown passes through",
+			raw:  "# Test Coverage Plan\n\n## Overview\n\nAnalysis here.\n\n## Tasks\n\n### 1. Add tests",
+			want: "# Test Coverage Plan\n\n## Overview\n\nAnalysis here.\n\n## Tasks\n\n### 1. Add tests",
+		},
+		{
+			name: "empty string returns empty",
+			raw:  "",
+			want: "",
+		},
+		{
+			name: "pure JSON with no reasoning returns empty",
+			raw:  `{"actions": [{"type": "close_wave"}]}`,
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizePlanOutput(tt.raw)
+			if got != tt.want {
+				t.Errorf("sanitizePlanOutput() =\n%q\nwant:\n%q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPlanStreamFilter(t *testing.T) {
+	t.Run("forwards markdown", func(t *testing.T) {
+		var out strings.Builder
+		f := newPlanStreamFilter(func(s string) { out.WriteString(s) })
+		f.Write("# Plan\n")
+		f.Write("Some content\n")
+		if out.String() != "# Plan\nSome content\n" {
+			t.Errorf("expected markdown to pass through, got %q", out.String())
+		}
+	})
+
+	t.Run("suppresses JSON action block", func(t *testing.T) {
+		var out strings.Builder
+		f := newPlanStreamFilter(func(s string) { out.WriteString(s) })
+		f.Write("{\"reasoning\": \"analyzing\", \"actions\": []}")
+		if out.String() != "" {
+			t.Errorf("expected JSON to be suppressed, got %q", out.String())
+		}
+	})
+
+	t.Run("suppresses HTML block", func(t *testing.T) {
+		var out strings.Builder
+		f := newPlanStreamFilter(func(s string) { out.WriteString(s) })
+		f.Write("<!DOCTYPE html>\n<html><body>Hi</body></html>")
+		if out.String() != "" {
+			t.Errorf("expected HTML to be suppressed, got %q", out.String())
+		}
+	})
+}
+
 func TestExtractPlanTitle(t *testing.T) {
 	tests := []struct {
 		input string

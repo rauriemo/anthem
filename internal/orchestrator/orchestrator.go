@@ -2208,6 +2208,155 @@ func extractPlanBlock(output string) string {
 	return output[start : start+end]
 }
 
+// sanitizePlanOutput strips JSON action blocks and HTML content from plan mode
+// output, keeping only the markdown text. This is a structural enforcement that
+// prevents the LLM from producing non-markdown output in plan mode regardless
+// of whether it follows prompt instructions.
+func sanitizePlanOutput(raw string) string {
+	// First try extracting a proper anthem-plan block
+	if block := extractPlanBlock(raw); block != "" {
+		return block
+	}
+
+	// If the entire output is a JSON object (starts with { after trimming),
+	// try to extract the "reasoning" field as fallback text
+	trimmed := strings.TrimSpace(raw)
+	if strings.HasPrefix(trimmed, "{") {
+		if reasoning := extractJSONReasoning(trimmed); reasoning != "" {
+			return reasoning
+		}
+		// Pure JSON with no usable reasoning — return a marker so caller knows
+		return ""
+	}
+
+	// Strip inline JSON blocks: lines that look like {"reasoning":... or {"actions":...
+	var lines []string
+	inJSON := false
+	braceDepth := 0
+	for _, line := range strings.Split(raw, "\n") {
+		stripped := strings.TrimSpace(line)
+
+		if !inJSON && (strings.HasPrefix(stripped, "{\"reasoning\"") ||
+			strings.HasPrefix(stripped, "{\"actions\"") ||
+			strings.HasPrefix(stripped, "[{\"type\"")) {
+			inJSON = true
+			braceDepth = 0
+		}
+
+		if inJSON {
+			braceDepth += strings.Count(stripped, "{") + strings.Count(stripped, "[")
+			braceDepth -= strings.Count(stripped, "}") + strings.Count(stripped, "]")
+			if braceDepth <= 0 {
+				inJSON = false
+			}
+			continue
+		}
+
+		// Strip standalone HTML blocks (self-contained <html>...</html> or <!DOCTYPE...>)
+		if strings.HasPrefix(stripped, "<!DOCTYPE") || strings.HasPrefix(stripped, "<html") {
+			inJSON = true // reuse flag to skip until closing tag
+			if strings.Contains(stripped, "</html>") {
+				inJSON = false
+			}
+			continue
+		}
+		if inJSON && strings.Contains(stripped, "</html>") {
+			inJSON = false
+			continue
+		}
+		if inJSON {
+			continue
+		}
+
+		lines = append(lines, line)
+	}
+
+	result := strings.TrimSpace(strings.Join(lines, "\n"))
+	if result == "" {
+		return raw // nothing left after stripping — return original as last resort
+	}
+	return result
+}
+
+// extractJSONReasoning pulls the "reasoning" value from a JSON string that
+// looks like an orchestrator action response.
+func extractJSONReasoning(jsonStr string) string {
+	idx := strings.Index(jsonStr, "\"reasoning\"")
+	if idx == -1 {
+		return ""
+	}
+	// Find the colon, then the opening quote of the value
+	rest := jsonStr[idx+len("\"reasoning\""):]
+	colonIdx := strings.Index(rest, ":")
+	if colonIdx == -1 {
+		return ""
+	}
+	rest = strings.TrimSpace(rest[colonIdx+1:])
+	if len(rest) == 0 || rest[0] != '"' {
+		return ""
+	}
+	// Simple JSON string extraction (handles \" escapes)
+	var b strings.Builder
+	escaped := false
+	for i := 1; i < len(rest); i++ {
+		if escaped {
+			b.WriteByte(rest[i])
+			escaped = false
+			continue
+		}
+		if rest[i] == '\\' {
+			escaped = true
+			continue
+		}
+		if rest[i] == '"' {
+			return b.String()
+		}
+		b.WriteByte(rest[i])
+	}
+	return b.String()
+}
+
+// planStreamFilter wraps an onStream callback to suppress JSON action blocks
+// and HTML during real-time streaming. Markdown passes through unchanged.
+type planStreamFilter struct {
+	inner      func(string)
+	buf        strings.Builder
+	suppressed bool
+}
+
+func newPlanStreamFilter(inner func(string)) *planStreamFilter {
+	return &planStreamFilter{inner: inner}
+}
+
+func (f *planStreamFilter) Write(delta string) {
+	f.buf.WriteString(delta)
+	content := f.buf.String()
+
+	// If we're inside a suppressed block, check if it ended
+	if f.suppressed {
+		if (strings.Contains(content, "}\n") && !strings.Contains(content, "```")) ||
+			strings.Contains(content, "</html>") {
+			f.suppressed = false
+			f.buf.Reset()
+		}
+		return
+	}
+
+	// Detect start of JSON action block or HTML in the buffer
+	trimmed := strings.TrimSpace(content)
+	if strings.HasPrefix(trimmed, "{\"reasoning\"") ||
+		strings.HasPrefix(trimmed, "{\"actions\"") ||
+		strings.HasPrefix(trimmed, "[{\"type\"") ||
+		strings.HasPrefix(trimmed, "<!DOCTYPE") ||
+		strings.HasPrefix(trimmed, "<html") {
+		f.suppressed = true
+		return
+	}
+
+	// Not suppressed and no JSON/HTML detected — forward
+	f.inner(delta)
+}
+
 const explorerCostTaskID = "__explorer__"
 
 func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.IncomingMessage, model string) {
@@ -2221,7 +2370,7 @@ func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.Incomi
 		return
 	}
 
-	onStream := func(delta string) {
+	rawStream := func(delta string) {
 		if o.channelMgr != nil {
 			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
 				StreamDelta: delta,
@@ -2229,6 +2378,8 @@ func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.Incomi
 			})
 		}
 	}
+	filter := newPlanStreamFilter(rawStream)
+	onStream := func(delta string) { filter.Write(delta) }
 
 	snap := o.buildPlanSnapshot(ctx, msg, cleanText)
 
@@ -2271,6 +2422,8 @@ func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.Incomi
 
 	// Phase 3: Synthesize plan from explorer findings
 	o.logger.Info("synthesizing plan from explorer findings", "findings_count", len(findings))
+	filter.buf.Reset()
+	filter.suppressed = false
 	output, err := o.orchAgent.SynthesizePlan(ctx, snap, findings, model, onStream)
 	o.recordOrchCost()
 
@@ -2350,7 +2503,7 @@ func (o *Orchestrator) handlePlanFallback(ctx context.Context, msg channel.Incom
 
 // finalizePlan extracts, saves, and broadcasts the plan artifact.
 func (o *Orchestrator) finalizePlan(ctx context.Context, msg channel.IncomingMessage, output string) {
-	planContent := extractPlanBlock(output)
+	planContent := sanitizePlanOutput(output)
 	if planContent == "" {
 		planContent = output
 	}
