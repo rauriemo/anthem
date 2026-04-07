@@ -2370,7 +2370,7 @@ func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.Incomi
 		return
 	}
 
-	rawStream := func(delta string) {
+	onStream := func(delta string) {
 		if o.channelMgr != nil {
 			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
 				StreamDelta: delta,
@@ -2378,8 +2378,6 @@ func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.Incomi
 			})
 		}
 	}
-	filter := newPlanStreamFilter(rawStream)
-	onStream := func(delta string) { filter.Write(delta) }
 
 	snap := o.buildPlanSnapshot(ctx, msg, cleanText)
 
@@ -2422,8 +2420,6 @@ func (o *Orchestrator) handlePlanMessage(ctx context.Context, msg channel.Incomi
 
 	// Phase 3: Synthesize plan from explorer findings
 	o.logger.Info("synthesizing plan from explorer findings", "findings_count", len(findings))
-	filter.buf.Reset()
-	filter.suppressed = false
 	output, err := o.orchAgent.SynthesizePlan(ctx, snap, findings, model, onStream)
 	o.recordOrchCost()
 
@@ -2501,27 +2497,67 @@ func (o *Orchestrator) handlePlanFallback(ctx context.Context, msg channel.Incom
 	o.handlePlanOutput(ctx, msg, output)
 }
 
-// handlePlanOutput routes plan mode output: if it contains a structured
-// anthem-plan block it gets saved as a plan artifact with a PlanCard;
-// otherwise it's sent as a plain text reply (conversational plan discussion).
+// isSubstantialOutput returns true if the output looks like a real plan/analysis
+// rather than a short conversational reply.
+func isSubstantialOutput(output string) bool {
+	trimmed := strings.TrimSpace(output)
+	if len(trimmed) < 500 {
+		return false
+	}
+	return strings.Contains(trimmed, "<html") ||
+		strings.Contains(trimmed, "<!DOCTYPE") ||
+		strings.Contains(trimmed, "## Tasks") ||
+		strings.Contains(trimmed, "## Analysis") ||
+		strings.Contains(trimmed, "Implementation Plan") ||
+		strings.Contains(trimmed, "plan-item") ||
+		strings.Contains(trimmed, "plan-title")
+}
+
+// handlePlanOutput routes plan mode output based on content:
+//   - anthem-plan markdown block -> save as plan file + PlanCard
+//   - substantial HTML/analysis -> broadcast as display artifact + PlanCard
+//   - short conversational text -> send as plain text reply
 func (o *Orchestrator) handlePlanOutput(ctx context.Context, msg channel.IncomingMessage, output string) {
+	// Path 1: structured markdown plan
 	if extractPlanBlock(output) != "" {
 		o.finalizePlan(ctx, msg, output)
 		return
 	}
 
-	// No structured plan block — treat as conversational text reply
-	clean := sanitizePlanOutput(output)
-	if clean == "" {
-		clean = output
+	// Path 2: substantial HTML or analysis — broadcast as artifact + PlanCard
+	if isSubstantialOutput(output) {
+		o.finalizeHTMLPlan(ctx, msg, output)
+		return
 	}
-	o.sendFollowUp(ctx, msg, clean)
+
+	// Path 3: conversational reply
+	o.sendFollowUp(ctx, msg, output)
 	o.recordAudit(ctx, "channel.plan_reply", "", strPtr("plan"))
 }
 
-// finalizePlan extracts, saves, and broadcasts the plan artifact.
+// finalizeHTMLPlan broadcasts an HTML plan as a display artifact and sends a PlanCard.
+func (o *Orchestrator) finalizeHTMLPlan(ctx context.Context, msg channel.IncomingMessage, output string) {
+	if o.channelMgr != nil {
+		component := map[string]any{
+			"kind":    "html",
+			"content": output,
+		}
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			Display:   component,
+			DisplayID: newDisplayID(),
+			ThreadID:  msg.ThreadID,
+		})
+
+		card := buildPlanCardFromHTML(output)
+		o.sendFollowUp(ctx, msg, card)
+	}
+
+	o.recordAudit(ctx, "channel.plan_proposed", "", strPtr("plan"))
+}
+
+// finalizePlan extracts, saves, and broadcasts the plan artifact (markdown path).
 func (o *Orchestrator) finalizePlan(ctx context.Context, msg channel.IncomingMessage, output string) {
-	planContent := sanitizePlanOutput(output)
+	planContent := extractPlanBlock(output)
 	if planContent == "" {
 		planContent = output
 	}
@@ -2914,6 +2950,115 @@ func buildPlanCard(planContent, planPath string) string {
 		"overview": extractPlanOverview(planContent),
 		"tasks":    extractPlanTasks(planContent),
 		"planPath": planPath,
+	}
+	data, _ := json.Marshal(card)
+	return "[plan-card]" + string(data) + "[/plan-card]"
+}
+
+var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
+
+// stripHTMLTags removes all HTML tags from a string.
+func stripHTMLTags(s string) string {
+	return strings.TrimSpace(htmlTagRe.ReplaceAllString(s, ""))
+}
+
+// extractHTMLPlanTitle pulls the text content from the first <h1> tag.
+func extractHTMLPlanTitle(html string) string {
+	lower := strings.ToLower(html)
+	start := strings.Index(lower, "<h1")
+	if start == -1 {
+		return ""
+	}
+	// Find the closing > of the opening tag
+	tagEnd := strings.Index(html[start:], ">")
+	if tagEnd == -1 {
+		return ""
+	}
+	contentStart := start + tagEnd + 1
+	end := strings.Index(lower[contentStart:], "</h1>")
+	if end == -1 {
+		return ""
+	}
+	return stripHTMLTags(html[contentStart : contentStart+end])
+}
+
+var htmlPlanTitleRe = regexp.MustCompile(`(?i)<div\s+class=['"]plan-title['"][^>]*>(.*?)</div>`)
+var htmlStrongInPlanRe = regexp.MustCompile(`(?i)<div\s+class=['"]plan-content['"][^>]*>.*?<(?:div|span)\s+class=['"]plan-title['"][^>]*>(.*?)</(?:div|span)>`)
+var htmlPlanItemStrongRe = regexp.MustCompile(`(?i)<div\s+class=['"]plan-item['"].*?<strong>(.*?)</strong>`)
+
+// extractHTMLPlanTasks pulls task titles from common HTML plan structures.
+func extractHTMLPlanTasks(html string) []string {
+	var tasks []string
+
+	// Try plan-title divs first
+	if matches := htmlPlanTitleRe.FindAllStringSubmatch(html, -1); len(matches) > 0 {
+		for _, m := range matches {
+			title := stripHTMLTags(m[1])
+			if title != "" {
+				tasks = append(tasks, title)
+			}
+		}
+		return tasks
+	}
+
+	// Try strong tags inside plan-item divs
+	if matches := htmlPlanItemStrongRe.FindAllStringSubmatch(html, -1); len(matches) > 0 {
+		for _, m := range matches {
+			title := stripHTMLTags(m[1])
+			if title != "" {
+				tasks = append(tasks, title)
+			}
+		}
+		return tasks
+	}
+
+	return tasks
+}
+
+// extractHTMLPlanOverview pulls the subtitle or first paragraph after h1.
+func extractHTMLPlanOverview(html string) string {
+	// Try .subtitle class
+	subRe := regexp.MustCompile(`(?i)<p\s+class=['"]subtitle['"][^>]*>(.*?)</p>`)
+	if m := subRe.FindStringSubmatch(html); m != nil {
+		text := stripHTMLTags(m[1])
+		if text != "" {
+			return text
+		}
+	}
+	// Try first <p> after <h1>
+	lower := strings.ToLower(html)
+	h1End := strings.Index(lower, "</h1>")
+	if h1End == -1 {
+		return ""
+	}
+	rest := html[h1End:]
+	pStart := strings.Index(strings.ToLower(rest), "<p")
+	if pStart == -1 {
+		return ""
+	}
+	pTagEnd := strings.Index(rest[pStart:], ">")
+	if pTagEnd == -1 {
+		return ""
+	}
+	pContentStart := pStart + pTagEnd + 1
+	pEnd := strings.Index(strings.ToLower(rest[pContentStart:]), "</p>")
+	if pEnd == -1 {
+		return ""
+	}
+	return stripHTMLTags(rest[pContentStart : pContentStart+pEnd])
+}
+
+// buildPlanCardFromHTML builds a [plan-card] JSON string from HTML plan output.
+func buildPlanCardFromHTML(html string) string {
+	title := extractHTMLPlanTitle(html)
+	if title == "" {
+		title = "Plan"
+	}
+	card := map[string]any{
+		"title":    title,
+		"overview": extractHTMLPlanOverview(html),
+		"tasks":    extractHTMLPlanTasks(html),
+		"planPath": "",
 	}
 	data, _ := json.Marshal(card)
 	return "[plan-card]" + string(data) + "[/plan-card]"

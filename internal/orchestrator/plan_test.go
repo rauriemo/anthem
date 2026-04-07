@@ -540,6 +540,162 @@ func TestBuildPlanCard(t *testing.T) {
 	}
 }
 
+func TestExtractHTMLPlanTitle(t *testing.T) {
+	tests := []struct {
+		name string
+		html string
+		want string
+	}{
+		{
+			name: "simple h1",
+			html: `<html><body><h1>Test Coverage Analysis</h1></body></html>`,
+			want: "Test Coverage Analysis",
+		},
+		{
+			name: "h1 with inner span",
+			html: `<h1><span class='icon'>X</span> Coverage Report</h1>`,
+			want: "X Coverage Report",
+		},
+		{
+			name: "h1 with class attribute",
+			html: `<h1 class="title">My Plan Title</h1>`,
+			want: "My Plan Title",
+		},
+		{
+			name: "no h1 returns empty",
+			html: `<html><body><h2>Not a title</h2></body></html>`,
+			want: "",
+		},
+		{
+			name: "empty string returns empty",
+			html: "",
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractHTMLPlanTitle(tt.html)
+			if got != tt.want {
+				t.Errorf("extractHTMLPlanTitle() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractHTMLPlanTasks(t *testing.T) {
+	tests := []struct {
+		name string
+		html string
+		want []string
+	}{
+		{
+			name: "plan-title divs",
+			html: `<div class='plan-item'><div class='plan-title'>Backend: main.py tests</div></div>` +
+				`<div class='plan-item'><div class='plan-title'>Frontend: WebSocket tests</div></div>`,
+			want: []string{"Backend: main.py tests", "Frontend: WebSocket tests"},
+		},
+		{
+			name: "strong tags in plan-item",
+			html: `<div class='plan-item'><span class='plan-num'>1</span><div class='plan-content'><strong>Add unit tests</strong></div></div>` +
+				`<div class='plan-item'><span class='plan-num'>2</span><div class='plan-content'><strong>Fix linter</strong></div></div>`,
+			want: []string{"Add unit tests", "Fix linter"},
+		},
+		{
+			name: "no plan items returns nil",
+			html: `<html><body><p>Just a paragraph</p></body></html>`,
+			want: nil,
+		},
+		{
+			name: "nested HTML in plan-title stripped",
+			html: `<div class='plan-title'><strong>Task</strong> with <em>emphasis</em></div>`,
+			want: []string{"Task with emphasis"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractHTMLPlanTasks(tt.html)
+			if len(got) != len(tt.want) {
+				t.Fatalf("extractHTMLPlanTasks() returned %d tasks, want %d: %v", len(got), len(tt.want), got)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("task[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestBuildPlanCardFromHTML(t *testing.T) {
+	html := `<!DOCTYPE html><html><body>` +
+		`<h1>Prism Test Coverage</h1>` +
+		`<p class='subtitle'>Full audit of test coverage</p>` +
+		`<div class='plan-item'><div class='plan-title'>Backend: main.py tests</div></div>` +
+		`<div class='plan-item'><div class='plan-title'>Frontend: hook tests</div></div>` +
+		`</body></html>`
+
+	card := buildPlanCardFromHTML(html)
+
+	if !strings.HasPrefix(card, "[plan-card]") || !strings.HasSuffix(card, "[/plan-card]") {
+		t.Fatalf("expected [plan-card]...[/plan-card], got %q", card)
+	}
+	if !strings.Contains(card, `"title":"Prism Test Coverage"`) {
+		t.Error("card missing title")
+	}
+	if !strings.Contains(card, `"overview":"Full audit of test coverage"`) {
+		t.Error("card missing overview")
+	}
+	if !strings.Contains(card, `"Backend: main.py tests"`) {
+		t.Error("card missing first task")
+	}
+	if !strings.Contains(card, `"Frontend: hook tests"`) {
+		t.Error("card missing second task")
+	}
+	if !strings.Contains(card, `"planPath":""`) {
+		t.Error("card should have empty planPath for HTML")
+	}
+}
+
+func TestIsSubstantialOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{
+			name: "short conversational reply",
+			out:  "The coverage looks good. I'd suggest focusing on WebSocket tests next.",
+			want: false,
+		},
+		{
+			name: "long HTML with plan structure",
+			out:  "<html><body>" + strings.Repeat("x", 500) + "<div class='plan-item'>task</div></body></html>",
+			want: true,
+		},
+		{
+			name: "long markdown with tasks section",
+			out:  strings.Repeat("x", 500) + "\n## Tasks\n### 1. Do thing",
+			want: true,
+		},
+		{
+			name: "long but generic text",
+			out:  strings.Repeat("The project has good coverage. ", 30),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isSubstantialOutput(tt.out)
+			if got != tt.want {
+				t.Errorf("isSubstantialOutput() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFinalizePlan_SendsPlanCard(t *testing.T) {
 	planOutput := "```anthem-plan\n# Coverage Plan\n\nOverview text here.\n\n## Tasks\n\n### 1. Add unit tests\n### 2. Fix linter\n```\n"
 
@@ -634,17 +790,81 @@ func TestHandlePlanOutput_ConversationalReply(t *testing.T) {
 	}
 }
 
+func TestHandlePlanOutput_HTMLArtifact(t *testing.T) {
+	htmlOutput := `<!DOCTYPE html><html><body>` +
+		`<h1>Test Coverage Analysis</h1>` +
+		`<p class='subtitle'>Full audit of backend and frontend</p>` +
+		strings.Repeat(`<div class='plan-item'><div class='plan-title'>Task item</div></div>`, 20) +
+		`</body></html>`
+
+	orchRunner := agent.NewMockRunner()
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		if strings.Contains(opts.Prompt, "Scout Mode") {
+			return &types.RunResult{
+				SessionID: "scout-s1",
+				Output:    `{"reasoning": "need research", "explores": [], "user_message": ""}`,
+				TokensIn:  10, TokensOut: 5,
+			}, nil
+		}
+		return &types.RunResult{
+			SessionID: "plan-s1",
+			Output:    htmlOutput,
+			TokensIn:  200, TokensOut: 100,
+		}, nil
+	}
+
+	orch, ch := newPlanTestOrch(t, orchRunner)
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "prism",
+		SenderID:    "user-1",
+		ThreadID:    "t1",
+		Text:        "[system:plan] Create a test coverage analysis",
+		Timestamp:   time.Now(),
+	})
+
+	sent := ch.sentMessages()
+	var foundCard bool
+	for _, msg := range sent {
+		if strings.Contains(msg.Text, "[plan-card]") && strings.Contains(msg.Text, "[/plan-card]") {
+			foundCard = true
+			if !strings.Contains(msg.Text, `"title":"Test Coverage Analysis"`) {
+				t.Errorf("plan card missing title, got %q", msg.Text)
+			}
+			if !strings.Contains(msg.Text, `"planPath":""`) {
+				t.Errorf("HTML plan card should have empty planPath, got %q", msg.Text)
+			}
+		}
+	}
+	if !foundCard {
+		t.Error("expected a [plan-card] message for HTML artifact output")
+	}
+
+	// Verify display was broadcast as html kind
+	displays := ch.sentDisplays()
+	var foundHTML bool
+	for _, d := range displays {
+		if kind, ok := d["kind"].(string); ok && kind == "html" {
+			foundHTML = true
+		}
+	}
+	if !foundHTML {
+		t.Error("expected display broadcast with kind=html for HTML plan output")
+	}
+}
+
 func TestPlanModePromptContents(t *testing.T) {
 	checks := []string{
 		"PLANNING mode",
 		"READ-ONLY",
 		"Conversational reply",
-		"Structured plan",
+		"Rich visual plan",
+		"Structured markdown plan",
+		"html kind",
 		"Stage 1: Research",
 		"Stage 2: Synthesis",
 		"MUST explore",
 		"at least 5 tool calls",
-		"Do NOT output JSON actions",
 		"anthem-plan",
 		"todo",
 	}

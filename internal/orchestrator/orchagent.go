@@ -577,15 +577,19 @@ const planModePromptSuffix = `
 
 ## Plan Mode
 
-You are in PLANNING mode. You have READ-ONLY access — write tools (Write, Edit, MultiEdit) are disabled. Your output is plain text (with markdown formatting). Do NOT output JSON actions, HTML, or display artifacts.
+You are in PLANNING mode. You have READ-ONLY access — write tools (Write, Edit, MultiEdit) are disabled.
 
 ### How to respond
 
-You can respond in two ways depending on the user's message:
+You can respond in three ways depending on the user's message:
 
-1. **Conversational reply** — If the user asks a question, wants clarification, or is discussing a plan, reply with normal text. Do NOT create a formal plan for every message. Keep it natural.
+1. **Conversational reply** — If the user asks a question, wants clarification, or is discussing a plan, reply with normal text in the reply action body. Keep it natural.
 
-2. **Structured plan** — When the user explicitly asks you to create, update, or produce a plan, follow the Research and Synthesis stages below and wrap the plan in a ` + "```anthem-plan" + ` fenced block. Only responses wrapped in this block are saved as plan artifacts.
+2. **Rich visual plan** — For data-rich analysis with coverage metrics, charts, tables, or prioritized task lists, produce a well-designed HTML page via a display action (html kind). Use styled layouts, color-coded severity badges, progress bars, and structured task sections. This is the preferred format for comprehensive analysis and audit reports.
+
+3. **Structured markdown plan** — For simpler implementation plans with clear task breakdowns, use the anthem-plan markdown format. Wrap the plan in a ` + "```anthem-plan" + ` fenced block. Only responses wrapped in this block are saved as markdown plan files.
+
+Choose the format that best serves the content. Rich analysis with metrics → HTML. Simple task list → markdown.
 
 ### Stage 1: Research (MANDATORY for plans)
 
@@ -603,7 +607,15 @@ Do NOT skip this stage. Do NOT generate a plan from memory or the project contex
 
 ### Stage 2: Synthesis
 
-Only after thorough research, produce a structured markdown plan:
+After thorough research, produce your plan in the chosen format:
+
+**For HTML (data-rich reports):**
+- Use a display action with html kind containing a self-contained HTML page
+- Include an h1 title, a subtitle with overview, and structured task sections
+- Use div elements with class "plan-item" and "plan-title" for task entries so they can be extracted
+- Include a reply action with body "" (empty) since the visual is the primary surface
+
+**For markdown plans:**
 - A title heading (# Title)
 - A "## Analysis" section summarizing what you found during research, citing specific files, functions, and line numbers
 - A "## Tasks" section with numbered subsections (### 1. Task Title) each with:
@@ -639,9 +651,9 @@ Steps:
 
 The create_subtasks action is the ONLY way work gets dispatched to executors. If you skip it, nothing will be built.`
 
-// ConsultPlan runs a plan-mode consultation. The LLM returns markdown, not JSON actions.
+// ConsultPlan runs a plan-mode consultation.
 func (o *OrchestratorAgent) ConsultPlan(ctx context.Context, state StateSnapshot, model string, onStream func(string)) (string, error) {
-	prompt := buildPlanSystemPrompt(o.voiceContent) + planModePromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
+	prompt := buildSystemPrompt(o.voiceContent) + planModePromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
 
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		Prompt:         prompt,
@@ -716,23 +728,24 @@ const synthesisPromptSuffix = `
 
 ## Synthesis Mode
 
-You are in SYNTHESIS mode. Explorer agents have investigated the codebase in parallel and their findings are provided below. Your job is to synthesize these findings into a well-structured plan. Your output is plain text with markdown formatting. Do NOT output JSON actions, HTML, or display artifacts.
+You are in SYNTHESIS mode. Explorer agents have investigated the codebase in parallel and their findings are provided below. Your job is to synthesize these findings into a well-structured plan.
 
 CRITICAL: Every claim in your plan MUST be backed by explorer findings. Do not add tasks based on assumptions — only on verified evidence from the research below.
 
-Produce a structured markdown plan:
+Choose the output format that best serves the content:
+
+**For data-rich analysis** (coverage audits, metrics, prioritized lists with severity badges): produce a well-designed HTML page via a display action (html kind). Use styled layouts, progress bars, color-coded badges. Include task sections using div elements with class "plan-item" and "plan-title" so tasks can be extracted. Set the reply body to "" (empty).
+
+**For simpler implementation plans**: produce a structured markdown plan with:
 - A title heading (# Title)
-- A "## Analysis" section summarizing key findings from the explorers, citing specific files, functions, and line numbers they reported
-- A "## Tasks" section with numbered subsections (### 1. Task Title) each with:
-  - **Labels:** always start with "todo", then descriptive labels
-  - **Profile:** recommended executor profile (coder, architect, tester, debugger)
-  - **Depends on:** task numbers this depends on, or "none"
-  - **Description:** detailed implementation steps referencing specific files and code the explorers actually found
+- A "## Analysis" section summarizing key findings, citing specific files, functions, and line numbers
+- A "## Tasks" section with numbered subsections (### 1. Task Title) each with Labels, Profile, Depends on, Description
+- Wrap in: ` + "```anthem-plan\n...\n```" + `
+
+Either way:
 - If explorers reported gaps or errors, note them in the Analysis section
-- If an existing plan draft is in the state, refine it using the new research rather than starting from scratch
-- Do NOT output JSON actions. Do NOT create issues, dispatch, or execute anything.
-- Wrap the plan in: ` + "```anthem-plan\n...\n```" + `
-- You may include conversational commentary outside the fenced block.`
+- If an existing plan draft is in the state, refine it rather than starting from scratch
+- Do NOT create issues, dispatch, or execute anything — plan only.`
 
 // focusSpecificInstructions returns additional prompt guidance based on the
 // explorer's focus category. Empty string for focus types with no extra guidance.
@@ -863,7 +876,7 @@ func truncateForSummary(s string, maxLen int) string {
 
 // ScoutPlan runs the scout phase: identifies areas needing deep research.
 func (o *OrchestratorAgent) ScoutPlan(ctx context.Context, state StateSnapshot, model string, onStream func(string)) ([]ExploreRequest, string, error) {
-	prompt := buildPlanSystemPrompt(o.voiceContent) + scoutPromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
+	prompt := buildSystemPrompt(o.voiceContent) + scoutPromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
 
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		Prompt:         prompt,
@@ -917,7 +930,7 @@ func (o *OrchestratorAgent) SynthesizePlan(ctx context.Context, state StateSnaps
 		}
 	}
 
-	prompt := buildPlanSystemPrompt(o.voiceContent) + synthesisPromptSuffix + findingsText.String() + "\n\n## Current State\n\n" + state.Serialize()
+	prompt := buildSystemPrompt(o.voiceContent) + synthesisPromptSuffix + findingsText.String() + "\n\n## Current State\n\n" + state.Serialize()
 
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		Prompt:         prompt,
