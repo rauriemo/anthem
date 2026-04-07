@@ -298,6 +298,21 @@ agent:
 
 Before each agent launch, Anthem writes `.mcp.json` and copies skills to `.claude/skills/` in the workspace. Claude Code auto-discovers both via its native three-level progressive loading.
 
+#### Built-in Skills
+
+Anthem ships 6 core skills compiled into the binary via `go:embed`. These are automatically available to all agents without any external dependencies:
+
+| Skill | Purpose | Default profiles |
+|-------|---------|-----------------|
+| `anthem://test-verifier` | Go test pyramid: tier selection, coverage collection, structured reports | tester, test-explorer |
+| `anthem://gh-issue-verifier` | Evidence-based GitHub issue verification with verdicts | Global (all agents) |
+| `anthem://code-review` | Structured 4-category review (security, performance, quality, tests) | Global (all agents), security-explorer |
+| `anthem://tdd-classicist` | Language-agnostic TDD methodology, test-double taxonomy | tester, debugger, test-explorer |
+| `anthem://go-cli` | Go CLI doctrine: command grammar, exit codes, agent-friendly design | coder |
+| `anthem://commit-hygiene` | Conventional commits, separation of concerns, PR quality | coder |
+
+Global skills apply to every agent. Profile-specific skills are loaded only when that profile is active. User-added skills in `~/.anthem/skills/` are also supported as a filesystem fallback.
+
 ### Channels
 
 Two-way communication with the orchestrator via pluggable channel adapters. Global credentials live in `~/.anthem/channels.yaml`; per-project channel targets go in WORKFLOW.md.

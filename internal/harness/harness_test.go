@@ -337,3 +337,377 @@ func TestResolveSkillRefs_EmptyInputs(t *testing.T) {
 		t.Errorf("expected empty result, got %v", result)
 	}
 }
+
+func TestWriteEmbeddedSkill_CoreSkillsExist(t *testing.T) {
+	coreSkills := []string{
+		"test-verifier",
+		"gh-issue-verifier",
+		"code-review",
+		"tdd-classicist",
+		"go-cli",
+		"commit-hygiene",
+	}
+
+	for _, name := range coreSkills {
+		t.Run(name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), name)
+			found, err := WriteEmbeddedSkill(name, dst)
+			if err != nil {
+				t.Fatalf("WriteEmbeddedSkill(%q) error: %v", name, err)
+			}
+			if !found {
+				t.Fatalf("expected embedded skill %q to exist", name)
+			}
+
+			skillFile := filepath.Join(dst, "SKILL.md")
+			data, err := os.ReadFile(skillFile)
+			if err != nil {
+				t.Fatalf("expected SKILL.md in %q: %v", name, err)
+			}
+			if len(data) < 100 {
+				t.Errorf("SKILL.md for %q is suspiciously small (%d bytes)", name, len(data))
+			}
+		})
+	}
+}
+
+func TestWriteEmbeddedSkill_NonexistentReturnsFalse(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "nonexistent")
+	found, err := WriteEmbeddedSkill("does-not-exist", dst)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if found {
+		t.Error("expected found=false for nonexistent skill")
+	}
+}
+
+func TestWriteEmbeddedSkill_SkillMDHasFrontmatter(t *testing.T) {
+	coreSkills := []string{
+		"test-verifier",
+		"gh-issue-verifier",
+		"code-review",
+		"tdd-classicist",
+		"go-cli",
+		"commit-hygiene",
+	}
+
+	for _, name := range coreSkills {
+		t.Run(name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), name)
+			if _, err := WriteEmbeddedSkill(name, dst); err != nil {
+				t.Fatal(err)
+			}
+
+			data, err := os.ReadFile(filepath.Join(dst, "SKILL.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			content := string(data)
+			if content[:4] != "---\n" {
+				t.Errorf("SKILL.md for %q should start with YAML frontmatter (---)", name)
+			}
+		})
+	}
+}
+
+func TestPrepareSkills_EmbeddedFallback(t *testing.T) {
+	wsDir := t.TempDir()
+	refs := []string{"anthem://test-verifier"}
+
+	if err := PrepareSkills(wsDir, refs, t.TempDir(), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	skillFile := filepath.Join(wsDir, ".claude", "skills", "test-verifier", "SKILL.md")
+	data, err := os.ReadFile(skillFile)
+	if err != nil {
+		t.Fatalf("expected embedded skill to be extracted: %v", err)
+	}
+	if len(data) < 100 {
+		t.Error("extracted SKILL.md is too small")
+	}
+}
+
+func TestPrepareSkills_AllEmbeddedSkillsExtract(t *testing.T) {
+	wsDir := t.TempDir()
+	refs := []string{
+		"anthem://test-verifier",
+		"anthem://gh-issue-verifier",
+		"anthem://code-review",
+		"anthem://tdd-classicist",
+		"anthem://go-cli",
+		"anthem://commit-hygiene",
+	}
+
+	if err := PrepareSkills(wsDir, refs, t.TempDir(), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, ref := range refs {
+		name := ref[len("anthem://"):]
+		skillFile := filepath.Join(wsDir, ".claude", "skills", name, "SKILL.md")
+		if _, err := os.Stat(skillFile); err != nil {
+			t.Errorf("expected %s to be extracted: %v", name, err)
+		}
+	}
+}
+
+func TestPrepareSkills_EmbeddedTakesPriorityOverFilesystem(t *testing.T) {
+	wsDir := t.TempDir()
+	builtinDir := t.TempDir()
+
+	// Create a filesystem version with distinct content
+	skillDir := filepath.Join(builtinDir, "test-verifier")
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("filesystem version"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	refs := []string{"anthem://test-verifier"}
+	if err := PrepareSkills(wsDir, refs, builtinDir, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(wsDir, ".claude", "skills", "test-verifier", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Embedded version should win (it has YAML frontmatter)
+	if string(data) == "filesystem version" {
+		t.Error("expected embedded skill to take priority over filesystem")
+	}
+	if string(data[:3]) != "---" {
+		t.Error("expected embedded skill YAML frontmatter")
+	}
+}
+
+func TestPrepareSkills_MixedEmbeddedAndLocal(t *testing.T) {
+	wsDir := t.TempDir()
+	refs := []string{
+		"anthem://code-review",
+		"./skills/my-project-skill",
+		"anthem://commit-hygiene",
+	}
+
+	if err := PrepareSkills(wsDir, refs, t.TempDir(), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Embedded skills should be extracted
+	if _, err := os.Stat(filepath.Join(wsDir, ".claude", "skills", "code-review", "SKILL.md")); err != nil {
+		t.Error("expected code-review to be extracted")
+	}
+	if _, err := os.Stat(filepath.Join(wsDir, ".claude", "skills", "commit-hygiene", "SKILL.md")); err != nil {
+		t.Error("expected commit-hygiene to be extracted")
+	}
+
+	// Project-local should NOT be copied
+	if _, err := os.Stat(filepath.Join(wsDir, ".claude", "skills", "my-project-skill")); !os.IsNotExist(err) {
+		t.Error("project-local skill should not be copied")
+	}
+}
+
+func TestResolveMCPServers_GlobalRefs(t *testing.T) {
+	registry := map[string]config.MCPServerConfig{
+		"unity":   {Command: "npx", Args: []string{"unity"}},
+		"semgrep": {Command: "semgrep-mcp"},
+		"github":  {Command: "npx", Args: []string{"github"}},
+	}
+
+	result := ResolveMCPServers(registry, []string{"unity", "github"}, nil)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 servers from globalRefs, got %d", len(result))
+	}
+	if _, ok := result["unity"]; !ok {
+		t.Error("missing unity from global refs")
+	}
+	if _, ok := result["github"]; !ok {
+		t.Error("missing github from global refs")
+	}
+	if _, ok := result["semgrep"]; ok {
+		t.Error("semgrep should not be included (not in globalRefs)")
+	}
+}
+
+func TestResolveMCPServers_GlobalAndProfileMerge(t *testing.T) {
+	registry := map[string]config.MCPServerConfig{
+		"unity":   {Command: "npx", Args: []string{"unity"}},
+		"semgrep": {Command: "semgrep-mcp"},
+		"github":  {Command: "npx", Args: []string{"github"}},
+	}
+
+	result := ResolveMCPServers(registry, []string{"github"}, []string{"semgrep"})
+	if len(result) != 2 {
+		t.Fatalf("expected 2 servers (1 global + 1 profile), got %d", len(result))
+	}
+	if _, ok := result["github"]; !ok {
+		t.Error("missing github from global refs")
+	}
+	if _, ok := result["semgrep"]; !ok {
+		t.Error("missing semgrep from profile refs")
+	}
+}
+
+func TestResolveMCPServers_EmptyRegistry(t *testing.T) {
+	result := ResolveMCPServers(nil, []string{"anything"}, []string{"whatever"})
+	if len(result) != 0 {
+		t.Errorf("expected empty result from nil registry, got %d", len(result))
+	}
+}
+
+func TestResolveMCPServers_EmptyRefs(t *testing.T) {
+	registry := map[string]config.MCPServerConfig{
+		"unity": {Command: "npx"},
+	}
+	result := ResolveMCPServers(registry, nil, nil)
+	if len(result) != 0 {
+		t.Errorf("expected empty result with no refs, got %d", len(result))
+	}
+}
+
+func TestWriteEmbeddedSkill_ContentPreserved(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "code-review")
+	found, err := WriteEmbeddedSkill("code-review", dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("expected code-review to exist")
+	}
+
+	data, err := os.ReadFile(filepath.Join(dst, "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := string(data)
+	// Verify key content sections are preserved
+	if !contains(content, "name: code-review") {
+		t.Error("missing frontmatter name field")
+	}
+	if !contains(content, "## When to use this skill") {
+		t.Error("missing 'When to use' section")
+	}
+	if !contains(content, "## When NOT to use") {
+		t.Error("missing 'When NOT to use' section")
+	}
+	if !contains(content, "## Output contract") {
+		t.Error("missing output contract section")
+	}
+}
+
+func TestWriteEmbeddedSkill_AllSkillsHaveRequiredSections(t *testing.T) {
+	coreSkills := []string{
+		"test-verifier",
+		"gh-issue-verifier",
+		"code-review",
+		"tdd-classicist",
+		"go-cli",
+		"commit-hygiene",
+	}
+
+	requiredSections := []string{
+		"## When to use",
+		"## When NOT to use",
+	}
+
+	for _, name := range coreSkills {
+		t.Run(name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), name)
+			if _, err := WriteEmbeddedSkill(name, dst); err != nil {
+				t.Fatal(err)
+			}
+
+			data, err := os.ReadFile(filepath.Join(dst, "SKILL.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			content := string(data)
+			for _, section := range requiredSections {
+				if !contains(content, section) {
+					t.Errorf("skill %q missing required section %q", name, section)
+				}
+			}
+		})
+	}
+}
+
+func TestWriteEmbeddedSkill_AllSkillsHaveCompositionTable(t *testing.T) {
+	coreSkills := []string{
+		"test-verifier",
+		"gh-issue-verifier",
+		"code-review",
+		"tdd-classicist",
+		"commit-hygiene",
+	}
+
+	for _, name := range coreSkills {
+		t.Run(name, func(t *testing.T) {
+			dst := filepath.Join(t.TempDir(), name)
+			if _, err := WriteEmbeddedSkill(name, dst); err != nil {
+				t.Fatal(err)
+			}
+
+			data, err := os.ReadFile(filepath.Join(dst, "SKILL.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if !contains(string(data), "## Composition with other skills") {
+				t.Errorf("skill %q missing composition table", name)
+			}
+		})
+	}
+}
+
+func TestResolveSkillRefs_ProfileOnly(t *testing.T) {
+	result := ResolveSkillRefs(nil, []string{"anthem://test-verifier", "anthem://code-review"})
+	if len(result) != 2 {
+		t.Fatalf("expected 2 skills, got %d", len(result))
+	}
+	if result[0] != "anthem://test-verifier" {
+		t.Errorf("result[0] = %q, want anthem://test-verifier", result[0])
+	}
+}
+
+func TestResolveSkillRefs_GlobalOnly(t *testing.T) {
+	result := ResolveSkillRefs([]string{"anthem://code-review", "anthem://gh-issue-verifier"}, nil)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 skills, got %d", len(result))
+	}
+}
+
+func TestResolveSkillRefs_PreservesOrder(t *testing.T) {
+	global := []string{"anthem://a", "anthem://b"}
+	profile := []string{"anthem://c", "anthem://d"}
+
+	result := ResolveSkillRefs(global, profile)
+	expected := []string{"anthem://a", "anthem://b", "anthem://c", "anthem://d"}
+	if len(result) != len(expected) {
+		t.Fatalf("expected %d skills, got %d", len(expected), len(result))
+	}
+	for i, want := range expected {
+		if result[i] != want {
+			t.Errorf("result[%d] = %q, want %q", i, result[i], want)
+		}
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && searchString(s, substr)
+}
+
+func searchString(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}

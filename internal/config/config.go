@@ -136,14 +136,38 @@ func DefaultConfig() Config {
 			StallTimeoutMS:    300000,
 			MaxRetryBackoffMS: 300000,
 			ReviewMaxTurns:    3,
+			Skills:            []string{"anthem://code-review", "anthem://gh-issue-verifier"},
 			Profiles: map[string]AgentProfile{
-				"coder":             {PromptPrefix: "You are a coding agent. Write clean, tested code."},
-				"architect":         {PromptPrefix: "You are an architect agent. Analyze and design, do not write code.", DeniedTools: []string{"Write", "Edit", "Bash"}},
-				"tester":            {PromptPrefix: "You are a testing agent. Focus on writing comprehensive tests."},
-				"debugger":          {PromptPrefix: "You are a debugger agent. A previous attempt failed. Analyze the feedback carefully and fix the issues."},
-				"explorer":          {PromptPrefix: "You are a codebase research agent. Investigate thoroughly, cite specific files and line numbers. Do not modify any files.", DeniedTools: []string{"Write", "Edit", "MultiEdit"}},
-				"security-explorer": {PromptPrefix: "You are a security research agent. Audit for OWASP Top 10, CWE-25 path traversal, injection flaws, authentication bypasses, and insecure defaults. Cite specific files and line numbers. Do not modify any files.", DeniedTools: []string{"Write", "Edit", "MultiEdit"}},
-				"test-explorer":     {PromptPrefix: "You are a test coverage analysis agent. Examine every test file, identify untested code paths, missing edge cases, and coverage gaps. Cite specific files and line numbers. Do not modify any files.", DeniedTools: []string{"Write", "Edit", "MultiEdit"}},
+				"coder": {
+					PromptPrefix: "You are a coding agent. Write clean, tested code.",
+					SkillRefs:    []string{"anthem://commit-hygiene", "anthem://go-cli"},
+				},
+				"architect": {
+					PromptPrefix: "You are an architect agent. Analyze and design, do not write code.",
+					DeniedTools:  []string{"Write", "Edit", "Bash"},
+				},
+				"tester": {
+					PromptPrefix: "You are a testing agent. Focus on writing comprehensive tests.",
+					SkillRefs:    []string{"anthem://test-verifier", "anthem://tdd-classicist"},
+				},
+				"debugger": {
+					PromptPrefix: "You are a debugger agent. A previous attempt failed. Analyze the feedback carefully and fix the issues.",
+					SkillRefs:    []string{"anthem://tdd-classicist"},
+				},
+				"explorer": {
+					PromptPrefix: "You are a codebase research agent. Investigate thoroughly, cite specific files and line numbers. Do not modify any files.",
+					DeniedTools:  []string{"Write", "Edit", "MultiEdit"},
+				},
+				"security-explorer": {
+					PromptPrefix: "You are a security research agent. Audit for OWASP Top 10, CWE-25 path traversal, injection flaws, authentication bypasses, and insecure defaults. Cite specific files and line numbers. Do not modify any files.",
+					DeniedTools:  []string{"Write", "Edit", "MultiEdit"},
+					SkillRefs:    []string{"anthem://code-review"},
+				},
+				"test-explorer": {
+					PromptPrefix: "You are a test coverage analysis agent. Examine every test file, identify untested code paths, missing edge cases, and coverage gaps. Cite specific files and line numbers. Do not modify any files.",
+					DeniedTools:  []string{"Write", "Edit", "MultiEdit"},
+					SkillRefs:    []string{"anthem://test-verifier", "anthem://tdd-classicist"},
+				},
 			},
 		},
 		System: SystemConfig{},

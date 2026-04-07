@@ -164,6 +164,7 @@ func TestResolveProfile_MCPRefsResolved(t *testing.T) {
 
 func TestResolveProfile_SkillRefsResolved(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg.Agent.Skills = nil // Clear global skills to test profile-only behavior
 	cfg.Agent.Profiles["skilled"] = config.AgentProfile{
 		SkillRefs: []string{"./skills/local-one"},
 	}
@@ -219,5 +220,117 @@ func TestResolveProfile_ExplorerProfiles(t *testing.T) {
 					tt.profile, opts.DeniedTools, tt.wantLen)
 			}
 		})
+	}
+}
+
+func TestDefaultConfig_GlobalSkillsBaseline(t *testing.T) {
+	cfg := config.DefaultConfig()
+
+	if len(cfg.Agent.Skills) != 2 {
+		t.Fatalf("expected 2 global baseline skills, got %d: %v", len(cfg.Agent.Skills), cfg.Agent.Skills)
+	}
+
+	expected := map[string]bool{
+		"anthem://code-review":       false,
+		"anthem://gh-issue-verifier": false,
+	}
+	for _, s := range cfg.Agent.Skills {
+		if _, ok := expected[s]; !ok {
+			t.Errorf("unexpected global skill: %q", s)
+		}
+		expected[s] = true
+	}
+	for skill, found := range expected {
+		if !found {
+			t.Errorf("missing global baseline skill: %q", skill)
+		}
+	}
+}
+
+func TestDefaultConfig_ProfileSkillRefs(t *testing.T) {
+	cfg := config.DefaultConfig()
+
+	tests := []struct {
+		profile   string
+		wantSkills []string
+	}{
+		{"coder", []string{"anthem://commit-hygiene", "anthem://go-cli"}},
+		{"tester", []string{"anthem://test-verifier", "anthem://tdd-classicist"}},
+		{"debugger", []string{"anthem://tdd-classicist"}},
+		{"security-explorer", []string{"anthem://code-review"}},
+		{"test-explorer", []string{"anthem://test-verifier", "anthem://tdd-classicist"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.profile, func(t *testing.T) {
+			profile, ok := cfg.Agent.Profiles[tt.profile]
+			if !ok {
+				t.Fatalf("profile %q not found in defaults", tt.profile)
+			}
+			if len(profile.SkillRefs) != len(tt.wantSkills) {
+				t.Fatalf("profile %q: expected %d skill_refs, got %d: %v",
+					tt.profile, len(tt.wantSkills), len(profile.SkillRefs), profile.SkillRefs)
+			}
+			for i, want := range tt.wantSkills {
+				if profile.SkillRefs[i] != want {
+					t.Errorf("profile %q: skill_refs[%d] = %q, want %q",
+						tt.profile, i, profile.SkillRefs[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestDefaultConfig_ProfilesWithNoSkills(t *testing.T) {
+	cfg := config.DefaultConfig()
+
+	noSkillProfiles := []string{"architect", "explorer"}
+	for _, name := range noSkillProfiles {
+		t.Run(name, func(t *testing.T) {
+			profile, ok := cfg.Agent.Profiles[name]
+			if !ok {
+				t.Fatalf("profile %q not found", name)
+			}
+			if len(profile.SkillRefs) != 0 {
+				t.Errorf("profile %q: expected no skill_refs, got %v", name, profile.SkillRefs)
+			}
+		})
+	}
+}
+
+func TestResolveProfile_EmbeddedSkillsExtractedToWorkspace(t *testing.T) {
+	cfg := config.DefaultConfig()
+	orch := newProfileTestOrch(t, cfg)
+	wsDir := t.TempDir()
+
+	if _, err := orch.resolveProfile("tester", wsDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Global baseline skills + tester profile skills should be extracted
+	expectedSkills := []string{"code-review", "gh-issue-verifier", "test-verifier", "tdd-classicist"}
+	for _, name := range expectedSkills {
+		skillFile := filepath.Join(wsDir, ".claude", "skills", name, "SKILL.md")
+		if _, err := os.Stat(skillFile); err != nil {
+			t.Errorf("expected %s SKILL.md to be extracted to workspace: %v", name, err)
+		}
+	}
+}
+
+func TestResolveProfile_CoderProfileSkills(t *testing.T) {
+	cfg := config.DefaultConfig()
+	orch := newProfileTestOrch(t, cfg)
+	wsDir := t.TempDir()
+
+	if _, err := orch.resolveProfile("coder", wsDir); err != nil {
+		t.Fatal(err)
+	}
+
+	expectedSkills := []string{"code-review", "gh-issue-verifier", "commit-hygiene", "go-cli"}
+	for _, name := range expectedSkills {
+		skillFile := filepath.Join(wsDir, ".claude", "skills", name, "SKILL.md")
+		if _, err := os.Stat(skillFile); err != nil {
+			t.Errorf("expected %s SKILL.md for coder profile: %v", name, err)
+		}
 	}
 }

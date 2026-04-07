@@ -79,9 +79,17 @@ func PrepareSkills(wsPath string, skillRefs []string, builtinDir string, logger 
 			continue
 		}
 		name := strings.TrimPrefix(ref, "anthem://")
-		src := filepath.Join(builtinDir, name)
 		dst := filepath.Join(skillsTarget, name)
 
+		// Try embedded skills first (shipped with binary), then filesystem fallback
+		if found, err := WriteEmbeddedSkill(name, dst); found {
+			if err != nil && logger != nil {
+				logger.Warn("failed to extract embedded skill", "skill", ref, "error", err)
+			}
+			continue
+		}
+
+		src := filepath.Join(builtinDir, name)
 		if err := copyDir(src, dst); err != nil {
 			if logger != nil {
 				logger.Warn("failed to copy built-in skill", "skill", ref, "error", err)
