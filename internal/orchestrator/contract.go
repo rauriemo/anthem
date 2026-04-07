@@ -1,9 +1,11 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 )
 
 // RiskLevel classifies how dangerous an action is.
@@ -49,10 +51,37 @@ var allActionTypes = []ActionType{
 
 // SubtaskDef defines a subtask to be created by the create_subtasks action.
 type SubtaskDef struct {
-	Title     string   `json:"title"`
-	Body      string   `json:"body"`
-	Labels    []string `json:"labels,omitempty"`
-	DependsOn []string `json:"depends_on,omitempty"`
+	Title     string          `json:"title"`
+	Body      string          `json:"body"`
+	Labels    []string        `json:"labels,omitempty"`
+	DependsOn FlexStringSlice `json:"depends_on,omitempty"`
+}
+
+// FlexStringSlice unmarshals a JSON array of mixed strings and numbers into []string.
+// This handles LLM output where depends_on may be [1, 2] or ["1", "2"].
+type FlexStringSlice []string
+
+func (f *FlexStringSlice) UnmarshalJSON(data []byte) error {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	result := make([]string, 0, len(raw))
+	for _, item := range raw {
+		var s string
+		if err := json.Unmarshal(item, &s); err == nil {
+			result = append(result, s)
+			continue
+		}
+		var n float64
+		if err := json.Unmarshal(item, &n); err == nil {
+			result = append(result, strconv.Itoa(int(n)))
+			continue
+		}
+		result = append(result, string(item))
+	}
+	*f = result
+	return nil
 }
 
 // Action is a single proposal from the orchestrator agent to the daemon.
