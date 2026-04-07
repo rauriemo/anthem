@@ -483,6 +483,12 @@ func TestBuildLeanPrompt_IncludesProjectContext(t *testing.T) {
 	if !strings.Contains(prompt, "hello") {
 		t.Error("expected user message in prompt")
 	}
+	if !strings.Contains(prompt, "FAST mode") {
+		t.Error("expected FAST mode constraint in prompt")
+	}
+	if !strings.Contains(prompt, "Do NOT use tools") {
+		t.Error("expected no-tools constraint in prompt")
+	}
 }
 
 func TestBuildLeanPrompt_PrismDisplayInstructions(t *testing.T) {

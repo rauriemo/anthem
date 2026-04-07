@@ -1753,6 +1753,13 @@ const leanCostTaskID = "__lean__"
 
 func buildLeanPrompt(projectCtx *ProjectContext, msg channel.IncomingMessage) string {
 	var prompt strings.Builder
+
+	prompt.WriteString("## Constraints\n\n")
+	prompt.WriteString("You are in FAST mode with exactly ONE turn. You MUST respond directly with text. ")
+	prompt.WriteString("Do NOT use tools (Read, Grep, Glob, Bash, Task, etc.) — they will not execute and their raw JSON will leak to the user. ")
+	prompt.WriteString("Answer from the project context below and your general knowledge. ")
+	prompt.WriteString("If the question requires exploring the codebase or running commands, say so clearly and suggest the user switch to Agent mode.\n\n")
+
 	if projectCtx != nil && projectCtx.ProjectSummary != "" {
 		prompt.WriteString("## Project Context\n\n")
 		prompt.WriteString(projectCtx.ProjectSummary)
