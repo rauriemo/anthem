@@ -90,7 +90,9 @@ func TestWriteMCPConfig_EmptyMap(t *testing.T) {
 func TestWriteMCPConfig_OverwritesExisting(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".mcp.json")
-	os.WriteFile(path, []byte(`{"old": true}`), 0644)
+	if err := os.WriteFile(path, []byte(`{"old": true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	servers := map[string]config.MCPServerConfig{
 		"new-server": {Command: "test"},
@@ -150,8 +152,12 @@ func TestPrepareSkills_BuiltinCopy(t *testing.T) {
 	builtinDir := t.TempDir()
 
 	skillDir := filepath.Join(builtinDir, "owasp-checklist")
-	os.MkdirAll(skillDir, 0755)
-	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: owasp-checklist\ndescription: OWASP audit checklist\n---\n# OWASP\nCheck for injection."), 0644)
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: owasp-checklist\ndescription: OWASP audit checklist\n---\n# OWASP\nCheck for injection."), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	refs := []string{"anthem://owasp-checklist"}
 	if err := PrepareSkills(wsDir, refs, builtinDir, nil); err != nil {
@@ -187,8 +193,12 @@ func TestPrepareSkills_MixedRefs(t *testing.T) {
 	builtinDir := t.TempDir()
 
 	skillDir := filepath.Join(builtinDir, "pr-workflow")
-	os.MkdirAll(skillDir, 0755)
-	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: pr-workflow\n---\n"), 0644)
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: pr-workflow\n---\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	refs := []string{"anthem://pr-workflow", "./skills/local-thing"}
 	if err := PrepareSkills(wsDir, refs, builtinDir, nil); err != nil {
@@ -221,8 +231,12 @@ func TestPrepareSkills_CreatesSkillsDir(t *testing.T) {
 	builtinDir := t.TempDir()
 
 	skillDir := filepath.Join(builtinDir, "test-skill")
-	os.MkdirAll(skillDir, 0755)
-	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("test"), 0644)
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("test"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	refs := []string{"anthem://test-skill"}
 	if err := PrepareSkills(wsDir, refs, builtinDir, nil); err != nil {
@@ -244,11 +258,17 @@ func TestPrepareSkills_SkillHasSKILLmd(t *testing.T) {
 
 	content := "---\nname: security-audit\ndescription: Security audit checklist\n---\n# Steps\n1. Check auth\n2. Check injection"
 	skillDir := filepath.Join(builtinDir, "security-audit")
-	os.MkdirAll(skillDir, 0755)
-	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0644)
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	refs := []string{"anthem://security-audit"}
-	PrepareSkills(wsDir, refs, builtinDir, nil)
+	if err := PrepareSkills(wsDir, refs, builtinDir, nil); err != nil {
+		t.Fatal(err)
+	}
 
 	data, err := os.ReadFile(filepath.Join(wsDir, ".claude", "skills", "security-audit", "SKILL.md"))
 	if err != nil {

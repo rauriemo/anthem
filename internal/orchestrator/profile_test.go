@@ -140,7 +140,9 @@ func TestResolveProfile_MCPRefsResolved(t *testing.T) {
 	orch := newProfileTestOrch(t, cfg)
 	wsDir := t.TempDir()
 
-	orch.resolveProfile("sec", wsDir)
+	if _, err := orch.resolveProfile("sec", wsDir); err != nil {
+		t.Fatal(err)
+	}
 
 	data, err := os.ReadFile(filepath.Join(wsDir, ".mcp.json"))
 	if err != nil {
@@ -149,7 +151,9 @@ func TestResolveProfile_MCPRefsResolved(t *testing.T) {
 	var mcp struct {
 		MCPServers map[string]json.RawMessage `json:"mcpServers"`
 	}
-	json.Unmarshal(data, &mcp)
+	if err := json.Unmarshal(data, &mcp); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := mcp.MCPServers["semgrep"]; !ok {
 		t.Error("expected semgrep in .mcp.json")
 	}
@@ -167,8 +171,9 @@ func TestResolveProfile_SkillRefsResolved(t *testing.T) {
 	orch := newProfileTestOrch(t, cfg)
 	wsDir := t.TempDir()
 
-	// Project-local refs should not create .claude/skills/ (no copy needed)
-	orch.resolveProfile("skilled", wsDir)
+	if _, err := orch.resolveProfile("skilled", wsDir); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := os.Stat(filepath.Join(wsDir, ".claude", "skills")); !os.IsNotExist(err) {
 		t.Error("project-local skills should not trigger .claude/skills/ creation")
