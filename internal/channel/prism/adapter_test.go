@@ -8,6 +8,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/rauriemo/anthem/internal/channel"
+	"github.com/rauriemo/anthem/internal/guests"
 )
 
 const testToken = "test-prism-token"
@@ -348,5 +349,257 @@ func TestStreamFrames(t *testing.T) {
 	}
 	if f3.Thread != "stream-1" {
 		t.Fatalf("expected thread stream-1, got %s", f3.Thread)
+	}
+}
+
+func TestAuthOkIncludesGuestAgents(t *testing.T) {
+	a, url := startTestAdapter(t)
+
+	a.UpdateGuestIndex(guests.GuestIndex{
+		Agents: map[string]guests.GuestAgent{
+			"game-designer": {
+				ID:           "game-designer",
+				Name:         "Game Designer",
+				Description:  "Designs games",
+				Role:         "specialist",
+				Capabilities: []string{"story arc"},
+				Icon:         "book",
+				Scope:        "project",
+			},
+		},
+	})
+
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("expected auth_ok, got %s", f.Type)
+	}
+	if len(f.GuestAgents) != 1 {
+		t.Fatalf("expected 1 guest agent, got %d", len(f.GuestAgents))
+	}
+	if f.GuestAgents[0].ID != "game-designer" {
+		t.Errorf("guest ID = %q, want %q", f.GuestAgents[0].ID, "game-designer")
+	}
+	if f.GuestAgents[0].Name != "Game Designer" {
+		t.Errorf("guest name = %q, want %q", f.GuestAgents[0].Name, "Game Designer")
+	}
+}
+
+func TestAuthOkWithoutGuestAgents(t *testing.T) {
+	_, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("expected auth_ok, got %s", f.Type)
+	}
+	if len(f.GuestAgents) != 0 {
+		t.Fatalf("expected 0 guest agents, got %d", len(f.GuestAgents))
+	}
+}
+
+func TestReqWithActiveGuestsAndMention(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	reqFrame := frame{
+		Type:         "req",
+		ID:           "req-g1",
+		Text:         "help with story",
+		ActiveGuests: []string{"game-designer", "code-reviewer"},
+		Mention:      "game-designer",
+	}
+	data, _ := json.Marshal(reqFrame)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	select {
+	case msg := <-a.Incoming():
+		if len(msg.ActiveGuests) != 2 {
+			t.Errorf("active_guests count = %d, want 2", len(msg.ActiveGuests))
+		}
+		if msg.Mention != "game-designer" {
+			t.Errorf("mention = %q, want %q", msg.Mention, "game-designer")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for incoming message")
+	}
+}
+
+func TestReqWithoutGuestFields(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	reqFrame := frame{Type: "req", ID: "req-old", Text: "plain message"}
+	data, _ := json.Marshal(reqFrame)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	select {
+	case msg := <-a.Incoming():
+		if msg.ActiveGuests != nil {
+			t.Errorf("expected nil ActiveGuests, got %v", msg.ActiveGuests)
+		}
+		if msg.Mention != "" {
+			t.Errorf("expected empty Mention, got %q", msg.Mention)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for incoming message")
+	}
+}
+
+func TestResWithGuestID(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	reqFrame := frame{Type: "req", ID: "req-g2", Text: "test"}
+	data, _ := json.Marshal(reqFrame)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	err := a.Send(context.Background(), channel.OutgoingMessage{
+		ThreadID: "req-g2",
+		Text:     "I am the game designer.",
+		GuestID:  "game-designer",
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	resFrame := readFrame(t, conn)
+	if resFrame.GuestID != "game-designer" {
+		t.Errorf("guest_id = %q, want %q", resFrame.GuestID, "game-designer")
+	}
+}
+
+func TestResWithSuggestGuest(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	reqFrame := frame{Type: "req", ID: "req-g3", Text: "test"}
+	data, _ := json.Marshal(reqFrame)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	err := a.Send(context.Background(), channel.OutgoingMessage{
+		ThreadID: "req-g3",
+		Text:     "Should I bring in the game designer?",
+		SuggestGuest: &channel.SuggestGuest{
+			ID:     "game-designer",
+			Reason: "This topic involves narrative design",
+		},
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	resFrame := readFrame(t, conn)
+	if resFrame.SuggestGuest == nil {
+		t.Fatal("expected suggest_guest, got nil")
+	}
+	if resFrame.SuggestGuest.ID != "game-designer" {
+		t.Errorf("suggest_guest.id = %q, want %q", resFrame.SuggestGuest.ID, "game-designer")
+	}
+	if resFrame.SuggestGuest.Reason != "This topic involves narrative design" {
+		t.Errorf("suggest_guest.reason = %q", resFrame.SuggestGuest.Reason)
+	}
+}
+
+func TestResWithoutGuestFields(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	reqFrame := frame{Type: "req", ID: "req-plain", Text: "test"}
+	data, _ := json.Marshal(reqFrame)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	err := a.Send(context.Background(), channel.OutgoingMessage{
+		ThreadID: "req-plain",
+		Text:     "Just a normal reply.",
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	resFrame := readFrame(t, conn)
+	if resFrame.GuestID != "" {
+		t.Errorf("expected empty guest_id, got %q", resFrame.GuestID)
+	}
+	if resFrame.SuggestGuest != nil {
+		t.Errorf("expected nil suggest_guest, got %+v", resFrame.SuggestGuest)
+	}
+}
+
+func TestGuestAgentsBroadcastOnUpdate(t *testing.T) {
+	a, url := startTestAdapter(t)
+
+	conn1 := dial(t, url)
+	f := authenticate(t, conn1, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed for conn1")
+	}
+
+	conn2 := dial(t, url)
+	f = authenticate(t, conn2, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed for conn2")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	a.UpdateGuestIndex(guests.GuestIndex{
+		Agents: map[string]guests.GuestAgent{
+			"new-agent": {
+				ID:          "new-agent",
+				Name:        "New Agent",
+				Description: "Just added",
+				Scope:       "project",
+			},
+		},
+	})
+
+	for i, conn := range []*websocket.Conn{conn1, conn2} {
+		f := readFrame(t, conn)
+		if f.Type != "guest_agents_updated" {
+			t.Errorf("conn%d: expected guest_agents_updated, got %s", i+1, f.Type)
+		}
+		if len(f.GuestAgents) != 1 {
+			t.Errorf("conn%d: expected 1 guest agent, got %d", i+1, len(f.GuestAgents))
+		}
 	}
 }

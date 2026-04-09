@@ -8,11 +8,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/rauriemo/anthem/internal/channel"
+	"github.com/rauriemo/anthem/internal/guests"
 )
 
 const (
@@ -24,19 +26,43 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(_ *http.Request) bool { return true },
 }
 
+type guestAgentInfo struct {
+	ID                      string   `json:"id"`
+	Name                    string   `json:"name"`
+	Description             string   `json:"description"`
+	Role                    string   `json:"role,omitempty"`
+	Capabilities            []string `json:"capabilities,omitempty"`
+	Icon                    string   `json:"icon,omitempty"`
+	Model                   string   `json:"model,omitempty"`
+	RequirementsFingerprint string   `json:"requirementsFingerprint,omitempty"`
+	Scope                   string   `json:"scope,omitempty"`
+	Source                  string   `json:"source,omitempty"`
+}
+
+type suggestGuestFrame struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+}
+
 type frame struct {
-	Type      string      `json:"type"`
-	Token     string      `json:"token,omitempty"`
-	Client    string      `json:"client,omitempty"`
-	ID        string      `json:"id,omitempty"`
-	Text      string      `json:"text,omitempty"`
-	Event     string      `json:"event,omitempty"`
-	Error     string      `json:"error,omitempty"`
-	Ack       bool        `json:"ack,omitempty"`
-	Thread    string      `json:"thread,omitempty"`
-	Component any         `json:"component,omitempty"`
-	Done      bool        `json:"done,omitempty"`
-	Files     []frameFile `json:"files,omitempty"`
+	Type            string             `json:"type"`
+	Token           string             `json:"token,omitempty"`
+	Client          string             `json:"client,omitempty"`
+	ID              string             `json:"id,omitempty"`
+	Text            string             `json:"text,omitempty"`
+	Event           string             `json:"event,omitempty"`
+	Error           string             `json:"error,omitempty"`
+	Ack             bool               `json:"ack,omitempty"`
+	Thread          string             `json:"thread,omitempty"`
+	Component       any                `json:"component,omitempty"`
+	Done            bool               `json:"done,omitempty"`
+	Files           []frameFile        `json:"files,omitempty"`
+	GuestAgents     []guestAgentInfo   `json:"guest_agents,omitempty"`
+	MaxActiveGuests int                `json:"max_active_guests,omitempty"`
+	ActiveGuests    []string           `json:"active_guests,omitempty"`
+	Mention         string             `json:"mention,omitempty"`
+	GuestID         string             `json:"guest_id,omitempty"`
+	SuggestGuest    *suggestGuestFrame `json:"suggest_guest,omitempty"`
 }
 
 type frameFile struct {
@@ -72,9 +98,11 @@ type Adapter struct {
 	server *http.Server
 	ln     net.Listener
 
-	mu      sync.RWMutex
-	conns   map[*connEntry]bool
-	threads map[string]*connEntry
+	mu              sync.RWMutex
+	conns           map[*connEntry]bool
+	threads         map[string]*connEntry
+	guestAgents     []guestAgentInfo
+	maxActiveGuests int
 
 	cancel context.CancelFunc
 }
@@ -94,6 +122,13 @@ func NewAdapter(token, listenAddr string, logger *slog.Logger) *Adapter {
 }
 
 func (a *Adapter) Kind() string { return "prism" }
+
+// SetMaxActiveGuests sets the soft cap on active guests and includes it in auth_ok.
+func (a *Adapter) SetMaxActiveGuests(n int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.maxActiveGuests = n
+}
 
 func (a *Adapter) Start(ctx context.Context) error {
 	ctx, a.cancel = context.WithCancel(ctx)
@@ -153,6 +188,48 @@ func (a *Adapter) handleWS(w http.ResponseWriter, r *http.Request) {
 	a.readLoop(entry)
 }
 
+// UpdateGuestIndex converts a GuestIndex to the wire format, caches it, and broadcasts to all connected clients.
+func (a *Adapter) UpdateGuestIndex(index guests.GuestIndex) {
+	infos := make([]guestAgentInfo, 0, len(index.Agents))
+	for _, agent := range index.Agents {
+		infos = append(infos, guestAgentInfo{
+			ID:                      agent.ID,
+			Name:                    agent.Name,
+			Description:             agent.Description,
+			Role:                    agent.Role,
+			Capabilities:            agent.Capabilities,
+			Icon:                    agent.Icon,
+			Model:                   agent.Model,
+			RequirementsFingerprint: agent.RequirementsFingerprint,
+			Scope:                   agent.Scope,
+			Source:                  agent.Source,
+		})
+	}
+	sort.Slice(infos, func(i, j int) bool { return infos[i].ID < infos[j].ID })
+	a.setGuestAgents(infos)
+}
+
+func (a *Adapter) setGuestAgents(agents []guestAgentInfo) {
+	a.mu.Lock()
+	a.guestAgents = agents
+	entries := make([]*connEntry, 0, len(a.conns))
+	for e := range a.conns {
+		entries = append(entries, e)
+	}
+	a.mu.Unlock()
+
+	if len(entries) == 0 {
+		return
+	}
+
+	f := frame{Type: "guest_agents_updated", GuestAgents: agents}
+	for _, e := range entries {
+		if err := e.writeJSON(f); err != nil {
+			a.logger.Warn("failed to broadcast guest agents update", "error", err)
+		}
+	}
+}
+
 func (a *Adapter) authenticate(conn *websocket.Conn) bool {
 	_ = conn.SetReadDeadline(time.Now().Add(authTimeout))
 	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
@@ -175,7 +252,12 @@ func (a *Adapter) authenticate(conn *websocket.Conn) bool {
 		return false
 	}
 
-	_ = a.writeFrameRaw(conn, frame{Type: "auth_ok"})
+	a.mu.RLock()
+	agents := a.guestAgents
+	maxActive := a.maxActiveGuests
+	a.mu.RUnlock()
+
+	_ = a.writeFrameRaw(conn, frame{Type: "auth_ok", GuestAgents: agents, MaxActiveGuests: maxActive})
 	return true
 }
 
@@ -207,11 +289,13 @@ func (a *Adapter) readLoop(entry *connEntry) {
 		a.mu.Unlock()
 
 		msg := channel.IncomingMessage{
-			ChannelKind: "prism",
-			SenderID:    "prism",
-			ThreadID:    f.ID,
-			Text:        f.Text,
-			Timestamp:   time.Now(),
+			ChannelKind:  "prism",
+			SenderID:     "prism",
+			ThreadID:     f.ID,
+			Text:         f.Text,
+			Timestamp:    time.Now(),
+			ActiveGuests: f.ActiveGuests,
+			Mention:      f.Mention,
 		}
 
 		for _, ff := range f.Files {
@@ -272,6 +356,20 @@ func (a *Adapter) Send(_ context.Context, msg channel.OutgoingMessage) error {
 	return a.broadcastEvent(msg)
 }
 
+func (a *Adapter) buildResFrame(msg channel.OutgoingMessage) frame {
+	f := frame{Type: "res", ID: msg.ThreadID, Text: msg.Text, Ack: msg.Ack}
+	if msg.GuestID != "" {
+		f.GuestID = msg.GuestID
+	}
+	if msg.SuggestGuest != nil {
+		f.SuggestGuest = &suggestGuestFrame{
+			ID:     msg.SuggestGuest.ID,
+			Reason: msg.SuggestGuest.Reason,
+		}
+	}
+	return f
+}
+
 func (a *Adapter) sendReply(msg channel.OutgoingMessage) error {
 	a.mu.RLock()
 	entry, ok := a.threads[msg.ThreadID]
@@ -283,11 +381,11 @@ func (a *Adapter) sendReply(msg channel.OutgoingMessage) error {
 		return a.broadcastRes(msg)
 	}
 
-	return entry.writeJSON(frame{Type: "res", ID: msg.ThreadID, Text: msg.Text, Ack: msg.Ack})
+	return entry.writeJSON(a.buildResFrame(msg))
 }
 
 func (a *Adapter) broadcastRes(msg channel.OutgoingMessage) error {
-	f := frame{Type: "res", ID: msg.ThreadID, Text: msg.Text, Ack: msg.Ack}
+	f := a.buildResFrame(msg)
 	a.mu.RLock()
 	entries := make([]*connEntry, 0, len(a.conns))
 	for e := range a.conns {

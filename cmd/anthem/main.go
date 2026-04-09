@@ -157,6 +157,7 @@ func runCmd() *cobra.Command {
 			// Create channel manager and register adapters
 			chanManager := channel.NewManager(logger)
 			var prismTarget string
+			var prismAdapter *prismch.Adapter
 			if channelCreds != nil && len(cfg.Channels) > 0 {
 				for _, chCfg := range cfg.Channels {
 					switch chCfg.Kind {
@@ -187,7 +188,7 @@ func runCmd() *cobra.Command {
 						}
 					case "prism":
 						if channelCreds.Prism != nil {
-							prismAdapter := prismch.NewAdapter(
+							prismAdapter = prismch.NewAdapter(
 								channelCreds.Prism.Token,
 								chCfg.Target,
 								logger,
@@ -227,6 +228,14 @@ func runCmd() *cobra.Command {
 				AuditLogger:     auditLogger,
 				ChannelManager:  chanManager,
 			})
+
+			// Wire guest agent updates to Prism adapter
+			if prismAdapter != nil {
+				orch.SetGuestUpdateCallback(prismAdapter.UpdateGuestIndex)
+				if cfg.MaxActiveGuests > 0 {
+					prismAdapter.SetMaxActiveGuests(cfg.MaxActiveGuests)
+				}
+			}
 
 			// Start config hot-reload watcher
 			cfgWatcher := config.NewWatcher(workflowPath, orch.ReloadConfig, logger)

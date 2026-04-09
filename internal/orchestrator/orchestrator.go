@@ -23,6 +23,7 @@ import (
 	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/cost"
+	"github.com/rauriemo/anthem/internal/guests"
 	"github.com/rauriemo/anthem/internal/harness"
 	"github.com/rauriemo/anthem/internal/plans"
 	"github.com/rauriemo/anthem/internal/rules"
@@ -60,6 +61,8 @@ type Orchestrator struct {
 	homeDir         string
 	projectCtx      *ProjectContext
 	planStore       *plans.Store
+	guestIndex      *guests.GuestIndex
+	onGuestUpdate   func(guests.GuestIndex)
 
 	wg            sync.WaitGroup
 	mu            sync.Mutex
@@ -140,6 +143,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	}
 
 	o.loadProjectContext()
+	o.scanGuests()
 	o.initPlanStore()
 
 	o.logger.Info("orchestrator started",
@@ -348,6 +352,68 @@ func (o *Orchestrator) ReloadConfig(cfg *config.Config, body string) {
 	o.body = body
 	o.rules = rules.NewEngine(cfg.Rules, o.logger)
 	o.loadProjectContext()
+	o.scanGuests()
+}
+
+// SetGuestUpdateCallback registers a function called whenever the guest index changes.
+func (o *Orchestrator) SetGuestUpdateCallback(fn func(guests.GuestIndex)) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.onGuestUpdate = fn
+}
+
+// GuestIndex returns the current guest index (nil if no agents found).
+func (o *Orchestrator) GuestIndex() *guests.GuestIndex {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.guestIndex
+}
+
+func (o *Orchestrator) scanGuests() {
+	root := o.projectRoot()
+
+	agentsDir := filepath.Join(root, "agents")
+	index, err := guests.ScanDirectory(agentsDir, o.logger)
+	if err != nil {
+		home, herr := os.UserHomeDir()
+		if herr != nil {
+			o.logger.Debug("no guest agents directory found")
+			return
+		}
+		fallbackDir := filepath.Join(home, ".anthem", "agents")
+		index, err = guests.ScanDirectory(fallbackDir, o.logger)
+		if err != nil {
+			o.logger.Debug("no guest agents in fallback directory")
+			return
+		}
+	}
+
+	if o.cfg.Guests != nil {
+		index = guests.FilterByAllowlist(index, o.cfg.Guests)
+	}
+
+	if err := guests.WriteIndex(filepath.Dir(agentsDir), index); err != nil {
+		o.logger.Warn("failed to write guest agents index", "error", err)
+	}
+
+	o.guestIndex = &index
+	o.logger.Info("scanned guest agents", "count", len(index.Agents))
+
+	if o.onGuestUpdate != nil {
+		o.onGuestUpdate(index)
+	}
+}
+
+func (o *Orchestrator) projectRoot() string {
+	root := o.cfg.Workspace.Root
+	if root == "" || root == "." || root == "./workspaces" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "."
+		}
+		return wd
+	}
+	return root
 }
 
 func (o *Orchestrator) tick(ctx context.Context) {

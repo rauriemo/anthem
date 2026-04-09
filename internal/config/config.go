@@ -1,17 +1,19 @@
 package config
 
 type Config struct {
-	Tracker      TrackerConfig         `yaml:"tracker"`
-	Polling      PollingConfig         `yaml:"polling"`
-	Workspace    WorkspaceConfig       `yaml:"workspace"`
-	Hooks        HooksConfig           `yaml:"hooks"`
-	Agent        AgentConfig           `yaml:"agent"`
-	Rules        []RuleConfig          `yaml:"rules"`
-	System       SystemConfig          `yaml:"system"`
-	Orchestrator OrchestratorConfig    `yaml:"orchestrator"`
-	Channels     []ChannelTargetConfig `yaml:"channels"`
-	Maintenance  MaintenanceConfig     `yaml:"maintenance"`
-	Server       ServerConfig          `yaml:"server"`
+	Tracker         TrackerConfig         `yaml:"tracker"`
+	Polling         PollingConfig         `yaml:"polling"`
+	Workspace       WorkspaceConfig       `yaml:"workspace"`
+	Hooks           HooksConfig           `yaml:"hooks"`
+	Agent           AgentConfig           `yaml:"agent"`
+	Rules           []RuleConfig          `yaml:"rules"`
+	System          SystemConfig          `yaml:"system"`
+	Orchestrator    OrchestratorConfig    `yaml:"orchestrator"`
+	Channels        []ChannelTargetConfig `yaml:"channels"`
+	Maintenance     MaintenanceConfig     `yaml:"maintenance"`
+	Server          ServerConfig          `yaml:"server"`
+	Guests          []string              `yaml:"guests"`
+	MaxActiveGuests int                   `yaml:"max_active_guests"`
 }
 
 type ChannelTargetConfig struct {
