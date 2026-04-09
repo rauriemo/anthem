@@ -225,21 +225,23 @@ Add `testdata/agents/` with 2-3 sample agent markdown files for testing:
 
 Guest dispatch is unified across all modes (fast, plan, agent). Three new files:
 
-**`convobuffer.go`** -- Per-channel 3-round conversation history ring buffer.
+**`convobuffer.go`** -- Per-channel 10-round conversation history ring buffer.
 - `ConvoRound` holds `UserMessage string` and `Responses []ConvoResponse` (speaker + truncated text).
-- `RecordUserMessage(channelID, text)` finalizes current round and pushes a new one. FIFO eviction at `maxHistoryRounds` (3).
+- `RecordUserMessage(channelID, text)` finalizes current round and pushes a new one. FIFO eviction at `maxHistoryRounds` (10).
 - `RecordResponse(channelID, speaker, text)` appends to the current round.
 - `FormatHistory(channelID)` renders rounds newest-first as `[Round N] User: ... / Speaker: ...` with 200-char truncation.
+- `FormatHistoryN(rounds, maxRounds, truncLen)` is a parameterized alternative to `FormatHistory` (same rendering shape, caller supplies round cap and truncation length).
+- `HasGuestSpoken(key, guestID) bool` reports whether the given guest has spoken in the buffered history for the channel.
 
 **`sharedcontext.go`** -- Per-channel in-memory session knowledge document.
 - `Get(channelID) string` returns current context (empty string if none).
 - `Update(channelID, content)` overwrites the document.
-- Updated after every round: for >3 guests, the routing call returns context updates; for <=3, a post-round summarization call generates it. Agent mode additionally extracts `context_update` from `OrchestratorResponse`.
+- Updated after every round: the routing call returns context updates; a post-round summarization call also runs when guests are active. Agent mode additionally extracts `context_update` from `OrchestratorResponse`.
 
 **`guestdispatch.go`** -- Core routing, prompt building, and invocation logic.
-- `RoutingThreshold = 3`: groups at/below threshold skip routing (all guests invoked directly); larger groups go through `routeToGuests` using a cheap model call.
-- `routeToGuests(ctx, runner, guests, userMsg, history, sharedCtx, plan)` returns a `RoutingResult` with selected `Guests []GuestSummary` and `ContextUpdate string`. Falls back to broadcasting all guests on routing failure.
-- `buildGuestPrompt(opts GuestPromptOpts)` assembles: persona body + project context + shared context + conversation history + user message. Mode-specific suffixes: plan mode includes active plan markdown and instructions for `plan-edit` code blocks; agent mode includes project state summary.
+- Routing always fires when 1+ guests are active (the router decides selection, focus, and orchestrator participation). `routeToGuests(ctx, runner, guests, userMsg, history, sharedCtx, plan)` performs a cheap model call and returns a `RoutingResult` with selected `Guests []GuestSummary`, `ContextUpdate string`, and `DirectedText map[string]string` for per-guest focus extraction. Falls back to broadcasting all guests on routing failure.
+- `buildGuestPrompt(opts GuestPromptOpts)` assembles: persona body + project context + shared context + conversation history + user message. `GuestPromptOpts` includes `FocusText string` — when set, appends a `## Your Focus` section after the user message in the prompt. Mode-specific suffixes: plan mode includes active plan markdown and instructions for `plan-edit` code blocks; agent mode includes project state summary.
+- `suggestGuestToInvite` provides post-round specialist suggestions; feature-flagged via `EnableGuestSuggestions`.
 - `invokeGuestStreaming(ctx, runner, prompt, guestID, channelID, send)` runs `agent.AgentRunner.Run` with `OnStream` callback for real-time streaming via the Prism adapter.
 - `extractPlanEdit(response)` parses `plan-edit` fenced code blocks from guest responses. Returns the content for application via `planStore.Save`. Thread-safe behind `planEditMu sync.Mutex`.
 - `dispatchSelectedGuests(ctx, params)` manages concurrent guest invocations with a semaphore (max 3 concurrent), records responses in ConvoBuffer, applies plan edits, and handles errors per-guest.
@@ -250,9 +252,9 @@ Guest dispatch is unified across all modes (fast, plan, agent). Three new files:
 - `convoBuf *ConvoBuffer` and `sharedCtx *SharedContext` initialized in `New()`.
 - `detectMode(msg)` returns `"fast"`, `"plan"`, or `"agent"`.
 - **@-mention fast path**: `handleGuestMention` bypasses orchestrator entirely, invokes the named guest with full context via `invokeGuestStreaming`, records in ConvoBuffer, sends response.
-- **Unified dispatch**: When `active_guests` are set, `buildGuestSummaries` compiles the roster. For <=3 guests, all are selected directly. For >3, `routeToGuests` selects relevant guests. `dispatchSelectedGuests` runs in a goroutine alongside the normal orchestrator mode handler.
+- **Unified dispatch**: When `active_guests` are set, `buildGuestSummaries` compiles the roster. `routeToGuests` always runs when guests are active (1+), deciding selection, directed text, and orchestrator participation. `directedText` is passed through `guestDispatchParams` to `dispatchSelectedGuests`. `dispatchSelectedGuests` runs in a goroutine alongside the normal orchestrator mode handler.
 - **StateSnapshot extensions**: `ActiveGuestsSummary`, `SharedContext`, `ConversationHistory` injected when guests are present. `buildSystemPrompt` gains "Active Specialists" awareness section and "Response Format" guidance for `context_update` JSON field.
-- **`finalizeGuestRound`**: Waits for guest goroutine, then triggers `updateContextAfterRound` for small groups (<=3).
+- **`finalizeGuestRound`**: Waits for guest goroutine, then always runs context update when guests are active, and conditionally calls `suggestFollowUp` when `EnableGuestSuggestions` is true.
 - `guestsDir()` resolves `{project-root}/agents/` path.
 
 ### Wire protocol additions
@@ -367,11 +369,11 @@ All new code must have table-driven unit tests. Follow existing patterns: interf
 - `buildGuestPrompt`: all modes (fast/plan/agent), section inclusion/omission based on opts
 - `extractJSON`: valid JSON, no JSON, nested objects, unclosed braces
 - `fallbackAllGuests`: normal fallback, empty guest list
-- `RoutingThreshold`: verify constant value is 3
+- Routing: verify `routeToGuests` runs whenever 1+ guests are active (no skip-by-count threshold)
 
 **ConvoBuffer tests** (`convobuffer_test.go` -- Shipped):
 - `RecordUserMessage` + `RecordResponse` basic flow
-- FIFO eviction at 3 rounds (newest kept, oldest dropped)
+- FIFO eviction at 10 rounds (newest kept, oldest dropped)
 - `History` returns rounds most-recent-first
 - `FormatHistory` truncation at 200 chars, empty history
 - `MultipleChannels`: independent channel isolation

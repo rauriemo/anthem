@@ -331,6 +331,7 @@ The `MockRunner` needs to support `OnStream` in its function signatures. Since `
 - `parseActions`: still operates on the full `result.Output` string after CLI finishes
 - Slack/Dispatch adapters: skip stream messages (early return)
 - Existing `res`/`event`/`display` frame types: unchanged
+- `suggest_guest` frame: standalone frame type outside the stream lifecycle, used for post-round guest suggestions (broadcast by `suggestFollowUp` when `EnableGuestSuggestions` is enabled)
 - `AgentRunner` interface: unchanged (callbacks are on opts structs, not the interface)
 
 ## Prism Frontend Side (already done, for reference)
