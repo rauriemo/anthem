@@ -1696,6 +1696,7 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 					channelMgr:     o.channelMgr,
 					projectSummary: projectSummary,
 					mode:           mode,
+					channelKind:    msg.ChannelKind,
 					planContent:    planContent,
 					planStore:      o.planStore,
 					planSlug:       o.projectSlug(),
@@ -1977,6 +1978,7 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 
 	prompt := buildGuestPrompt(persona, projectSummary, sharedCtxText, history, msg.Text, GuestPromptOpts{
 		Mode:         mode,
+		ChannelKind:  msg.ChannelKind,
 		PlanContent:  planContent,
 		StoryContext: storyCtx,
 	})
@@ -2036,6 +2038,21 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 	if runErr != nil {
 		o.logger.Warn("guest mention invocation failed", "guest", guestID, "error", runErr)
 		return
+	}
+
+	cleanText, displays := extractLeanDisplayBlocks(responseText)
+	if len(displays) > 0 {
+		for _, comp := range displays {
+			if o.channelMgr != nil {
+				_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+					Display:   comp,
+					DisplayID: newDisplayID(),
+					GuestID:   guestID,
+					ThreadID:  msg.ThreadID,
+				})
+			}
+		}
+		responseText = cleanText
 	}
 
 	chatText := responseText
@@ -2350,47 +2367,86 @@ func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.Incomi
 	o.recordAuditWithCost(ctx, "channel.lean_message", "", strPtr("lean_message"), costPtr, nil)
 }
 
-// extractLeanDisplayBlocks scans text for ```prism-display fenced blocks
-// containing JSON display component objects. Returns the text with those
-// blocks removed and a slice of parsed display components.
+// extractLeanDisplayBlocks scans text for fenced blocks that should become
+// visual artifacts. Supported fence types:
 //
-// Format:
+//   - ```prism-display — JSON with "kind" + "content" fields (canonical)
+//   - ```html          — raw HTML captured as kind:"html"
+//   - ```markdown      — raw markdown captured as kind:"markdown"
 //
-//	```prism-display
-//	{"kind":"html","content":"<h1>Hello</h1>"}
-//	```
+// Returns the text with those blocks removed and a slice of parsed display
+// component maps.
 func extractLeanDisplayBlocks(text string) (string, []map[string]any) {
 	var displays []map[string]any
 	var cleaned strings.Builder
 	lines := strings.Split(text, "\n")
 	inBlock := false
+	blockKind := "" // "prism-display", "html", "markdown"
 	var blockBuf strings.Builder
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if !inBlock && (trimmed == "```prism-display" || trimmed == "``` prism-display") {
-			inBlock = true
-			blockBuf.Reset()
+
+		if !inBlock {
+			switch {
+			case trimmed == "```prism-display" || trimmed == "``` prism-display":
+				inBlock = true
+				blockKind = "prism-display"
+				blockBuf.Reset()
+			case trimmed == "```html":
+				inBlock = true
+				blockKind = "html"
+				blockBuf.Reset()
+			case trimmed == "```markdown" || trimmed == "```md":
+				inBlock = true
+				blockKind = "markdown"
+				blockBuf.Reset()
+			default:
+				cleaned.WriteString(line)
+				cleaned.WriteString("\n")
+			}
 			continue
 		}
-		if inBlock {
-			if trimmed == "```" {
-				inBlock = false
+
+		// Inside a block
+		if trimmed == "```" {
+			inBlock = false
+			content := strings.TrimSpace(blockBuf.String())
+
+			switch blockKind {
+			case "prism-display":
 				var comp map[string]any
-				if err := json.Unmarshal([]byte(blockBuf.String()), &comp); err == nil {
+				if err := json.Unmarshal([]byte(content), &comp); err == nil {
 					if _, hasKind := comp["kind"]; hasKind {
 						displays = append(displays, comp)
+						continue
 					}
 				}
-				continue
+				// JSON failed — treat raw content as HTML fallback
+				if content != "" {
+					displays = append(displays, map[string]any{"kind": "html", "content": content})
+				}
+			case "html":
+				if content != "" {
+					displays = append(displays, map[string]any{"kind": "html", "content": content})
+				}
+			case "markdown":
+				if content != "" {
+					displays = append(displays, map[string]any{"kind": "markdown", "content": content})
+				}
 			}
-			blockBuf.WriteString(line)
-			blockBuf.WriteString("\n")
 			continue
 		}
-		cleaned.WriteString(line)
-		cleaned.WriteString("\n")
+
+		blockBuf.WriteString(line)
+		blockBuf.WriteString("\n")
 	}
+
+	// Unclosed block: dump content back to cleaned text so nothing is silently lost
+	if inBlock && blockBuf.Len() > 0 {
+		cleaned.WriteString(blockBuf.String())
+	}
+
 	return cleaned.String(), displays
 }
 

@@ -35,6 +35,7 @@ type RoutingResult struct {
 
 type GuestPromptOpts struct {
 	Mode         string
+	ChannelKind  string
 	PlanContent  string
 	StoryContext *StoryContext
 }
@@ -194,6 +195,22 @@ func buildGuestPrompt(persona, projectSummary, sharedCtx, history, userMsg strin
 		sb.WriteString("- To DISCUSS: respond normally, no fenced block.\n\n")
 	}
 
+	if opts.ChannelKind == "prism" {
+		sb.WriteString("## Visual Output\n\n")
+		sb.WriteString("You are connected to Prism, a visual interface. EVERY response MUST include a visual artifact.\n")
+		sb.WriteString("Put your visual content in a fenced ```html block:\n\n")
+		sb.WriteString("```html\n")
+		sb.WriteString("<div style=\"font-family: system-ui; padding: 2rem;\">\n")
+		sb.WriteString("  <h1>Title</h1>\n")
+		sb.WriteString("  <p>Self-contained HTML with all styles inline.</p>\n")
+		sb.WriteString("</div>\n")
+		sb.WriteString("```\n\n")
+		sb.WriteString("The HTML block will be rendered as a rich visual artifact in the display pane.\n")
+		sb.WriteString("HTML must be fully self-contained with all styles inline (no external stylesheets).\n")
+		sb.WriteString("You can also use ```markdown blocks for formatted text artifacts.\n")
+		sb.WriteString("Include a brief text explanation outside the block.\n\n")
+	}
+
 	fmt.Fprintf(&sb, "## User Message\n\n%s\n", userMsg)
 
 	if opts.Mode == "fast" {
@@ -230,6 +247,7 @@ type guestDispatchParams struct {
 	channelMgr     *channel.Manager
 	projectSummary string
 	mode           string
+	channelKind    string
 	planContent    string
 	planStore      *plans.Store
 	planSlug       string
@@ -288,6 +306,7 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 
 		prompt := buildGuestPrompt(persona, p.projectSummary, sharedCtxText, history, p.msg.Text, GuestPromptOpts{
 			Mode:         p.mode,
+			ChannelKind:  p.channelKind,
 			PlanContent:  p.planContent,
 			StoryContext: storyCtx,
 		})
@@ -315,13 +334,6 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 			var fullText strings.Builder
 			onStream := func(delta string) {
 				fullText.WriteString(delta)
-				if p.channelMgr != nil {
-					_ = p.channelMgr.Broadcast(p.ctx, channel.OutgoingMessage{
-						StreamDelta: delta,
-						GuestID:     guestID,
-						ThreadID:    p.msg.ThreadID,
-					})
-				}
 			}
 
 			runOpts := types.RunOpts{
@@ -361,6 +373,22 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 			responseText := result.Output
 			if responseText == "" {
 				responseText = fullText.String()
+			}
+
+			// Extract prism-display blocks and broadcast as artifacts
+			cleanText, displays := extractLeanDisplayBlocks(responseText)
+			if len(displays) > 0 {
+				for _, comp := range displays {
+					if p.channelMgr != nil {
+						_ = p.channelMgr.Broadcast(p.ctx, channel.OutgoingMessage{
+							Display:   comp,
+							DisplayID: newDisplayID(),
+							GuestID:   guestID,
+							ThreadID:  p.msg.ThreadID,
+						})
+					}
+				}
+				responseText = cleanText
 			}
 
 			// Handle plan edits
@@ -407,10 +435,9 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 				}
 			}
 
-			// Only send a final text message when post-processing changed
-			// the response (plan edits, story edits). The raw response was
-			// already delivered via stream deltas.
-			if p.channelMgr != nil && chatText != "" && chatText != responseText {
+			// Guests run silently (no stream deltas to chat), so always
+			// send the final text as a single chat message.
+			if p.channelMgr != nil && chatText != "" {
 				_ = p.channelMgr.Broadcast(p.ctx, channel.OutgoingMessage{
 					Text:     chatText,
 					GuestID:  guestID,

@@ -424,7 +424,7 @@ func (a *Adapter) broadcastEvent(msg channel.OutgoingMessage) error {
 // sendDisplay broadcasts an A2UI display frame to all connected Prism clients.
 // If the message has a ThreadID, it is sent only to the connection for that thread.
 func (a *Adapter) sendDisplay(msg channel.OutgoingMessage) error {
-	f := frame{Type: "display", Component: msg.Display, Thread: msg.ThreadID, ID: msg.DisplayID}
+	f := frame{Type: "display", Component: msg.Display, Thread: msg.ThreadID, ID: msg.DisplayID, GuestID: msg.GuestID}
 
 	if msg.ThreadID != "" {
 		a.mu.RLock()

@@ -15,14 +15,14 @@ import (
 )
 
 var (
-	ErrStaleRevision      = errors.New("stale revision: content changed since last read")
-	ErrSectionIDNotFound  = errors.New("section ID not found in file")
-	ErrMutuallyExclusive  = errors.New("section and after are mutually exclusive")
-	ErrPathTraversal      = errors.New("path traversal detected")
-	ErrOutsideStoryDir    = errors.New("target file outside story/ directory")
-	ErrAfterNotFound      = errors.New("after section not found")
-	ErrDuplicateID        = errors.New("duplicate section ID")
-	ErrMissingAnchor      = errors.New("content without section anchor")
+	ErrStaleRevision     = errors.New("stale revision: content changed since last read")
+	ErrSectionIDNotFound = errors.New("section ID not found in file")
+	ErrMutuallyExclusive = errors.New("section and after are mutually exclusive")
+	ErrPathTraversal     = errors.New("path traversal detected")
+	ErrOutsideStoryDir   = errors.New("target file outside story/ directory")
+	ErrAfterNotFound     = errors.New("after section not found")
+	ErrDuplicateID       = errors.New("duplicate section ID")
+	ErrMissingAnchor     = errors.New("content without section anchor")
 )
 
 var sectionAnchorRe = regexp.MustCompile(`<!--\s*id:\s*(\S+)\s*-->`)
@@ -331,13 +331,8 @@ func updateFrontmatter(fm string, sectionID string, editedBy string) string {
 		return fm
 	}
 
-	inner := fm
-	if strings.HasPrefix(inner, "---\n") {
-		inner = inner[4:]
-	}
-	if strings.HasSuffix(inner, "\n---") {
-		inner = inner[:len(inner)-4]
-	}
+	inner := strings.TrimPrefix(fm, "---\n")
+	inner = strings.TrimSuffix(inner, "\n---")
 
 	var sfm storyFrontmatter
 	if err := yaml.Unmarshal([]byte(inner), &sfm); err != nil {
