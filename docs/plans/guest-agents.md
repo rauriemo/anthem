@@ -248,9 +248,107 @@ Anthem doesn't directly call Managed Agents (that's Prism's job). But it needs t
 
 ## Testing Strategy
 
-- All new code must have table-driven unit tests
-- `internal/guests/` package: test scanning, parsing, index generation, fingerprinting with `testdata/` fixtures
-- Orchestrator persona injection: test prompt composition with mock guest agents
-- WebSocket protocol: test new frame fields round-trip in Prism adapter tests
-- Config integration: test hot-reload picks up new/changed/deleted agent files
-- Integration test: end-to-end flow from req with mention -> persona injection -> res with guest_id
+All new code must have table-driven unit tests. Follow existing patterns: interface-based mocks, `testdata/` fixtures, `fmt.Errorf` wrapping, `slog` logging.
+
+### `internal/guests/` package tests
+
+**Frontmatter parsing** (`ParseFrontmatter`):
+- Valid full frontmatter (all fields populated)
+- Minimal frontmatter (only `name` + `description`)
+- Missing required fields (`name` missing, `description` missing) -- expect error
+- Malformed YAML between delimiters -- expect error with context
+- Missing closing `---` delimiter -- expect error
+- Empty file -- expect error
+- File with frontmatter but no markdown body -- valid, empty persona
+- Non-UTF8 content in body -- should not crash, treat as opaque bytes
+- Extra unknown fields in frontmatter -- silently ignored (forward compat)
+
+**Directory scanning** (`ScanDirectory`):
+- Normal directory with 2-3 valid agent files
+- Empty `agents/` directory -- returns empty index, no error
+- Directory does not exist -- returns error with path context
+- Directory contains non-`.md` files (`.txt`, `.json`, subdirectories) -- ignored
+- Mix of valid and invalid files -- valid ones indexed, invalid ones logged and skipped (not fatal)
+- Permission error on a single file -- skip with warning, don't abort scan
+- Large directory (parametrize with 50+ files if feasible) -- completes without excessive memory
+
+**Index generation** (`WriteIndex`, `LoadIndex`):
+- Round-trip: write then load produces identical GuestIndex
+- Atomic write: partial write doesn't corrupt existing index (write to temp then rename)
+- Load from missing file -- returns error (not empty index)
+- Load from corrupted JSON -- returns error with context
+- Index `version` field set correctly
+- `generated_at` timestamp is recent (within 1 second of write)
+
+**Persona loading** (`LoadPersona`):
+- Returns full markdown body below closing `---`
+- Agent file exists but body is empty -- returns empty string, no error
+- Agent file does not exist -- returns error with slug context
+
+**Requirements fingerprint** (`ComputeRequirementsFingerprint`):
+- Deterministic: same requirements -> same hash every time
+- Different requirements -> different hash
+- Field ordering doesn't affect hash (normalize before hashing)
+- Nil/empty requirements -> consistent fallback hash
+- Fingerprint format is `sha256:<hex>`
+
+**Fallback resolution**:
+- Project has `agents/` -- only project agents returned, `~/.anthem/agents/` ignored
+- Project has no `agents/` -- falls back to `~/.anthem/agents/`
+- Neither directory exists -- empty roster, no error
+
+**WORKFLOW.md allowlist filtering**:
+- `guests` list present -- only listed agents in index
+- `guests` list absent -- all agents in index
+- `guests` contains nonexistent agent slug -- ignored (no error, just filtered out)
+- `guests` is empty list -- empty roster (intentional lockdown)
+- `guests` contains duplicates -- deduplicated
+
+### Prism adapter tests (`internal/channel/prism/adapter_test.go`)
+
+**Protocol backward compatibility**:
+- `auth_ok` with `guest_agents` field -- new Prism client parses correctly
+- `auth_ok` with `guest_agents` field -- old Prism client (no guest support) ignores unknown field gracefully. Test by verifying the JSON is valid and existing fields are unchanged.
+- `req` with `active_guests` and `mention` fields -- adapter parses correctly
+- `req` without `active_guests`/`mention` (old client) -- fields default to nil/empty, no error
+- `res` with `guest_id` -- round-trip through adapter
+- `res` with `suggest_guest` object -- round-trip through adapter
+- `res` without guest fields -- unchanged behavior (backward compat)
+
+**Config reload broadcast**:
+- When guest index is regenerated (agent file added/removed/changed), connected Prism clients receive updated `guest_agents` array
+- Multiple connected Prism clients all receive the update
+
+### Orchestrator tests (`internal/orchestrator/`)
+
+**Persona injection** (Phase 2):
+- Compact roster summary generated correctly for N active guests (verify format, ~50 tokens per guest)
+- Full persona loaded and injected only for the @-mentioned guest
+- No persona injected when `active_guests` is empty
+- `mention` field routes to correct agent; response includes `guest_id`
+- Unknown `mention` slug -- error response, not crash
+
+**Capability matching** (Phase 2):
+- Orchestrator suggests inactive agent when capabilities match conversation topic
+- No suggestion when all relevant agents already active
+- No suggestion when no agents match
+- `suggest_guest` response includes `id` and `reason` string
+
+**Context budget** (Phase 2):
+- Roster summary stays within expected token budget as active guest count grows (test with 1, 2, 4 guests)
+- Full persona injection doesn't exceed reasonable prompt size limits
+
+**Config hot-reload integration**:
+- Adding a new `.md` file to `agents/` -- appears in next scan
+- Removing a `.md` file -- disappears from index
+- Modifying a `.md` file -- index updated with new metadata
+- Renaming a file -- old slug removed, new slug added
+
+### Testdata fixtures
+
+- `testdata/agents/game-designer.md` -- full frontmatter (all fields) + multi-paragraph body
+- `testdata/agents/code-reviewer.md` -- minimal frontmatter (name + description only), short body
+- `testdata/agents/incomplete.md` -- missing `name` field, for error testing
+- `testdata/agents/malformed.md` -- invalid YAML in frontmatter, for error testing
+- `testdata/agents/no-body.md` -- valid frontmatter, empty body
+- `testdata/agents/ignore-me.txt` -- non-markdown file, should be skipped by scanner
