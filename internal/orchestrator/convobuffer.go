@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	maxHistoryRounds  = 3
-	responseTruncLen  = 200
+	maxHistoryRounds = 3
+	responseTruncLen = 200
 )
 
 type ConvoResponse struct {

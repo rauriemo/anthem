@@ -76,19 +76,19 @@ type PlanMetaSummary struct {
 }
 
 type StateSnapshot struct {
-	Tasks                []TaskSummary       `json:"tasks"`
-	RetryQueue           []RetrySummary      `json:"retry_queue,omitempty"`
-	Budget               BudgetSummary       `json:"budget"`
-	Wave                 *WaveSummary        `json:"wave,omitempty"`
-	RecentEvents         []EventSummary      `json:"recent_events,omitempty"`
-	UserMessage          *UserMessageContext `json:"user_message,omitempty"`
-	Project              *ProjectContext     `json:"project,omitempty"`
-	SourceChannel        string              `json:"source_channel,omitempty"`
-	ActivePlan           *PlanContext        `json:"active_plan,omitempty"`
-	PlanHistory          []PlanMetaSummary   `json:"plan_history,omitempty"`
-	ActiveGuestsSummary  string              `json:"active_guests_summary,omitempty"`
-	SharedContext        string              `json:"shared_context,omitempty"`
-	ConversationHistory  string              `json:"conversation_history,omitempty"`
+	Tasks               []TaskSummary       `json:"tasks"`
+	RetryQueue          []RetrySummary      `json:"retry_queue,omitempty"`
+	Budget              BudgetSummary       `json:"budget"`
+	Wave                *WaveSummary        `json:"wave,omitempty"`
+	RecentEvents        []EventSummary      `json:"recent_events,omitempty"`
+	UserMessage         *UserMessageContext `json:"user_message,omitempty"`
+	Project             *ProjectContext     `json:"project,omitempty"`
+	SourceChannel       string              `json:"source_channel,omitempty"`
+	ActivePlan          *PlanContext        `json:"active_plan,omitempty"`
+	PlanHistory         []PlanMetaSummary   `json:"plan_history,omitempty"`
+	ActiveGuestsSummary string              `json:"active_guests_summary,omitempty"`
+	SharedContext       string              `json:"shared_context,omitempty"`
+	ConversationHistory string              `json:"conversation_history,omitempty"`
 }
 
 func (s StateSnapshot) Serialize() string {
