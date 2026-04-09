@@ -131,7 +131,7 @@ func TestConsult_RefreshesOnTokenLimit(t *testing.T) {
 
 func TestParseActions_FencedJSON(t *testing.T) {
 	output := "Here is my response:\n```json\n{\"reasoning\": \"ok\", \"actions\": [{\"type\": \"dispatch\", \"task_id\": \"5\"}]}\n```"
-	actions, err := parseActions(output)
+	actions, _, err := parseActions(output)
 	if err != nil {
 		t.Fatalf("parseActions() error: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestParseActions_FencedJSON(t *testing.T) {
 
 func TestParseActions_RawJSON(t *testing.T) {
 	output := `Some text before {"reasoning": "plan", "actions": [{"type": "comment", "task_id": "7", "body": "looks good"}]} and after`
-	actions, err := parseActions(output)
+	actions, _, err := parseActions(output)
 	if err != nil {
 		t.Fatalf("parseActions() error: %v", err)
 	}
@@ -166,7 +166,7 @@ Based on my analysis of the codebase:
 
 {"reasoning": "After reading the code, task 3 needs refactoring", "actions": [{"type": "dispatch", "task_id": "3", "profile": "coder"}]}`
 
-	actions, err := parseActions(output)
+	actions, _, err := parseActions(output)
 	if err != nil {
 		t.Fatalf("parseActions() error: %v", err)
 	}
@@ -183,7 +183,7 @@ Based on my analysis of the codebase:
 
 func TestParseActions_NoJSON(t *testing.T) {
 	output := "This response has no JSON at all, just plain text."
-	_, err := parseActions(output)
+	_, _, err := parseActions(output)
 	if err == nil {
 		t.Fatal("expected error for output with no JSON")
 	}

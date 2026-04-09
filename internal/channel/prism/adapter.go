@@ -452,7 +452,7 @@ func (a *Adapter) sendDisplay(msg channel.OutgoingMessage) error {
 }
 
 func (a *Adapter) sendStream(msg channel.OutgoingMessage) error {
-	f := frame{Type: "stream", Text: msg.StreamDelta, Thread: msg.ThreadID, Done: msg.StreamDone}
+	f := frame{Type: "stream", Text: msg.StreamDelta, Thread: msg.ThreadID, Done: msg.StreamDone, GuestID: msg.GuestID}
 
 	if msg.ThreadID != "" {
 		a.mu.RLock()

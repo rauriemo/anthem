@@ -63,6 +63,8 @@ type Orchestrator struct {
 	planStore       *plans.Store
 	guestIndex      *guests.GuestIndex
 	onGuestUpdate   func(guests.GuestIndex)
+	convoBuf        *ConvoBuffer
+	sharedCtx       *SharedContext
 
 	wg            sync.WaitGroup
 	mu            sync.Mutex
@@ -124,6 +126,8 @@ func New(opts Opts) *Orchestrator {
 		retryState:      make(map[string]*RetryInfo),
 		taskDeps:        make(map[string][]string),
 		reviewRetries:   make(map[string]int),
+		convoBuf:        NewConvoBuffer(),
+		sharedCtx:       NewSharedContext(),
 	}
 
 	return o
@@ -1618,24 +1622,99 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	model, cleanedText := extractModelTag(msg.Text)
 	msg.Text = cleanedText
 
+	// --- Guest agent @-mention fast path ---
+	if len(msg.ActiveGuests) > 0 && msg.Mention != "" {
+		for _, gID := range msg.ActiveGuests {
+			if gID == msg.Mention {
+				o.handleGuestMention(ctx, msg)
+				return
+			}
+		}
+	}
+
+	// --- Guest dispatch for ALL modes (runs in parallel with mode handler) ---
+	var guestWg *sync.WaitGroup
+	if len(msg.ActiveGuests) > 0 && o.guestIndex != nil {
+		channelKey := msg.ChannelKind
+		o.convoBuf.RecordUserMessage(channelKey, msg.Text)
+		history := FormatHistory(o.convoBuf.History(channelKey))
+		sharedCtxText := o.sharedCtx.Get(channelKey)
+
+		mode := o.detectMode(msg.Text)
+		planContent := ""
+		if mode == "plan" && o.planStore != nil {
+			slug := o.projectSlug()
+			if draft, draftErr := o.planStore.LatestDraft(slug); draftErr == nil && draft != nil {
+				planContent = draft.Body
+			}
+		}
+
+		var selectedGuests []string
+		if len(msg.ActiveGuests) <= RoutingThreshold {
+			selectedGuests = msg.ActiveGuests
+		} else {
+			summaries := o.buildGuestSummaries(msg.ActiveGuests)
+			result := routeToGuests(ctx, o.runner, msg.Text, summaries, history, sharedCtxText, o.logger)
+			selectedGuests = result.Guests
+			if result.ContextUpdate != "" {
+				o.sharedCtx.Update(channelKey, result.ContextUpdate)
+			}
+		}
+
+		if len(selectedGuests) > 0 {
+			guestsDir := o.guestsDir()
+			projectSummary := ""
+			if o.projectCtx != nil {
+				projectSummary = o.projectCtx.ProjectSummary
+			}
+
+			guestWg = &sync.WaitGroup{}
+			guestWg.Add(1)
+			go func() {
+				defer guestWg.Done()
+				dispatchSelectedGuests(guestDispatchParams{
+					ctx:            ctx,
+					selectedIDs:    selectedGuests,
+					msg:            msg,
+					guestsDir:      guestsDir,
+					runner:         o.runner,
+					sharedCtx:      o.sharedCtx,
+					convoBuf:       o.convoBuf,
+					channelMgr:     o.channelMgr,
+					projectSummary: projectSummary,
+					mode:           mode,
+					planContent:    planContent,
+					planStore:      o.planStore,
+					planSlug:       o.projectSlug(),
+					guestIndex:     o.guestIndex,
+					logger:         o.logger,
+				})
+			}()
+		}
+	}
+
 	// Plan/build routing -- must be checked before fast path
 	if strings.Contains(msg.Text, "[system:build]") {
 		o.handleBuildMessage(ctx, msg, model)
+		o.finalizeGuestRound(ctx, msg, guestWg)
 		return
 	}
 	if strings.Contains(msg.Text, "[system:plan]") {
 		o.handlePlanMessage(ctx, msg, model)
+		o.finalizeGuestRound(ctx, msg, guestWg)
 		return
 	}
 
 	// Fast path for lightweight queries (status checks, /fast messages)
 	if strings.Contains(msg.Text, "[system:status]") || strings.Contains(msg.Text, "[system:fast]") {
 		o.handleLeanMessage(ctx, msg, model)
+		o.finalizeGuestRound(ctx, msg, guestWg)
 		return
 	}
 
 	if o.tracker == nil {
 		o.handleLeanMessage(ctx, msg, model)
+		o.finalizeGuestRound(ctx, msg, guestWg)
 		return
 	}
 
@@ -1643,6 +1722,7 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	if err != nil {
 		o.logger.Error("failed to fetch tasks for user message", "error", err)
 		o.sendFollowUp(ctx, msg, "Failed to fetch current tasks.")
+		o.finalizeGuestRound(ctx, msg, guestWg)
 		return
 	}
 
@@ -1672,8 +1752,16 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		}
 	}
 
+	// Inject guest awareness into the orchestrator's state snapshot
+	if len(msg.ActiveGuests) > 0 && o.guestIndex != nil {
+		snap.ActiveGuestsSummary = o.formatGuestSummary(msg.ActiveGuests)
+		snap.SharedContext = o.sharedCtx.Get(msg.ChannelKind)
+		snap.ConversationHistory = FormatHistory(o.convoBuf.History(msg.ChannelKind))
+	}
+
 	if o.orchAgent == nil {
 		o.handleLeanMessage(ctx, msg, model)
+		o.finalizeGuestRound(ctx, msg, guestWg)
 		return
 	}
 
@@ -1700,12 +1788,21 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	if err != nil {
 		o.logger.Warn("orchestrator consultation failed for user message", "error", err)
 		o.sendFollowUp(ctx, msg, "I couldn't process your message. The orchestrator encountered an error.")
+		o.finalizeGuestRound(ctx, msg, guestWg)
 		return
 	}
 
 	if actions == nil {
 		o.sendFollowUp(ctx, msg, "I couldn't understand your request. Please try again.")
+		o.finalizeGuestRound(ctx, msg, guestWg)
 		return
+	}
+
+	// Extract context_update from orchestrator response for shared context
+	if len(msg.ActiveGuests) > 0 {
+		if orchResp := o.orchAgent.LastResponse(); orchResp != nil && orchResp.ContextUpdate != "" {
+			o.sharedCtx.Update(msg.ChannelKind, orchResp.ContextUpdate)
+		}
 	}
 
 	hasDisplay := msg.ChannelKind == "prism" && slices.ContainsFunc(actions, func(a Action) bool {
@@ -1713,12 +1810,14 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	})
 
 	// Execute actions -- replies and display frames are sent as follow-up notifications
+	orchReplyText := ""
 	for i := range actions {
 		if actions[i].Type == ActionReply && o.channelMgr != nil {
 			if hasDisplay && strings.TrimSpace(actions[i].Body) == "" {
 				continue
 			}
 			o.sendFollowUp(ctx, msg, actions[i].Body)
+			orchReplyText += actions[i].Body
 			o.recordAudit(ctx, "channel.reply_sent", "", strPtr("reply"))
 		}
 		if actions[i].Type == ActionDisplay && o.channelMgr != nil {
@@ -1750,6 +1849,11 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		}
 	}
 
+	// Record orchestrator response in conversation buffer
+	if len(msg.ActiveGuests) > 0 && orchReplyText != "" {
+		o.convoBuf.RecordResponse(msg.ChannelKind, o.projectSlug(), "", orchReplyText)
+	}
+
 	// Execute non-reply/non-display actions via the standard path
 	var otherActions []Action
 	for _, a := range actions {
@@ -1759,6 +1863,7 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	}
 	o.executeActions(ctx, tasks, otherActions)
 
+	o.finalizeGuestRound(ctx, msg, guestWg)
 	o.recordAudit(ctx, "channel.user_message", "", strPtr("handle_user_message"))
 }
 
@@ -1774,6 +1879,194 @@ func (o *Orchestrator) sendFollowUp(ctx context.Context, original channel.Incomi
 		ThreadID:  original.ThreadID,
 		EventType: "channel.followup",
 	})
+}
+
+// detectMode returns the mode tag in the message text.
+func (o *Orchestrator) detectMode(text string) string {
+	switch {
+	case strings.Contains(text, "[system:build]"):
+		return "build"
+	case strings.Contains(text, "[system:plan]"):
+		return "plan"
+	case strings.Contains(text, "[system:fast]"), strings.Contains(text, "[system:status]"):
+		return "fast"
+	default:
+		return "agent"
+	}
+}
+
+// handleGuestMention invokes a single mentioned guest directly, bypassing routing and orchestrator.
+func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.IncomingMessage) {
+	guestID := msg.Mention
+	channelKey := msg.ChannelKind
+
+	o.convoBuf.RecordUserMessage(channelKey, msg.Text)
+
+	var agent guests.GuestAgent
+	if o.guestIndex != nil {
+		agent = o.guestIndex.Agents[guestID]
+	}
+	if agent.Name == "" {
+		agent.Name = guestID
+	}
+
+	persona, err := guests.LoadPersona(o.guestsDir(), guestID)
+	if err != nil {
+		o.logger.Warn("failed to load mentioned guest persona", "guest", guestID, "error", err)
+		o.sendFollowUp(ctx, msg, fmt.Sprintf("Could not load agent %q.", guestID))
+		return
+	}
+
+	model := agent.Model
+	if model == "" {
+		model = "claude-sonnet-4-5"
+	}
+
+	history := FormatHistory(o.convoBuf.History(channelKey))
+	sharedCtxText := o.sharedCtx.Get(channelKey)
+	projectSummary := ""
+	if o.projectCtx != nil {
+		projectSummary = o.projectCtx.ProjectSummary
+	}
+
+	mode := o.detectMode(msg.Text)
+	planContent := ""
+	if mode == "plan" && o.planStore != nil {
+		slug := o.projectSlug()
+		if draft, draftErr := o.planStore.LatestDraft(slug); draftErr == nil && draft != nil {
+			planContent = draft.Body
+		}
+	}
+
+	prompt := buildGuestPrompt(persona, projectSummary, sharedCtxText, history, msg.Text, GuestPromptOpts{
+		Mode:        mode,
+		PlanContent: planContent,
+	})
+
+	// Stream-start indicator
+	if o.channelMgr != nil {
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			StreamDelta: "",
+			GuestID:     guestID,
+			ThreadID:    msg.ThreadID,
+		})
+	}
+
+	var fullText strings.Builder
+	onStream := func(delta string) {
+		fullText.WriteString(delta)
+		if o.channelMgr != nil {
+			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+				StreamDelta: delta,
+				GuestID:     guestID,
+				ThreadID:    msg.ThreadID,
+			})
+		}
+	}
+
+	result, runErr := o.runner.Run(ctx, types.RunOpts{
+		Prompt:         prompt,
+		Model:          model,
+		MaxTurns:       1,
+		PermissionMode: "bypassPermissions",
+		OnStream:       onStream,
+	})
+
+	if o.channelMgr != nil {
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			StreamDone: true,
+			GuestID:    guestID,
+			ThreadID:   msg.ThreadID,
+		})
+	}
+
+	responseText := result.Output
+	if responseText == "" {
+		responseText = fullText.String()
+	}
+
+	if runErr != nil {
+		o.logger.Warn("guest mention invocation failed", "guest", guestID, "error", runErr)
+		return
+	}
+
+	chatText := responseText
+	if mode == "plan" && o.planStore != nil {
+		explanation, planMd, hasEdit := extractPlanEdit(responseText)
+		if hasEdit {
+			planEditMu.Lock()
+			_, _ = o.planStore.Save(o.projectSlug(), guestID, planMd)
+			planEditMu.Unlock()
+			chatText = explanation
+		}
+	}
+
+	if o.channelMgr != nil && chatText != "" {
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			Text:     chatText,
+			GuestID:  guestID,
+			ThreadID: msg.ThreadID,
+		})
+	}
+
+	o.convoBuf.RecordResponse(channelKey, agent.Name, guestID, responseText)
+}
+
+// buildGuestSummaries creates lightweight summaries for the routing call.
+func (o *Orchestrator) buildGuestSummaries(activeGuestIDs []string) []GuestSummary {
+	summaries := make([]GuestSummary, 0, len(activeGuestIDs))
+	for _, id := range activeGuestIDs {
+		agent, ok := o.guestIndex.Agents[id]
+		if !ok {
+			continue
+		}
+		summaries = append(summaries, GuestSummary{
+			ID:          id,
+			Name:        agent.Name,
+			Description: agent.Description,
+		})
+	}
+	return summaries
+}
+
+// formatGuestSummary creates a text block for the orchestrator's awareness.
+func (o *Orchestrator) formatGuestSummary(activeGuestIDs []string) string {
+	var sb strings.Builder
+	for _, id := range activeGuestIDs {
+		if agent, ok := o.guestIndex.Agents[id]; ok {
+			fmt.Fprintf(&sb, "- %s (%s): %s\n", id, agent.Name, agent.Description)
+		}
+	}
+	return sb.String()
+}
+
+// finalizeGuestRound waits for guest goroutines and fires a post-round context update for small groups.
+func (o *Orchestrator) finalizeGuestRound(ctx context.Context, msg channel.IncomingMessage, guestWg *sync.WaitGroup) {
+	if guestWg != nil {
+		guestWg.Wait()
+	}
+
+	if len(msg.ActiveGuests) > 0 && len(msg.ActiveGuests) <= RoutingThreshold {
+		channelKey := msg.ChannelKind
+		history := FormatHistory(o.convoBuf.History(channelKey))
+		currentCtx := o.sharedCtx.Get(channelKey)
+		go updateContextAfterRound(ctx, o.runner, history, currentCtx, o.sharedCtx, channelKey, o.logger)
+	}
+}
+
+// guestsDir returns the path to the project's agents/ directory.
+func (o *Orchestrator) guestsDir() string {
+	root := o.cfg.Workspace.Root
+	if root == "" || root == "." {
+		if cwd, err := os.Getwd(); err == nil {
+			root = cwd
+		}
+	} else if !filepath.IsAbs(root) {
+		if cwd, err := os.Getwd(); err == nil {
+			root = filepath.Join(cwd, root)
+		}
+	}
+	return filepath.Join(root, "agents")
 }
 
 var modelTagRe = regexp.MustCompile(`\[model:([^\]]+)\]`)

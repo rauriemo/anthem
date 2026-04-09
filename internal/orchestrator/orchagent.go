@@ -76,16 +76,19 @@ type PlanMetaSummary struct {
 }
 
 type StateSnapshot struct {
-	Tasks         []TaskSummary       `json:"tasks"`
-	RetryQueue    []RetrySummary      `json:"retry_queue,omitempty"`
-	Budget        BudgetSummary       `json:"budget"`
-	Wave          *WaveSummary        `json:"wave,omitempty"`
-	RecentEvents  []EventSummary      `json:"recent_events,omitempty"`
-	UserMessage   *UserMessageContext `json:"user_message,omitempty"`
-	Project       *ProjectContext     `json:"project,omitempty"`
-	SourceChannel string              `json:"source_channel,omitempty"`
-	ActivePlan    *PlanContext        `json:"active_plan,omitempty"`
-	PlanHistory   []PlanMetaSummary   `json:"plan_history,omitempty"`
+	Tasks                []TaskSummary       `json:"tasks"`
+	RetryQueue           []RetrySummary      `json:"retry_queue,omitempty"`
+	Budget               BudgetSummary       `json:"budget"`
+	Wave                 *WaveSummary        `json:"wave,omitempty"`
+	RecentEvents         []EventSummary      `json:"recent_events,omitempty"`
+	UserMessage          *UserMessageContext `json:"user_message,omitempty"`
+	Project              *ProjectContext     `json:"project,omitempty"`
+	SourceChannel        string              `json:"source_channel,omitempty"`
+	ActivePlan           *PlanContext        `json:"active_plan,omitempty"`
+	PlanHistory          []PlanMetaSummary   `json:"plan_history,omitempty"`
+	ActiveGuestsSummary  string              `json:"active_guests_summary,omitempty"`
+	SharedContext        string              `json:"shared_context,omitempty"`
+	ConversationHistory  string              `json:"conversation_history,omitempty"`
 }
 
 func (s StateSnapshot) Serialize() string {
@@ -129,6 +132,12 @@ type OrchestratorAgent struct {
 	planMaxTurns     int
 	explorerMaxTurns int
 	maxExplorers     int
+	lastResp         *OrchestratorResponse
+}
+
+// LastResponse returns the most recently parsed OrchestratorResponse, if any.
+func (oa *OrchestratorAgent) LastResponse() *OrchestratorResponse {
+	return oa.lastResp
 }
 
 func NewOrchestratorAgent(runner agent.AgentRunner, voiceContent string, maxContextTokens int, maxTurns int, planMaxTurns int, explorerMaxTurns int, maxExplorers int, logger *slog.Logger) *OrchestratorAgent {
@@ -277,8 +286,12 @@ When all frontier tasks are terminal or non-runnable, propose a close_wave actio
 
 	sections = append(sections, `## Response Format
 
-Respond with a single JSON object containing 'reasoning' (string) and 'actions' (array). Example:
-{"reasoning": "Task 42 is ready, task 7 is blocked on approval.", "actions": [{"type": "dispatch", "task_id": "42"}, {"type": "request_approval", "task_id": "7"}]}`)
+Respond with a single JSON object containing 'reasoning' (string) and 'actions' (array). When specialist agents are active, also include 'context_update' (string) to maintain the shared session knowledge document. Example:
+{"reasoning": "Task 42 is ready, task 7 is blocked on approval.", "actions": [{"type": "dispatch", "task_id": "42"}, {"type": "request_approval", "task_id": "7"}], "context_update": "Key decisions: ..."}`)
+
+	sections = append(sections, `## Active Specialists
+
+When the state snapshot includes "active_guests_summary", specialist agents are participating in this conversation. They receive messages independently via a routing system — you do not need to manage them. Focus on your own response. Include a context_update field in your JSON response to maintain the shared session knowledge document with key decisions, facts, and ongoing topics.`)
 
 	return strings.Join(sections, "\n\n")
 }
@@ -333,10 +346,11 @@ func (o *OrchestratorAgent) Start(ctx context.Context, state StateSnapshot) ([]A
 	o.recordResult(result)
 	o.warnIfHighTokens(result)
 
-	actions, err := parseActions(result.Output)
+	actions, resp, err := parseActions(result.Output)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator start: parsing actions: %w", err)
 	}
+	o.lastResp = resp
 
 	return actions, nil
 }
@@ -365,10 +379,11 @@ func (o *OrchestratorAgent) Consult(ctx context.Context, state StateSnapshot) ([
 	o.recordResult(result)
 	o.warnIfHighTokens(result)
 
-	actions, err := parseActions(result.Output)
+	actions, resp, err := parseActions(result.Output)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator consult: parsing actions: %w", err)
 	}
+	o.lastResp = resp
 
 	return actions, nil
 }
@@ -407,8 +422,7 @@ func (o *OrchestratorAgent) recordResult(result *types.RunResult) {
 	o.totalCostUSD += result.CostUSD
 }
 
-func parseActions(output string) ([]Action, error) {
-	// Find the first { and its matching } using brace counting.
+func parseActions(output string) ([]Action, *OrchestratorResponse, error) {
 	start := -1
 	for i, c := range output {
 		if c == '{' {
@@ -417,7 +431,7 @@ func parseActions(output string) ([]Action, error) {
 		}
 	}
 	if start == -1 {
-		return nil, fmt.Errorf("no JSON object found in output")
+		return nil, nil, fmt.Errorf("no JSON object found in output")
 	}
 
 	depth := 0
@@ -438,15 +452,15 @@ func parseActions(output string) ([]Action, error) {
 		}
 	}
 	if end == -1 {
-		return nil, fmt.Errorf("unmatched braces in JSON output")
+		return nil, nil, fmt.Errorf("unmatched braces in JSON output")
 	}
 
 	var resp OrchestratorResponse
 	if err := json.Unmarshal([]byte(output[start:end]), &resp); err != nil {
-		return nil, fmt.Errorf("parsing orchestrator response: %w", err)
+		return nil, nil, fmt.Errorf("parsing orchestrator response: %w", err)
 	}
 
-	return resp.Actions, nil
+	return resp.Actions, &resp, nil
 }
 
 const repairPrompt = `Your previous response was not valid JSON. Respond with ONLY a JSON object: {"reasoning": "...", "actions": [...]}`
@@ -466,10 +480,11 @@ func (o *OrchestratorAgent) StartStreaming(ctx context.Context, state StateSnaps
 	o.recordResult(result)
 	o.warnIfHighTokens(result)
 
-	actions, err := parseActions(result.Output)
+	actions, resp, err := parseActions(result.Output)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator start: parsing actions: %w", err)
 	}
+	o.lastResp = resp
 
 	return actions, nil
 }
@@ -499,10 +514,11 @@ func (o *OrchestratorAgent) ConsultStreaming(ctx context.Context, state StateSna
 	o.recordResult(result)
 	o.warnIfHighTokens(result)
 
-	actions, err := parseActions(result.Output)
+	actions, resp, err := parseActions(result.Output)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator consult: parsing actions: %w", err)
 	}
+	o.lastResp = resp
 
 	return actions, nil
 }
@@ -530,11 +546,12 @@ func (o *OrchestratorAgent) ConsultWithRepairStreaming(ctx context.Context, stat
 
 	o.recordResult(result)
 
-	actions, err = parseActions(result.Output)
+	actions, resp, err := parseActions(result.Output)
 	if err != nil {
 		o.logger.Warn("repair parse also failed, falling back to mechanical dispatch", "error", err)
 		return nil, nil
 	}
+	o.lastResp = resp
 
 	return actions, nil
 }
@@ -562,11 +579,12 @@ func (o *OrchestratorAgent) ConsultWithRepair(ctx context.Context, state StateSn
 
 	o.recordResult(result)
 
-	actions, err = parseActions(result.Output)
+	actions, resp, err := parseActions(result.Output)
 	if err != nil {
 		o.logger.Warn("repair parse also failed, falling back to mechanical dispatch", "error", err)
 		return nil, nil
 	}
+	o.lastResp = resp
 
 	return actions, nil
 }
@@ -679,10 +697,11 @@ func (o *OrchestratorAgent) ConsultBuild(ctx context.Context, state StateSnapsho
 	o.recordResult(result)
 	o.warnIfHighTokens(result)
 
-	actions, err := parseActions(result.Output)
+	actions, resp, err := parseActions(result.Output)
 	if err != nil {
 		return nil, fmt.Errorf("build consult: parsing actions: %w", err)
 	}
+	o.lastResp = resp
 	return actions, nil
 }
 

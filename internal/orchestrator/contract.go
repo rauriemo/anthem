@@ -107,8 +107,9 @@ type Action struct {
 
 // OrchestratorResponse is the full JSON response parsed from the orchestrator agent.
 type OrchestratorResponse struct {
-	Reasoning string   `json:"reasoning"`
-	Actions   []Action `json:"actions"`
+	Reasoning     string   `json:"reasoning"`
+	Actions       []Action `json:"actions"`
+	ContextUpdate string   `json:"context_update,omitempty"`
 }
 
 // ErrNotImplemented indicates an action whose schema is defined but execution is deferred.
