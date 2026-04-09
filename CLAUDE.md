@@ -164,6 +164,19 @@ These are the source of truth for what to build and how.
 
 Update this section as phases are completed.
 
+## Guest Agents (Planned)
+
+Guest agents are lightweight persona definitions (markdown files with YAML frontmatter) in a project's `agents/` directory. Anthem scans this directory on boot, generates `.agents-index.json`, and advertises the roster to Prism. On @-mention, the orchestrator injects the guest's persona into its prompt context.
+
+Full implementation spec: `docs/plans/guest-agents.md`
+
+Key Anthem responsibilities:
+- `internal/guests/` package: scan `agents/`, parse frontmatter, generate index, load persona on demand
+- WebSocket protocol: `guest_agents` in auth, `active_guests`/`mention` in req, `guest_id`/`suggest_guest` in res
+- Orchestrator: compressed context injection (roster summary for all active guests, full persona only for the responding guest), capability-matching suggestions
+- Config: `guests` allowlist and `max_active_guests` in WORKFLOW.md frontmatter
+- Fallback: `~/.anthem/agents/` for projects without an `agents/` directory
+
 ## Reference: Prism Channel Protocol
 
 Prism uses the same WebSocket JSON frame protocol as Dispatch, extended with:
