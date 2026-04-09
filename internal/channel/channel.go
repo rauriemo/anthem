@@ -36,6 +36,7 @@ type OutgoingMessage struct {
 	Ack          bool          `json:"ack,omitempty"`
 	Display      any           `json:"display,omitempty"`
 	DisplayID    string        `json:"display_id,omitempty"`
+	DisplayIDs   []string      `json:"display_ids,omitempty"`
 	StreamDelta  string        `json:"stream_delta,omitempty"`
 	StreamDone   bool          `json:"stream_done,omitempty"`
 	GuestID      string        `json:"guest_id,omitempty"`

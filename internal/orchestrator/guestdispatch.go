@@ -401,12 +401,15 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 
 			// Extract prism-display blocks and broadcast as artifacts
 			cleanText, displays := extractLeanDisplayBlocks(responseText)
+			var displayIDs []string
 			if len(displays) > 0 {
 				for _, comp := range displays {
 					if p.channelMgr != nil {
+						did := newDisplayID()
+						displayIDs = append(displayIDs, did)
 						_ = p.channelMgr.Broadcast(p.ctx, channel.OutgoingMessage{
 							Display:   comp,
-							DisplayID: newDisplayID(),
+							DisplayID: did,
 							GuestID:   guestID,
 							ThreadID:  p.msg.ThreadID,
 						})
@@ -463,9 +466,10 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 			// send the final text as a single chat message.
 			if p.channelMgr != nil && chatText != "" {
 				_ = p.channelMgr.Broadcast(p.ctx, channel.OutgoingMessage{
-					Text:     chatText,
-					GuestID:  guestID,
-					ThreadID: p.msg.ThreadID,
+					Text:       chatText,
+					GuestID:    guestID,
+					ThreadID:   p.msg.ThreadID,
+					DisplayIDs: displayIDs,
 				})
 			}
 

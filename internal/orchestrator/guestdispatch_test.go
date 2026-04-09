@@ -369,12 +369,12 @@ func TestExtractLeanDisplayBlocks_GuestNoPrismDisplay(t *testing.T) {
 
 func TestRoutingResult_ParsesDirectedText(t *testing.T) {
 	tests := []struct {
-		name     string
-		json     string
-		wantLen  int
-		wantKey  string
-		wantVal  string
-		wantNil  bool
+		name    string
+		json    string
+		wantLen int
+		wantKey string
+		wantVal string
+		wantNil bool
 	}{
 		{
 			name:    "directed_text present",
@@ -520,7 +520,7 @@ func TestSuggestGuestToInvite_InvalidJSON(t *testing.T) {
 func TestSuggestGuestToInvite_PromptListsCandidates(t *testing.T) {
 	var capturedPrompt string
 	mockRunner := &mockSuggestRunner{
-		output: `{"guest_id": "", "reason": ""}`,
+		output:        `{"guest_id": "", "reason": ""}`,
 		capturePrompt: &capturedPrompt,
 	}
 	candidates := []GuestSummary{

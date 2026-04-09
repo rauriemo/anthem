@@ -1684,27 +1684,27 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 			guestWg.Add(1)
 			go func() {
 				defer guestWg.Done()
-			dispatchSelectedGuests(guestDispatchParams{
-				ctx:            ctx,
-				selectedIDs:    selectedGuests,
-				msg:            msg,
-				guestsDir:      guestsDir,
-				runner:         o.runner,
-				sharedCtx:      o.sharedCtx,
-				convoBuf:       o.convoBuf,
-				channelMgr:     o.channelMgr,
-				projectSummary: projectSummary,
-				mode:           mode,
-				channelKind:    msg.ChannelKind,
-				planContent:    planContent,
-				planStore:      o.planStore,
-				planSlug:       o.projectSlug(),
-				guestIndex:     o.guestIndex,
-				storyStore:     o.storyStore,
-				proposalStore:  o.proposalStore,
-				directedText:   directedText,
-				logger:         o.logger,
-			})
+				dispatchSelectedGuests(guestDispatchParams{
+					ctx:            ctx,
+					selectedIDs:    selectedGuests,
+					msg:            msg,
+					guestsDir:      guestsDir,
+					runner:         o.runner,
+					sharedCtx:      o.sharedCtx,
+					convoBuf:       o.convoBuf,
+					channelMgr:     o.channelMgr,
+					projectSummary: projectSummary,
+					mode:           mode,
+					channelKind:    msg.ChannelKind,
+					planContent:    planContent,
+					planStore:      o.planStore,
+					planSlug:       o.projectSlug(),
+					guestIndex:     o.guestIndex,
+					storyStore:     o.storyStore,
+					proposalStore:  o.proposalStore,
+					directedText:   directedText,
+					logger:         o.logger,
+				})
 			}()
 		}
 	}
@@ -2041,12 +2041,15 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 	}
 
 	cleanText, displays := extractLeanDisplayBlocks(responseText)
+	var displayIDs []string
 	if len(displays) > 0 {
 		for _, comp := range displays {
 			if o.channelMgr != nil {
+				did := newDisplayID()
+				displayIDs = append(displayIDs, did)
 				_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
 					Display:   comp,
-					DisplayID: newDisplayID(),
+					DisplayID: did,
 					GuestID:   guestID,
 					ThreadID:  msg.ThreadID,
 				})
@@ -2097,9 +2100,10 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 
 	if o.channelMgr != nil && chatText != "" {
 		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
-			Text:     chatText,
-			GuestID:  guestID,
-			ThreadID: msg.ThreadID,
+			Text:       chatText,
+			GuestID:    guestID,
+			ThreadID:   msg.ThreadID,
+			DisplayIDs: displayIDs,
 		})
 	}
 

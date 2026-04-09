@@ -63,6 +63,7 @@ type frame struct {
 	ActiveGuests    []string           `json:"active_guests,omitempty"`
 	Mention         string             `json:"mention,omitempty"`
 	GuestID         string             `json:"guest_id,omitempty"`
+	DisplayIDs      []string           `json:"display_ids,omitempty"`
 	SuggestGuest    *suggestGuestFrame `json:"suggest_guest,omitempty"`
 }
 
@@ -362,6 +363,9 @@ func (a *Adapter) buildResFrame(msg channel.OutgoingMessage) frame {
 	f := frame{Type: "res", ID: msg.ThreadID, Text: msg.Text, Ack: msg.Ack}
 	if msg.GuestID != "" {
 		f.GuestID = msg.GuestID
+	}
+	if len(msg.DisplayIDs) > 0 {
+		f.DisplayIDs = msg.DisplayIDs
 	}
 	if msg.SuggestGuest != nil {
 		f.SuggestGuest = &suggestGuestFrame{
