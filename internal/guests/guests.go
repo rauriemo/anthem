@@ -30,9 +30,9 @@ type GuestAgent struct {
 }
 
 type GuestIndex struct {
-	Version     int                    `json:"version"`
-	GeneratedAt time.Time              `json:"generated_at"`
-	Agents      map[string]GuestAgent  `json:"agents"`
+	Version     int                   `json:"version"`
+	GeneratedAt time.Time             `json:"generated_at"`
+	Agents      map[string]GuestAgent `json:"agents"`
 }
 
 type frontmatter struct {

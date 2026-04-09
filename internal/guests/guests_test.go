@@ -125,12 +125,12 @@ func TestParseFrontmatter(t *testing.T) {
 
 func TestScanDirectory(t *testing.T) {
 	tests := []struct {
-		name       string
-		dir        string
-		setup      func(t *testing.T) string
-		wantErr    bool
-		wantCount  int
-		wantSlugs  []string
+		name      string
+		dir       string
+		setup     func(t *testing.T) string
+		wantErr   bool
+		wantCount int
+		wantSlugs []string
 	}{
 		{
 			name: "normal directory with valid and invalid files",
@@ -159,8 +159,12 @@ func TestScanDirectory(t *testing.T) {
 			name: "only non-md files",
 			setup: func(t *testing.T) string {
 				dir := t.TempDir()
-				os.WriteFile(filepath.Join(dir, "readme.txt"), []byte("hello"), 0644)
-				os.WriteFile(filepath.Join(dir, "data.json"), []byte("{}"), 0644)
+				if err := os.WriteFile(filepath.Join(dir, "readme.txt"), []byte("hello"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "data.json"), []byte("{}"), 0644); err != nil {
+					t.Fatal(err)
+				}
 				return dir
 			},
 			wantCount: 0,
@@ -244,7 +248,9 @@ func TestLoadIndexMissing(t *testing.T) {
 
 func TestLoadIndexCorrupted(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, indexFile), []byte("{invalid json"), 0644)
+	if err := os.WriteFile(filepath.Join(dir, indexFile), []byte("{invalid json"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	_, err := LoadIndex(dir)
 	if err == nil {
 		t.Fatal("expected error for corrupted index file")
@@ -397,9 +403,9 @@ func TestFilterByAllowlist(t *testing.T) {
 		Version:     1,
 		GeneratedAt: time.Now().UTC(),
 		Agents: map[string]GuestAgent{
-			"alpha":   {ID: "alpha", Name: "Alpha"},
-			"beta":    {ID: "beta", Name: "Beta"},
-			"gamma":   {ID: "gamma", Name: "Gamma"},
+			"alpha": {ID: "alpha", Name: "Alpha"},
+			"beta":  {ID: "beta", Name: "Beta"},
+			"gamma": {ID: "gamma", Name: "Gamma"},
 		},
 	}
 
