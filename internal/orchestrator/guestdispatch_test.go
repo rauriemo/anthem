@@ -1,9 +1,15 @@
 package orchestrator
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/rauriemo/anthem/internal/types"
 )
 
 func TestExtractPlanEdit_WithBlock(t *testing.T) {
@@ -233,12 +239,6 @@ func TestRoutingResult_ParsesIncludeOrchestrator(t *testing.T) {
 	}
 }
 
-func TestRoutingThreshold(t *testing.T) {
-	if RoutingThreshold != 3 {
-		t.Errorf("expected routing threshold of 3, got %d", RoutingThreshold)
-	}
-}
-
 func TestBuildGuestPrompt_StoryContext(t *testing.T) {
 	sc := &StoryContext{
 		Config: "game: TestGame\ngenre: fantasy\n",
@@ -363,4 +363,206 @@ func TestExtractLeanDisplayBlocks_GuestNoPrismDisplay(t *testing.T) {
 	if strings.TrimRight(cleanText, "\n") != response {
 		t.Errorf("clean text should be unchanged, got %q", cleanText)
 	}
+}
+
+// --- Phase 1 tests ---
+
+func TestRoutingResult_ParsesDirectedText(t *testing.T) {
+	tests := []struct {
+		name     string
+		json     string
+		wantLen  int
+		wantKey  string
+		wantVal  string
+		wantNil  bool
+	}{
+		{
+			name:    "directed_text present",
+			json:    `{"guests": ["shigeru"], "directed_text": {"shigeru": "evaluate the game"}, "include_orchestrator": false, "context_update": ""}`,
+			wantLen: 1,
+			wantKey: "shigeru",
+			wantVal: "evaluate the game",
+		},
+		{
+			name:    "directed_text omitted",
+			json:    `{"guests": ["a"], "include_orchestrator": false, "context_update": ""}`,
+			wantNil: true,
+		},
+		{
+			name:    "directed_text empty map",
+			json:    `{"guests": ["a"], "directed_text": {}, "include_orchestrator": false, "context_update": ""}`,
+			wantLen: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var result RoutingResult
+			if err := json.Unmarshal([]byte(tt.json), &result); err != nil {
+				t.Fatalf("failed to parse JSON: %v", err)
+			}
+			if tt.wantNil {
+				if result.DirectedText != nil {
+					t.Errorf("expected nil DirectedText, got %v", result.DirectedText)
+				}
+				return
+			}
+			if len(result.DirectedText) != tt.wantLen {
+				t.Errorf("expected %d entries, got %d", tt.wantLen, len(result.DirectedText))
+			}
+			if tt.wantKey != "" {
+				if got := result.DirectedText[tt.wantKey]; got != tt.wantVal {
+					t.Errorf("DirectedText[%q] = %q, want %q", tt.wantKey, got, tt.wantVal)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildGuestPrompt_WithFocusText(t *testing.T) {
+	prompt := buildGuestPrompt("You are a game designer.", "", "", "", "Do everything", GuestPromptOpts{
+		FocusText: "evaluate the card system",
+	})
+	if !strings.Contains(prompt, "## Your Focus") {
+		t.Error("expected ## Your Focus section when FocusText is set")
+	}
+	if !strings.Contains(prompt, "evaluate the card system") {
+		t.Error("expected focus text content in prompt")
+	}
+	if !strings.Contains(prompt, "## User Message") {
+		t.Error("expected user message section even with focus text")
+	}
+	if !strings.Contains(prompt, "Do everything") {
+		t.Error("full user message should still be present")
+	}
+}
+
+func TestBuildGuestPrompt_NoFocusTextWhenEmpty(t *testing.T) {
+	prompt := buildGuestPrompt("You are a designer.", "", "", "", "Do something", GuestPromptOpts{
+		FocusText: "",
+	})
+	if strings.Contains(prompt, "## Your Focus") {
+		t.Error("should not include ## Your Focus when FocusText is empty")
+	}
+}
+
+func TestFallbackAllGuests_DirectedTextNil(t *testing.T) {
+	result := fallbackAllGuests([]GuestSummary{{ID: "a", Name: "A"}})
+	if result.DirectedText != nil {
+		t.Errorf("fallback should have nil DirectedText, got %v", result.DirectedText)
+	}
+}
+
+// --- Phase 2 tests ---
+
+func TestSuggestGuestToInvite_NoSuggestion(t *testing.T) {
+	mockRunner := &mockSuggestRunner{output: `{"guest_id": "", "reason": ""}`}
+	result := suggestGuestToInvite(
+		context.Background(),
+		mockRunner,
+		[]GuestSummary{{ID: "tolkien", Name: "Tolkien", Description: "Writer"}},
+		"## Recent conversation\nUser: hello\n",
+		testSuggestLogger(),
+	)
+	if result != nil {
+		t.Errorf("expected nil result for empty suggestion, got %+v", result)
+	}
+}
+
+func TestSuggestGuestToInvite_ReturnsSuggestion(t *testing.T) {
+	mockRunner := &mockSuggestRunner{output: `{"guest_id": "tolkien", "reason": "Story alignment needed"}`}
+	result := suggestGuestToInvite(
+		context.Background(),
+		mockRunner,
+		[]GuestSummary{{ID: "tolkien", Name: "Tolkien", Description: "Writer"}},
+		"## Recent conversation\nUser: We need narrative direction\n",
+		testSuggestLogger(),
+	)
+	if result == nil {
+		t.Fatal("expected non-nil suggestion")
+	}
+	if result.GuestID != "tolkien" {
+		t.Errorf("expected tolkien, got %q", result.GuestID)
+	}
+	if result.Reason != "Story alignment needed" {
+		t.Errorf("unexpected reason: %q", result.Reason)
+	}
+}
+
+func TestSuggestGuestToInvite_FailsSilently(t *testing.T) {
+	mockRunner := &mockSuggestRunner{err: fmt.Errorf("network error")}
+	result := suggestGuestToInvite(
+		context.Background(),
+		mockRunner,
+		[]GuestSummary{{ID: "a", Name: "A", Description: ""}},
+		"",
+		testSuggestLogger(),
+	)
+	if result != nil {
+		t.Errorf("expected nil on error, got %+v", result)
+	}
+}
+
+func TestSuggestGuestToInvite_InvalidJSON(t *testing.T) {
+	mockRunner := &mockSuggestRunner{output: "not valid json at all"}
+	result := suggestGuestToInvite(
+		context.Background(),
+		mockRunner,
+		[]GuestSummary{{ID: "a", Name: "A", Description: ""}},
+		"",
+		testSuggestLogger(),
+	)
+	if result != nil {
+		t.Errorf("expected nil on invalid JSON, got %+v", result)
+	}
+}
+
+func TestSuggestGuestToInvite_PromptListsCandidates(t *testing.T) {
+	var capturedPrompt string
+	mockRunner := &mockSuggestRunner{
+		output: `{"guest_id": "", "reason": ""}`,
+		capturePrompt: &capturedPrompt,
+	}
+	candidates := []GuestSummary{
+		{ID: "tolkien", Name: "Tolkien", Description: "World builder"},
+		{ID: "shigeru", Name: "Shigeru", Description: "Game designer"},
+	}
+	suggestGuestToInvite(
+		context.Background(),
+		mockRunner,
+		candidates,
+		"",
+		testSuggestLogger(),
+	)
+	if !strings.Contains(capturedPrompt, "tolkien") || !strings.Contains(capturedPrompt, "shigeru") {
+		t.Errorf("prompt should list all candidates, got: %s", capturedPrompt[:min(len(capturedPrompt), 200)])
+	}
+}
+
+type mockSuggestRunner struct {
+	output        string
+	err           error
+	capturePrompt *string
+}
+
+func (m *mockSuggestRunner) Run(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+	if m.capturePrompt != nil {
+		*m.capturePrompt = opts.Prompt
+	}
+	if m.err != nil {
+		return nil, m.err
+	}
+	return &types.RunResult{Output: m.output}, nil
+}
+
+func (m *mockSuggestRunner) Continue(_ context.Context, _ string, _ string, _ types.ContinueOpts) (*types.RunResult, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (m *mockSuggestRunner) Kill(_ int) error {
+	return nil
+}
+
+func testSuggestLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
