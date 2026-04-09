@@ -2,6 +2,9 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -30,8 +33,9 @@ type RoutingResult struct {
 }
 
 type GuestPromptOpts struct {
-	Mode        string
-	PlanContent string
+	Mode         string
+	PlanContent  string
+	StoryContext *StoryContext
 }
 
 var planEditBlockRe = regexp.MustCompile("(?s)```plan-edit\\s*\\n(.*?)\\n```")
@@ -161,6 +165,31 @@ func buildGuestPrompt(persona, projectSummary, sharedCtx, history, userMsg strin
 		sb.WriteString("- To COMMENT without editing, just respond normally.\n\n")
 	}
 
+	if opts.StoryContext != nil {
+		sb.WriteString("## Story Bible\n\n")
+		sb.WriteString("### Project Context\n")
+		sb.WriteString(opts.StoryContext.Config)
+		sb.WriteString("\n\n")
+		for name, content := range opts.StoryContext.Files {
+			fmt.Fprintf(&sb, "### %s\n\n%s\n\n", name, content)
+		}
+		sb.WriteString("### Section Hashes\n\n")
+		sb.WriteString("| section_id | file | rev |\n|---|---|---|\n")
+		for file, secs := range opts.StoryContext.Sections {
+			for id, hash := range secs {
+				fmt.Fprintf(&sb, "| %s | %s | %s |\n", id, file, hash)
+			}
+		}
+		sb.WriteString("\n## Story Edit Instructions\n\n")
+		sb.WriteString("You are the narrative engine for this project.\n")
+		sb.WriteString("Your edits are PROPOSALS -- the user accepts or rejects each one.\n")
+		sb.WriteString("- To REPLACE: ```story-edit target=\"file.md\" section=\"id\" rev=\"hash\"\n")
+		sb.WriteString("- To INSERT: ```story-edit target=\"file.md\" after=\"id\"\n")
+		sb.WriteString("- To APPEND: ```story-edit target=\"file.md\" (no section or after)\n")
+		sb.WriteString("- New sections MUST include <!-- id: snake_case --> anchor.\n")
+		sb.WriteString("- To DISCUSS: respond normally, no fenced block.\n\n")
+	}
+
 	fmt.Fprintf(&sb, "## User Message\n\n%s\n", userMsg)
 
 	if opts.Mode == "fast" {
@@ -201,6 +230,8 @@ type guestDispatchParams struct {
 	planStore      *plans.Store
 	planSlug       string
 	guestIndex     *guests.GuestIndex
+	storyStore     *StoryStore
+	proposalStore  *ProposalStore
 	logger         *slog.Logger
 }
 
@@ -236,10 +267,24 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 			model = "claude-sonnet-4-5"
 		}
 
+		var storyCtx *StoryContext
+		if agent.Role == "writer" && p.storyStore != nil {
+			sc, err := p.storyStore.ReadContext()
+			if err == nil {
+				storyCtx = &sc
+			}
+		}
+
 		prompt := buildGuestPrompt(persona, p.projectSummary, sharedCtxText, history, p.msg.Text, GuestPromptOpts{
-			Mode:        p.mode,
-			PlanContent: p.planContent,
+			Mode:         p.mode,
+			PlanContent:  p.planContent,
+			StoryContext: storyCtx,
 		})
+
+		var allowedTools []string
+		if p.guestIndex != nil {
+			allowedTools = resolveGuestTools(p.guestIndex.Agents[guestID])
+		}
 
 		wg.Add(1)
 		go func() {
@@ -268,13 +313,18 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 				}
 			}
 
-			result, err := p.runner.Run(p.ctx, types.RunOpts{
+			runOpts := types.RunOpts{
 				Prompt:         prompt,
 				Model:          model,
 				MaxTurns:       1,
 				PermissionMode: "bypassPermissions",
 				OnStream:       onStream,
-			})
+			}
+			if len(allowedTools) > 0 {
+				runOpts.AllowedTools = allowedTools
+			}
+
+			result, err := p.runner.Run(p.ctx, runOpts)
 
 			// Send stream-done
 			if p.channelMgr != nil {
@@ -307,6 +357,38 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 				}
 			}
 
+			// Handle story edits
+			if p.storyStore != nil && p.proposalStore != nil {
+				explanation, edits, hasEdits := extractStoryEdits(responseText)
+				if hasEdits {
+					var validEdits []StoryEdit
+					var staleCount int
+					for _, edit := range edits {
+						if edit.Section != "" && edit.After != "" {
+							staleCount++
+							continue
+						}
+						if err := p.storyStore.CheckRevision(edit); err != nil {
+							staleCount++
+							continue
+						}
+						validEdits = append(validEdits, edit)
+					}
+
+					if len(validEdits) > 0 {
+						proposal, _ := p.proposalStore.Stage(guestID, validEdits)
+						if p.channelMgr != nil && proposal != nil {
+							broadcastStoryDisplay(p.ctx, p.channelMgr, p.storyStore, proposal, guestID, p.msg.ThreadID)
+						}
+					}
+
+					chatText = explanation
+					if staleCount > 0 {
+						chatText += fmt.Sprintf("\n\n(Warning) %d edit(s) rejected: content changed since last read.", staleCount)
+					}
+				}
+			}
+
 			if p.channelMgr != nil && chatText != "" {
 				_ = p.channelMgr.Broadcast(p.ctx, channel.OutgoingMessage{
 					Text:     chatText,
@@ -320,6 +402,115 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 	}
 
 	wg.Wait()
+}
+
+func broadcastStoryDisplay(ctx context.Context, channelMgr *channel.Manager, store *StoryStore, proposal *Proposal, agentID, threadID string) {
+	sc, err := store.ReadContext()
+	if err != nil {
+		return
+	}
+
+	activeFile := "narrative.md"
+	var sectionsList []map[string]string
+	for file, secs := range sc.Sections {
+		for id, hash := range secs {
+			sectionsList = append(sectionsList, map[string]string{
+				"id":   id,
+				"file": file,
+				"rev":  hash,
+			})
+		}
+	}
+
+	files := make([]string, 0, len(sc.Files))
+	for f := range sc.Files {
+		files = append(files, f)
+	}
+
+	content := ""
+	if c, ok := sc.Files[activeFile]; ok {
+		content = c
+	}
+
+	component := map[string]any{
+		"kind":    "story",
+		"title":   activeFile,
+		"content": content,
+		"storyMeta": map[string]any{
+			"status":     "draft",
+			"sections":   sectionsList,
+			"files":      files,
+			"activeFile": activeFile,
+		},
+	}
+
+	if proposal != nil {
+		proposalSections := make([]map[string]any, 0, len(proposal.Edits))
+		for _, edit := range proposal.Edits {
+			secID := edit.Section
+			if secID == "" {
+				secID = edit.After
+			}
+			if secID == "" {
+				if m := sectionAnchorRe.FindStringSubmatch(edit.Content); len(m) > 1 {
+					secID = m[1]
+				}
+			}
+
+			currentContent := ""
+			if fileSections, ok := sc.Files[edit.Target]; ok {
+				_, secs := parseSections(fileSections)
+				for _, s := range secs {
+					if s.ID == edit.Section {
+						currentContent = s.Content
+						break
+					}
+				}
+			}
+
+			proposalSections = append(proposalSections, map[string]any{
+				"sectionId":       secID,
+				"target":          edit.Target,
+				"status":          proposal.Status[secID],
+				"currentContent":  currentContent,
+				"proposedContent": edit.Content,
+			})
+		}
+
+		component["proposals"] = []map[string]any{
+			{
+				"proposalId": proposal.ID,
+				"guestId":    proposal.GuestID,
+				"sections":   proposalSections,
+			},
+		}
+	}
+
+	_ = channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+		Display:   component,
+		DisplayID: newStoryDisplayID(),
+		GuestID:   agentID,
+		ThreadID:  threadID,
+	})
+}
+
+func newStoryDisplayID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return "story-" + hex.EncodeToString(b)
+}
+
+func resolveGuestTools(agent guests.GuestAgent) []string {
+	fp := agent.RequirementsFingerprint
+	emptyFP := "sha256:" + fmt.Sprintf("%x", sha256Sum(nil))
+	if fp == emptyFP || fp == "" {
+		return nil
+	}
+	return []string{"WebSearch", "WebFetch"}
+}
+
+func sha256Sum(data []byte) [32]byte {
+	return sha256.Sum256(data)
 }
 
 // extractJSON attempts to pull the first JSON object from LLM output.

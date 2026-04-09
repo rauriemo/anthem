@@ -65,6 +65,8 @@ type Orchestrator struct {
 	onGuestUpdate   func(guests.GuestIndex)
 	convoBuf        *ConvoBuffer
 	sharedCtx       *SharedContext
+	storyStore      *StoryStore
+	proposalStore   *ProposalStore
 
 	wg            sync.WaitGroup
 	mu            sync.Mutex
@@ -128,6 +130,7 @@ func New(opts Opts) *Orchestrator {
 		reviewRetries:   make(map[string]int),
 		convoBuf:        NewConvoBuffer(),
 		sharedCtx:       NewSharedContext(),
+		proposalStore:   NewProposalStore(30 * time.Minute),
 	}
 
 	return o
@@ -402,6 +405,12 @@ func (o *Orchestrator) scanGuests() {
 
 	o.guestIndex = &index
 	o.logger.Info("scanned guest agents", "count", len(index.Agents))
+
+	storyDir := filepath.Join(root, "story")
+	if info, err := os.Stat(storyDir); err == nil && info.IsDir() {
+		o.storyStore = NewStoryStore(root)
+		o.logger.Info("story directory detected, story store initialized", "path", storyDir)
+	}
 
 	if o.onGuestUpdate != nil {
 		o.onGuestUpdate(index)
@@ -1687,6 +1696,8 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 					planStore:      o.planStore,
 					planSlug:       o.projectSlug(),
 					guestIndex:     o.guestIndex,
+					storyStore:     o.storyStore,
+					proposalStore:  o.proposalStore,
 					logger:         o.logger,
 				})
 			}()
@@ -1938,10 +1949,24 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 		}
 	}
 
+	var storyCtx *StoryContext
+	if agent.Role == "writer" && o.storyStore != nil {
+		sc, err := o.storyStore.ReadContext()
+		if err == nil {
+			storyCtx = &sc
+		}
+	}
+
 	prompt := buildGuestPrompt(persona, projectSummary, sharedCtxText, history, msg.Text, GuestPromptOpts{
-		Mode:        mode,
-		PlanContent: planContent,
+		Mode:         mode,
+		PlanContent:  planContent,
+		StoryContext: storyCtx,
 	})
+
+	var allowedTools []string
+	if o.guestIndex != nil {
+		allowedTools = resolveGuestTools(o.guestIndex.Agents[guestID])
+	}
 
 	// Stream-start indicator
 	if o.channelMgr != nil {
@@ -1964,13 +1989,18 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 		}
 	}
 
-	result, runErr := o.runner.Run(ctx, types.RunOpts{
+	mentionRunOpts := types.RunOpts{
 		Prompt:         prompt,
 		Model:          model,
 		MaxTurns:       1,
 		PermissionMode: "bypassPermissions",
 		OnStream:       onStream,
-	})
+	}
+	if len(allowedTools) > 0 {
+		mentionRunOpts.AllowedTools = allowedTools
+	}
+
+	result, runErr := o.runner.Run(ctx, mentionRunOpts)
 
 	if o.channelMgr != nil {
 		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
@@ -2001,6 +2031,35 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 		}
 	}
 
+	if o.storyStore != nil && o.proposalStore != nil {
+		explanation, edits, hasEdits := extractStoryEdits(responseText)
+		if hasEdits {
+			var validEdits []StoryEdit
+			var staleCount int
+			for _, edit := range edits {
+				if edit.Section != "" && edit.After != "" {
+					staleCount++
+					continue
+				}
+				if err := o.storyStore.CheckRevision(edit); err != nil {
+					staleCount++
+					continue
+				}
+				validEdits = append(validEdits, edit)
+			}
+			if len(validEdits) > 0 {
+				proposal, _ := o.proposalStore.Stage(guestID, validEdits)
+				if o.channelMgr != nil && proposal != nil {
+					broadcastStoryDisplay(ctx, o.channelMgr, o.storyStore, proposal, guestID, msg.ThreadID)
+				}
+			}
+			chatText = explanation
+			if staleCount > 0 {
+				chatText += fmt.Sprintf("\n\n(Warning) %d edit(s) rejected: content changed since last read.", staleCount)
+			}
+		}
+	}
+
 	if o.channelMgr != nil && chatText != "" {
 		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
 			Text:     chatText,
@@ -2010,6 +2069,73 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 	}
 
 	o.convoBuf.RecordResponse(channelKey, agent.Name, guestID, responseText)
+}
+
+func (o *Orchestrator) HandleStoryAccept(ctx context.Context, proposalID, sectionID, threadID string) error {
+	edit, guestID, err := o.proposalStore.Accept(proposalID, sectionID)
+	if err != nil {
+		return err
+	}
+
+	if err := o.storyStore.Apply(*edit, guestID); err != nil {
+		return err
+	}
+
+	if warnings := o.storyStore.Validate(); len(warnings) > 0 {
+		var msgs []string
+		for _, w := range warnings {
+			msgs = append(msgs, fmt.Sprintf("[%s] %s: %s", w.Level, w.File, w.Message))
+		}
+		if o.channelMgr != nil {
+			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+				Text:     "Story validation:\n" + strings.Join(msgs, "\n"),
+				ThreadID: threadID,
+			})
+		}
+	}
+
+	if o.channelMgr != nil {
+		broadcastStoryDisplay(ctx, o.channelMgr, o.storyStore, nil, "", threadID)
+	}
+	return nil
+}
+
+func (o *Orchestrator) HandleStoryReject(_ context.Context, proposalID, sectionID string) error {
+	return o.proposalStore.Reject(proposalID, sectionID)
+}
+
+func (o *Orchestrator) HandleStorySave(ctx context.Context, target, sectionID, rev, content, threadID string) error {
+	edit := StoryEdit{Target: target, Section: sectionID, Rev: rev, Content: content}
+	if err := o.storyStore.CheckRevision(edit); err != nil {
+		return err
+	}
+	if err := o.storyStore.Apply(edit, "human"); err != nil {
+		return err
+	}
+
+	if warnings := o.storyStore.Validate(); len(warnings) > 0 {
+		var msgs []string
+		for _, w := range warnings {
+			msgs = append(msgs, fmt.Sprintf("[%s] %s: %s", w.Level, w.File, w.Message))
+		}
+		if o.channelMgr != nil {
+			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+				Text:     "Story validation:\n" + strings.Join(msgs, "\n"),
+				ThreadID: threadID,
+			})
+		}
+	}
+
+	if o.channelMgr != nil {
+		broadcastStoryDisplay(ctx, o.channelMgr, o.storyStore, nil, "", threadID)
+	}
+	return nil
+}
+
+// SetStoryStore configures the story store for a project. Called when a
+// project with a story/ directory is loaded.
+func (o *Orchestrator) SetStoryStore(projectRoot string) {
+	o.storyStore = NewStoryStore(projectRoot)
 }
 
 // buildGuestSummaries creates lightweight summaries for the routing call.

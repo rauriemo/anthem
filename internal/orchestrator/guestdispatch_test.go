@@ -193,3 +193,51 @@ func TestRoutingThreshold(t *testing.T) {
 		t.Errorf("expected routing threshold of 3, got %d", RoutingThreshold)
 	}
 }
+
+func TestBuildGuestPrompt_StoryContext(t *testing.T) {
+	sc := &StoryContext{
+		Config: "game: TestGame\ngenre: fantasy\n",
+		Files: map[string]string{
+			"narrative.md": "<!-- id: prologue -->\n## Prologue\n\nOnce upon a time.",
+		},
+		Sections: map[string]map[string]string{
+			"narrative.md": {"prologue": "a1b2c3d4"},
+		},
+	}
+
+	prompt := buildGuestPrompt("You are a writer.", "", "", "", "Write chapter 2", GuestPromptOpts{
+		StoryContext: sc,
+	})
+
+	if !strings.Contains(prompt, "## Story Bible") {
+		t.Error("should include story bible section")
+	}
+	if !strings.Contains(prompt, "TestGame") {
+		t.Error("should include context.yaml content")
+	}
+	if !strings.Contains(prompt, "prologue") {
+		t.Error("should include section hashes")
+	}
+	if !strings.Contains(prompt, "a1b2c3d4") {
+		t.Error("should include hash values")
+	}
+	if !strings.Contains(prompt, "story-edit") {
+		t.Error("should include story-edit instructions")
+	}
+	if !strings.Contains(prompt, "PROPOSALS") {
+		t.Error("should mention proposals")
+	}
+}
+
+func TestBuildGuestPrompt_NoStoryContext(t *testing.T) {
+	prompt := buildGuestPrompt("You are a designer.", "", "", "", "Balance towers", GuestPromptOpts{
+		StoryContext: nil,
+	})
+
+	if strings.Contains(prompt, "## Story Bible") {
+		t.Error("should not include story bible when StoryContext is nil")
+	}
+	if strings.Contains(prompt, "story-edit") {
+		t.Error("should not include story-edit instructions for non-writer")
+	}
+}
