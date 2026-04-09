@@ -1633,8 +1633,10 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 
 	// --- Guest agent @-mention fast path ---
 	if len(msg.ActiveGuests) > 0 && msg.Mention != "" {
+		mention := strings.ToLower(msg.Mention)
 		for _, gID := range msg.ActiveGuests {
-			if gID == msg.Mention {
+			if strings.ToLower(gID) == mention {
+				msg.Mention = gID
 				o.handleGuestMention(ctx, msg)
 				return
 			}
