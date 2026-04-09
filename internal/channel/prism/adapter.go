@@ -34,6 +34,7 @@ type guestAgentInfo struct {
 	Capabilities            []string `json:"capabilities,omitempty"`
 	Icon                    string   `json:"icon,omitempty"`
 	Model                   string   `json:"model,omitempty"`
+	Quotes                  []string `json:"quotes,omitempty"`
 	RequirementsFingerprint string   `json:"requirementsFingerprint,omitempty"`
 	Scope                   string   `json:"scope,omitempty"`
 	Source                  string   `json:"source,omitempty"`
@@ -200,6 +201,7 @@ func (a *Adapter) UpdateGuestIndex(index guests.GuestIndex) {
 			Capabilities:            agent.Capabilities,
 			Icon:                    agent.Icon,
 			Model:                   agent.Model,
+			Quotes:                  agent.Quotes,
 			RequirementsFingerprint: agent.RequirementsFingerprint,
 			Scope:                   agent.Scope,
 			Source:                  agent.Source,

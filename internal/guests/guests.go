@@ -23,6 +23,7 @@ type GuestAgent struct {
 	Capabilities            []string `json:"capabilities,omitempty"`
 	Icon                    string   `json:"icon,omitempty"`
 	Model                   string   `json:"model,omitempty"`
+	Quotes                  []string `json:"quotes,omitempty"`
 	RequirementsFingerprint string   `json:"requirements_fingerprint"`
 	Scope                   string   `json:"scope"`
 	Source                  string   `json:"source"`
@@ -42,6 +43,7 @@ type frontmatter struct {
 	Role         string         `yaml:"role"`
 	Capabilities []string       `yaml:"capabilities"`
 	Icon         string         `yaml:"icon"`
+	Quotes       []string       `yaml:"quotes"`
 	Requirements map[string]any `yaml:"requirements"`
 }
 
@@ -166,6 +168,7 @@ func ParseFrontmatter(data []byte) (GuestAgent, error) {
 		Capabilities:            fm.Capabilities,
 		Icon:                    fm.Icon,
 		Model:                   fm.Model,
+		Quotes:                  fm.Quotes,
 		RequirementsFingerprint: ComputeRequirementsFingerprint(fm.Requirements),
 	}, nil
 }
