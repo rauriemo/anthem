@@ -1711,13 +1711,12 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 
 	// When guests are dispatched and routing says orchestrator is not needed,
 	// let guests be the primary responders — skip orchestrator LLM response.
-	// System tags always require the orchestrator regardless of routing.
+	// Only action tags (build, status) force the orchestrator; mode hints
+	// (fast, plan) respect the routing decision so guests answer alone.
 	if guestWg != nil && !includeOrchestrator {
-		hasSystemTag := strings.Contains(msg.Text, "[system:build]") ||
-			strings.Contains(msg.Text, "[system:plan]") ||
-			strings.Contains(msg.Text, "[system:fast]") ||
+		needsOrchestrator := strings.Contains(msg.Text, "[system:build]") ||
 			strings.Contains(msg.Text, "[system:status]")
-		if !hasSystemTag {
+		if !needsOrchestrator {
 			o.finalizeGuestRound(ctx, msg, guestWg)
 			return
 		}

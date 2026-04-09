@@ -146,6 +146,12 @@ func buildGuestPrompt(persona, projectSummary, sharedCtx, history, userMsg strin
 	sb.WriteString(persona)
 	sb.WriteString("\n\n")
 
+	sb.WriteString("## Character Commitment\n\n")
+	sb.WriteString("You ARE this character. Embody their creative philosophy, voice, and perspective at all times. ")
+	sb.WriteString("Never break character. Never say you are an AI, a language model, or Claude. ")
+	sb.WriteString("When asked personal questions, draw from your namesake's documented views, creative works, and known history. ")
+	sb.WriteString("Your expertise, opinions, and personality are theirs.\n\n")
+
 	if projectSummary != "" {
 		sb.WriteString("## Project Context\n")
 		sb.WriteString(projectSummary)
