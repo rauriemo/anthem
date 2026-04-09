@@ -286,3 +286,81 @@ func TestBuildGuestPrompt_NoStoryContext(t *testing.T) {
 		t.Error("should not include story-edit instructions for non-writer")
 	}
 }
+
+func TestBuildGuestPrompt_PrismDisplayInstructions(t *testing.T) {
+	prompt := buildGuestPrompt("You are a writer.", "Project", "", "", "Show me the docs", GuestPromptOpts{
+		Mode:        "agent",
+		ChannelKind: "prism",
+	})
+
+	if !strings.Contains(prompt, "## Visual Output") {
+		t.Error("prism channel should include Visual Output section")
+	}
+	if !strings.Contains(prompt, "```html") {
+		t.Error("prism channel should include html block instructions")
+	}
+	if !strings.Contains(prompt, "Self-contained HTML") {
+		t.Error("prism channel should describe HTML requirements")
+	}
+}
+
+func TestBuildGuestPrompt_NoPrismDisplayForOtherChannels(t *testing.T) {
+	prompt := buildGuestPrompt("You are a writer.", "Project", "", "", "Show me the docs", GuestPromptOpts{
+		Mode:        "agent",
+		ChannelKind: "",
+	})
+
+	if strings.Contains(prompt, "## Visual Output") {
+		t.Error("non-prism channel should not include Visual Output section")
+	}
+	if strings.Contains(prompt, "prism-display") {
+		t.Error("non-prism channel should not include prism-display instructions")
+	}
+}
+
+func TestBuildGuestPrompt_NoPrismDisplayForCLI(t *testing.T) {
+	prompt := buildGuestPrompt("You are a writer.", "Project", "", "", "Show me the docs", GuestPromptOpts{
+		Mode:        "agent",
+		ChannelKind: "cli",
+	})
+
+	if strings.Contains(prompt, "## Visual Output") {
+		t.Error("cli channel should not include Visual Output section")
+	}
+}
+
+func TestExtractLeanDisplayBlocks_GuestPrismDisplay(t *testing.T) {
+	response := "Here is the overview.\n\n```prism-display\n{\"kind\":\"html\",\"content\":\"<div><h1>Story Overview</h1></div>\"}\n```\n\nLet me know if you need more."
+	cleanText, displays := extractLeanDisplayBlocks(response)
+
+	if len(displays) != 1 {
+		t.Fatalf("expected 1 display block, got %d", len(displays))
+	}
+	if displays[0]["kind"] != "html" {
+		t.Errorf("expected kind=html, got %v", displays[0]["kind"])
+	}
+	if displays[0]["content"] != "<div><h1>Story Overview</h1></div>" {
+		t.Errorf("unexpected content: %v", displays[0]["content"])
+	}
+	if strings.Contains(cleanText, "prism-display") {
+		t.Error("cleaned text should not contain prism-display block")
+	}
+	if !strings.Contains(cleanText, "Here is the overview") {
+		t.Error("cleaned text should preserve text outside display blocks")
+	}
+	if !strings.Contains(cleanText, "Let me know") {
+		t.Error("cleaned text should preserve trailing text")
+	}
+}
+
+func TestExtractLeanDisplayBlocks_GuestNoPrismDisplay(t *testing.T) {
+	response := "Just a plain text response with no display blocks."
+	cleanText, displays := extractLeanDisplayBlocks(response)
+
+	if len(displays) != 0 {
+		t.Errorf("expected no display blocks, got %d", len(displays))
+	}
+	if strings.TrimRight(cleanText, "\n") != response {
+		t.Errorf("clean text should be unchanged, got %q", cleanText)
+	}
+}

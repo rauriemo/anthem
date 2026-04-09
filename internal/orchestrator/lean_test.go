@@ -432,11 +432,14 @@ func TestExtractLeanDisplayBlocks_InvalidJSON(t *testing.T) {
 	input := "Before\n```prism-display\nnot valid json\n```\nAfter"
 	clean, displays := extractLeanDisplayBlocks(input)
 
-	if len(displays) != 0 {
-		t.Errorf("invalid JSON should not produce display, got %d", len(displays))
+	if len(displays) != 1 {
+		t.Fatalf("invalid JSON in prism-display should fall back to html, got %d displays", len(displays))
+	}
+	if displays[0]["kind"] != "html" {
+		t.Errorf("fallback kind = %v, want html", displays[0]["kind"])
 	}
 	if !strings.Contains(clean, "Before") || !strings.Contains(clean, "After") {
-		t.Error("surrounding text should be preserved even with invalid block")
+		t.Error("surrounding text should be preserved")
 	}
 }
 
@@ -444,8 +447,99 @@ func TestExtractLeanDisplayBlocks_MissingKind(t *testing.T) {
 	input := "```prism-display\n{\"content\":\"no kind field\"}\n```"
 	_, displays := extractLeanDisplayBlocks(input)
 
+	// Valid JSON without "kind" — falls back to html with raw content
+	if len(displays) != 1 {
+		t.Fatalf("missing-kind JSON should fall back to html, got %d displays", len(displays))
+	}
+	if displays[0]["kind"] != "html" {
+		t.Errorf("fallback kind = %v, want html", displays[0]["kind"])
+	}
+}
+
+func TestExtractLeanDisplayBlocks_HTMLBlock(t *testing.T) {
+	input := "Here is the visual:\n\n```html\n<div style=\"padding:1rem\"><h1>Story Arc</h1></div>\n```\n\nThat's the overview."
+	clean, displays := extractLeanDisplayBlocks(input)
+
+	if len(displays) != 1 {
+		t.Fatalf("expected 1 display from html block, got %d", len(displays))
+	}
+	if displays[0]["kind"] != "html" {
+		t.Errorf("kind = %v, want html", displays[0]["kind"])
+	}
+	content, _ := displays[0]["content"].(string)
+	if !strings.Contains(content, "<h1>Story Arc</h1>") {
+		t.Errorf("html content not captured: %v", content)
+	}
+	if strings.Contains(clean, "<div") {
+		t.Error("html block should be stripped from clean text")
+	}
+	if !strings.Contains(clean, "Here is the visual:") || !strings.Contains(clean, "That's the overview.") {
+		t.Error("surrounding text should be preserved")
+	}
+}
+
+func TestExtractLeanDisplayBlocks_MarkdownBlock(t *testing.T) {
+	input := "Summary:\n```markdown\n# Chapter 1\n\nThe hero sets out.\n```\nEnd."
+	clean, displays := extractLeanDisplayBlocks(input)
+
+	if len(displays) != 1 {
+		t.Fatalf("expected 1 display from markdown block, got %d", len(displays))
+	}
+	if displays[0]["kind"] != "markdown" {
+		t.Errorf("kind = %v, want markdown", displays[0]["kind"])
+	}
+	content, _ := displays[0]["content"].(string)
+	if !strings.Contains(content, "# Chapter 1") {
+		t.Errorf("markdown content not captured: %v", content)
+	}
+	if !strings.Contains(clean, "End.") {
+		t.Error("trailing text should be preserved")
+	}
+}
+
+func TestExtractLeanDisplayBlocks_MdAlias(t *testing.T) {
+	input := "```md\n## Section\n\nContent here.\n```"
+	_, displays := extractLeanDisplayBlocks(input)
+
+	if len(displays) != 1 {
+		t.Fatalf("expected 1 display from md block, got %d", len(displays))
+	}
+	if displays[0]["kind"] != "markdown" {
+		t.Errorf("kind = %v, want markdown", displays[0]["kind"])
+	}
+}
+
+func TestExtractLeanDisplayBlocks_UnclosedBlock(t *testing.T) {
+	input := "Before\n```html\n<h1>Unclosed</h1>"
+	clean, displays := extractLeanDisplayBlocks(input)
+
 	if len(displays) != 0 {
-		t.Errorf("JSON without 'kind' should not produce display, got %d", len(displays))
+		t.Errorf("unclosed block should not produce display, got %d", len(displays))
+	}
+	if !strings.Contains(clean, "<h1>Unclosed</h1>") {
+		t.Error("unclosed block content should be preserved in clean text")
+	}
+}
+
+func TestExtractLeanDisplayBlocks_MixedBlockTypes(t *testing.T) {
+	input := "Text\n```prism-display\n{\"kind\":\"html\",\"content\":\"<b>bold</b>\"}\n```\nMiddle\n```html\n<p>raw html</p>\n```\nEnd"
+	clean, displays := extractLeanDisplayBlocks(input)
+
+	if len(displays) != 2 {
+		t.Fatalf("expected 2 displays, got %d", len(displays))
+	}
+	if displays[0]["kind"] != "html" || displays[0]["content"] != "<b>bold</b>" {
+		t.Errorf("first display unexpected: %v", displays[0])
+	}
+	if displays[1]["kind"] != "html" {
+		t.Errorf("second kind = %v, want html", displays[1]["kind"])
+	}
+	content, _ := displays[1]["content"].(string)
+	if !strings.Contains(content, "<p>raw html</p>") {
+		t.Errorf("second content unexpected: %v", content)
+	}
+	if !strings.Contains(clean, "Middle") || !strings.Contains(clean, "End") {
+		t.Error("surrounding text should be preserved")
 	}
 }
 

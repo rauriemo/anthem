@@ -9,7 +9,9 @@ import (
 func TestValidate_DuplicateIDsAcrossFiles(t *testing.T) {
 	dir := t.TempDir()
 	storyDir := filepath.Join(dir, "story")
-	os.MkdirAll(storyDir, 0755)
+	if err := os.MkdirAll(storyDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	file1 := `---
 title: File 1
@@ -29,8 +31,12 @@ title: File 2
 
 Other content.
 `
-	os.WriteFile(filepath.Join(storyDir, "a.md"), []byte(file1), 0644)
-	os.WriteFile(filepath.Join(storyDir, "b.md"), []byte(file2), 0644)
+	if err := os.WriteFile(filepath.Join(storyDir, "a.md"), []byte(file1), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(storyDir, "b.md"), []byte(file2), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	store := NewStoryStore(dir)
 	errs := store.Validate()
@@ -50,12 +56,10 @@ Other content.
 func TestValidate_MissingAnchor(t *testing.T) {
 	dir := t.TempDir()
 	storyDir := filepath.Join(dir, "story")
-	os.MkdirAll(storyDir, 0755)
+	if err := os.MkdirAll(storyDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 
-	// A file with no anchors has no sections, so no error for orphan content.
-	// But a file that has one anchor and content before it would trigger it.
-	// Our parser only finds content from anchor to anchor, so "missing anchor"
-	// specifically means the validator checks for it.
 	file := `---
 title: Test
 ---
@@ -65,7 +69,9 @@ title: Test
 
 Content here.
 `
-	os.WriteFile(filepath.Join(storyDir, "test.md"), []byte(file), 0644)
+	if err := os.WriteFile(filepath.Join(storyDir, "test.md"), []byte(file), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	store := NewStoryStore(dir)
 	errs := store.Validate()
@@ -80,7 +86,9 @@ Content here.
 func TestValidate_EmptySection(t *testing.T) {
 	dir := t.TempDir()
 	storyDir := filepath.Join(dir, "story")
-	os.MkdirAll(storyDir, 0755)
+	if err := os.MkdirAll(storyDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	file := `---
 title: Test
@@ -89,7 +97,9 @@ title: Test
 <!-- id: empty_one -->
 ## Empty Section
 `
-	os.WriteFile(filepath.Join(storyDir, "test.md"), []byte(file), 0644)
+	if err := os.WriteFile(filepath.Join(storyDir, "test.md"), []byte(file), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	store := NewStoryStore(dir)
 	errs := store.Validate()
@@ -121,7 +131,9 @@ func TestValidate_CleanFile(t *testing.T) {
 func TestValidate_NonSnakeCaseInfo(t *testing.T) {
 	dir := t.TempDir()
 	storyDir := filepath.Join(dir, "story")
-	os.MkdirAll(storyDir, 0755)
+	if err := os.MkdirAll(storyDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	file := `---
 title: Test
@@ -132,7 +144,9 @@ title: Test
 
 Content.
 `
-	os.WriteFile(filepath.Join(storyDir, "test.md"), []byte(file), 0644)
+	if err := os.WriteFile(filepath.Join(storyDir, "test.md"), []byte(file), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	store := NewStoryStore(dir)
 	errs := store.Validate()
