@@ -546,7 +546,9 @@ func TestParseFrontmatterBodyWithHorizontalRule(t *testing.T) {
 func TestScanDirectorySingleAgent(t *testing.T) {
 	dir := t.TempDir()
 	content := "---\nname: Solo\ndescription: Only agent\n---\n\nI'm alone.\n"
-	os.WriteFile(filepath.Join(dir, "solo.md"), []byte(content), 0644)
+	if err := os.WriteFile(filepath.Join(dir, "solo.md"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	index, err := ScanDirectory(dir, nil)
 	if err != nil {
