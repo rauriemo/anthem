@@ -1987,33 +1987,13 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 		allowedTools = resolveGuestTools(o.guestIndex.Agents[guestID])
 	}
 
-	// Stream-start indicator
-	if o.channelMgr != nil {
-		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
-			StreamDelta: "",
-			GuestID:     guestID,
-			ThreadID:    msg.ThreadID,
-		})
-	}
-
-	var fullText strings.Builder
-	onStream := func(delta string) {
-		fullText.WriteString(delta)
-		if o.channelMgr != nil {
-			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
-				StreamDelta: delta,
-				GuestID:     guestID,
-				ThreadID:    msg.ThreadID,
-			})
-		}
-	}
-
+	// Run without streaming so display blocks can be extracted before
+	// any text reaches the frontend (matches routed guest dispatch path).
 	mentionRunOpts := types.RunOpts{
 		Prompt:         prompt,
 		Model:          model,
 		MaxTurns:       1,
 		PermissionMode: "bypassPermissions",
-		OnStream:       onStream,
 	}
 	if len(allowedTools) > 0 {
 		mentionRunOpts.AllowedTools = allowedTools
@@ -2021,17 +2001,9 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 
 	result, runErr := o.runner.Run(ctx, mentionRunOpts)
 
-	if o.channelMgr != nil {
-		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
-			StreamDone: true,
-			GuestID:    guestID,
-			ThreadID:   msg.ThreadID,
-		})
-	}
-
-	responseText := result.Output
-	if responseText == "" {
-		responseText = fullText.String()
+	responseText := ""
+	if result != nil {
+		responseText = result.Output
 	}
 
 	if runErr != nil {
