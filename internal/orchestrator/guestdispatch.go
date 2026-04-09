@@ -19,8 +19,6 @@ import (
 	"github.com/rauriemo/anthem/internal/types"
 )
 
-const RoutingThreshold = 3
-
 type GuestSummary struct {
 	ID          string
 	Name        string
@@ -28,9 +26,10 @@ type GuestSummary struct {
 }
 
 type RoutingResult struct {
-	Guests              []string `json:"guests"`
-	IncludeOrchestrator bool     `json:"include_orchestrator"`
-	ContextUpdate       string   `json:"context_update"`
+	Guests              []string          `json:"guests"`
+	DirectedText        map[string]string `json:"directed_text,omitempty"`
+	IncludeOrchestrator bool              `json:"include_orchestrator"`
+	ContextUpdate       string            `json:"context_update"`
 }
 
 type GuestPromptOpts struct {
@@ -38,6 +37,7 @@ type GuestPromptOpts struct {
 	ChannelKind  string
 	PlanContent  string
 	StoryContext *StoryContext
+	FocusText    string
 }
 
 var planEditBlockRe = regexp.MustCompile("(?s)```plan-edit\\s*\\n(.*?)\\n```")
@@ -68,8 +68,11 @@ func routeToGuests(
 	}
 
 	fmt.Fprintf(&sb, "\n## User Message\n%s\n", userMsg)
-	sb.WriteString("\nRespond with JSON only: {\"guests\": [\"id1\", ...], \"include_orchestrator\": false, \"context_update\": \"updated session summary\"}\n")
-	sb.WriteString("Select guests whose expertise is relevant. Return empty guests array if none are relevant.\n")
+	sb.WriteString("\nRespond with JSON only:\n")
+	sb.WriteString(`{"guests": ["id1", ...], "directed_text": {"id1": "extracted instruction", ...}, "include_orchestrator": false, "context_update": "..."}`)
+	sb.WriteString("\n\nSelect guests whose expertise is relevant. Return empty guests array if none are relevant.\n")
+	sb.WriteString("If the user addresses different specialists by name or clear intent, include a \"directed_text\" map where each key is a guest ID and the value is the specific instruction extracted verbatim from the user's message. ")
+	sb.WriteString("Do not paraphrase — extract the user's actual words. If the message is general (not directed at specific specialists), omit \"directed_text\" entirely.\n")
 	sb.WriteString("Also decide whether the host orchestrator should respond alongside the specialists. ")
 	sb.WriteString("Set include_orchestrator to true ONLY if the message requires task management, system-level actions, or information the specialists cannot provide. ")
 	sb.WriteString("For general conversation, creative work, and domain questions, set it to false — the specialists are the primary responders.\n")
@@ -213,6 +216,12 @@ func buildGuestPrompt(persona, projectSummary, sharedCtx, history, userMsg strin
 
 	fmt.Fprintf(&sb, "## User Message\n\n%s\n", userMsg)
 
+	if opts.FocusText != "" {
+		sb.WriteString("\n## Your Focus\n\n")
+		fmt.Fprintf(&sb, "> %s\n\n", opts.FocusText)
+		sb.WriteString("Respond to this specific instruction. The full message above is provided for context.\n")
+	}
+
 	if opts.Mode == "fast" {
 		sb.WriteString("\nBe concise.\n")
 	}
@@ -254,6 +263,7 @@ type guestDispatchParams struct {
 	guestIndex     *guests.GuestIndex
 	storyStore     *StoryStore
 	proposalStore  *ProposalStore
+	directedText   map[string]string
 	logger         *slog.Logger
 }
 
@@ -264,7 +274,7 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 	sem := make(chan struct{}, 3)
 
 	channelKey := p.msg.ChannelKind
-	history := FormatHistory(p.convoBuf.History(channelKey))
+	rounds := p.convoBuf.History(channelKey)
 	sharedCtxText := p.sharedCtx.Get(channelKey)
 
 	for _, guestID := range p.selectedIDs {
@@ -304,11 +314,25 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 			}
 		}
 
+		isFirstTurn := !p.convoBuf.HasGuestSpoken(channelKey, guestID)
+		var history string
+		if isFirstTurn {
+			history = FormatHistoryN(rounds, expandedDisplayRounds, expandedTruncLen)
+		} else {
+			history = FormatHistory(rounds)
+		}
+
+		focusText := ""
+		if dt, ok := p.directedText[guestID]; ok && dt != "" {
+			focusText = dt
+		}
+
 		prompt := buildGuestPrompt(persona, p.projectSummary, sharedCtxText, history, p.msg.Text, GuestPromptOpts{
 			Mode:         p.mode,
 			ChannelKind:  p.channelKind,
 			PlanContent:  p.planContent,
 			StoryContext: storyCtx,
+			FocusText:    focusText,
 		})
 
 		var allowedTools []string
@@ -580,4 +604,60 @@ func extractJSON(s string) string {
 		}
 	}
 	return s[start:]
+}
+
+type SuggestResult struct {
+	GuestID string `json:"guest_id"`
+	Reason  string `json:"reason"`
+}
+
+func suggestGuestToInvite(
+	ctx context.Context,
+	runner agent.AgentRunner,
+	candidates []GuestSummary,
+	history string,
+	logger *slog.Logger,
+) *SuggestResult {
+	var sb strings.Builder
+	sb.WriteString("You are deciding whether to suggest bringing ONE new specialist into a conversation. ")
+	sb.WriteString("The specialists below are NOT currently in the chat. Only suggest one if:\n\n")
+	sb.WriteString("1. A response in the conversation explicitly asks for or names a specialty that matches a candidate, OR\n")
+	sb.WriteString("2. The conversation has reached a clear blocker or decision point that cannot progress without this specialist's core expertise.\n\n")
+	sb.WriteString("Do NOT suggest if:\n")
+	sb.WriteString("- The topic is merely adjacent to a candidate's expertise\n")
+	sb.WriteString("- The user could easily bring them in themselves\n")
+	sb.WriteString("- It would be \"nice to have\" rather than clearly necessary\n")
+	sb.WriteString("- A similar specialty is already represented in the active chat\n\n")
+	sb.WriteString("The test: would a human collaborator naturally say \"should we pull in X for this?\" without feeling annoying? If not, return empty.\n\n")
+	sb.WriteString("## Available Specialists (not in chat)\n\n")
+	for _, c := range candidates {
+		fmt.Fprintf(&sb, "- %s (%s): %s\n", c.ID, c.Name, c.Description)
+	}
+	if history != "" {
+		sb.WriteString("\n")
+		sb.WriteString(history)
+	}
+	sb.WriteString("\nRespond with JSON only: {\"guest_id\": \"id\", \"reason\": \"one sentence\"} or {\"guest_id\": \"\", \"reason\": \"\"} if no suggestion.\n")
+
+	result, err := runner.Run(ctx, types.RunOpts{
+		Prompt:         sb.String(),
+		Model:          "claude-haiku-4-5",
+		MaxTurns:       1,
+		PermissionMode: "bypassPermissions",
+	})
+	if err != nil {
+		logger.Debug("suggest call failed", "error", err)
+		return nil
+	}
+
+	var suggest SuggestResult
+	text := extractJSON(result.Output)
+	if err := json.Unmarshal([]byte(text), &suggest); err != nil {
+		logger.Debug("suggest call returned invalid JSON", "output", result.Output[:min(len(result.Output), 200)])
+		return nil
+	}
+	if suggest.GuestID == "" {
+		return nil
+	}
+	return &suggest
 }

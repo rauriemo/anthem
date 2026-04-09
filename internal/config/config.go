@@ -115,13 +115,14 @@ type SystemConfig struct {
 }
 
 type OrchestratorConfig struct {
-	Enabled          bool `yaml:"enabled"`
-	MaxContextTokens int  `yaml:"max_context_tokens"`
-	StallTimeoutMS   int  `yaml:"stall_timeout_ms"`
-	MaxTurns         int  `yaml:"max_turns"`
-	PlanMaxTurns     int  `yaml:"plan_max_turns"`
-	ExplorerMaxTurns int  `yaml:"explorer_max_turns"`
-	MaxExplorers     int  `yaml:"max_explorers"`
+	Enabled                bool `yaml:"enabled"`
+	MaxContextTokens       int  `yaml:"max_context_tokens"`
+	StallTimeoutMS         int  `yaml:"stall_timeout_ms"`
+	MaxTurns               int  `yaml:"max_turns"`
+	PlanMaxTurns           int  `yaml:"plan_max_turns"`
+	ExplorerMaxTurns       int  `yaml:"explorer_max_turns"`
+	MaxExplorers           int  `yaml:"max_explorers"`
+	EnableGuestSuggestions bool `yaml:"enable_guest_suggestions"`
 }
 
 type ServerConfig struct {

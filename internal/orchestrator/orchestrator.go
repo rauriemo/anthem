@@ -1661,19 +1661,16 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 			}
 		}
 
-		var selectedGuests []string
-		if len(msg.ActiveGuests) <= RoutingThreshold {
-			selectedGuests = msg.ActiveGuests
-			// Below threshold: guests are the primary responders, orchestrator stays quiet
-			includeOrchestrator = false
-		} else {
-			summaries := o.buildGuestSummaries(msg.ActiveGuests)
-			result := routeToGuests(ctx, o.runner, msg.Text, summaries, history, sharedCtxText, o.logger)
-			selectedGuests = result.Guests
-			includeOrchestrator = result.IncludeOrchestrator
-			if result.ContextUpdate != "" {
-				o.sharedCtx.Update(channelKey, result.ContextUpdate)
-			}
+		summaries := o.buildGuestSummaries(msg.ActiveGuests)
+		result := routeToGuests(ctx, o.runner, msg.Text, summaries, history, sharedCtxText, o.logger)
+		selectedGuests := result.Guests
+		directedText := result.DirectedText
+		includeOrchestrator = result.IncludeOrchestrator
+		if result.ContextUpdate != "" {
+			o.sharedCtx.Update(channelKey, result.ContextUpdate)
+		}
+		if len(selectedGuests) == 0 && !includeOrchestrator {
+			o.logger.Debug("router returned empty guests and no orchestrator", "user_msg", msg.Text[:min(len(msg.Text), 80)])
 		}
 
 		if len(selectedGuests) > 0 {
@@ -1687,26 +1684,27 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 			guestWg.Add(1)
 			go func() {
 				defer guestWg.Done()
-				dispatchSelectedGuests(guestDispatchParams{
-					ctx:            ctx,
-					selectedIDs:    selectedGuests,
-					msg:            msg,
-					guestsDir:      guestsDir,
-					runner:         o.runner,
-					sharedCtx:      o.sharedCtx,
-					convoBuf:       o.convoBuf,
-					channelMgr:     o.channelMgr,
-					projectSummary: projectSummary,
-					mode:           mode,
-					channelKind:    msg.ChannelKind,
-					planContent:    planContent,
-					planStore:      o.planStore,
-					planSlug:       o.projectSlug(),
-					guestIndex:     o.guestIndex,
-					storyStore:     o.storyStore,
-					proposalStore:  o.proposalStore,
-					logger:         o.logger,
-				})
+			dispatchSelectedGuests(guestDispatchParams{
+				ctx:            ctx,
+				selectedIDs:    selectedGuests,
+				msg:            msg,
+				guestsDir:      guestsDir,
+				runner:         o.runner,
+				sharedCtx:      o.sharedCtx,
+				convoBuf:       o.convoBuf,
+				channelMgr:     o.channelMgr,
+				projectSummary: projectSummary,
+				mode:           mode,
+				channelKind:    msg.ChannelKind,
+				planContent:    planContent,
+				planStore:      o.planStore,
+				planSlug:       o.projectSlug(),
+				guestIndex:     o.guestIndex,
+				storyStore:     o.storyStore,
+				proposalStore:  o.proposalStore,
+				directedText:   directedText,
+				logger:         o.logger,
+			})
 			}()
 		}
 	}
@@ -2209,11 +2207,41 @@ func (o *Orchestrator) finalizeGuestRound(ctx context.Context, msg channel.Incom
 		guestWg.Wait()
 	}
 
-	if len(msg.ActiveGuests) > 0 && len(msg.ActiveGuests) <= RoutingThreshold {
+	if len(msg.ActiveGuests) > 0 {
 		channelKey := msg.ChannelKind
 		history := FormatHistory(o.convoBuf.History(channelKey))
 		currentCtx := o.sharedCtx.Get(channelKey)
 		go updateContextAfterRound(ctx, o.runner, history, currentCtx, o.sharedCtx, channelKey, o.logger)
+
+		if o.cfg.Orchestrator.EnableGuestSuggestions {
+			go o.suggestFollowUp(ctx, msg, history)
+		}
+	}
+}
+
+func (o *Orchestrator) suggestFollowUp(ctx context.Context, msg channel.IncomingMessage, history string) {
+	if o.guestIndex == nil || o.channelMgr == nil {
+		return
+	}
+	activeSet := make(map[string]bool, len(msg.ActiveGuests))
+	for _, id := range msg.ActiveGuests {
+		activeSet[id] = true
+	}
+	var candidates []GuestSummary
+	for id, agent := range o.guestIndex.Agents {
+		if !activeSet[id] {
+			candidates = append(candidates, GuestSummary{ID: id, Name: agent.Name, Description: agent.Description})
+		}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	result := suggestGuestToInvite(ctx, o.runner, candidates, history, o.logger)
+	if result != nil && result.GuestID != "" {
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			SuggestGuest: &channel.SuggestGuest{ID: result.GuestID, Reason: result.Reason},
+			ThreadID:     msg.ThreadID,
+		})
 	}
 }
 

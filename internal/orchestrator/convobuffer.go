@@ -7,8 +7,11 @@ import (
 )
 
 const (
-	maxHistoryRounds = 3
-	responseTruncLen = 200
+	maxHistoryRounds      = 10
+	defaultDisplayRounds  = 3
+	defaultTruncLen       = 200
+	expandedDisplayRounds = 10
+	expandedTruncLen      = 800
 )
 
 type ConvoResponse struct {
@@ -86,17 +89,27 @@ func (cb *ConvoBuffer) History(key string) []*ConvoRound {
 	return result
 }
 
-// FormatHistory renders rounds as a readable prompt section with truncated responses.
+// FormatHistory renders rounds as a readable prompt section with default truncation (3 rounds, 200 chars).
 func FormatHistory(rounds []*ConvoRound) string {
+	return FormatHistoryN(rounds, defaultDisplayRounds, defaultTruncLen)
+}
+
+// FormatHistoryN renders up to maxRounds rounds with responses truncated to truncLen chars.
+func FormatHistoryN(rounds []*ConvoRound, maxRounds, truncLen int) string {
 	if len(rounds) == 0 {
 		return ""
+	}
+
+	display := rounds
+	if len(display) > maxRounds {
+		display = display[:maxRounds]
 	}
 
 	var sb strings.Builder
 	sb.WriteString("## Recent conversation (most recent first)\n\n")
 
-	for i, round := range rounds {
-		fmt.Fprintf(&sb, "### Round %d", len(rounds)-i)
+	for i, round := range display {
+		fmt.Fprintf(&sb, "### Round %d", len(display)-i)
 		if i == 0 {
 			sb.WriteString(" (latest)")
 		}
@@ -104,8 +117,8 @@ func FormatHistory(rounds []*ConvoRound) string {
 		fmt.Fprintf(&sb, "User: %q\n", round.UserMessage)
 		for _, resp := range round.Responses {
 			text := resp.Text
-			if len(text) > responseTruncLen {
-				text = text[:responseTruncLen] + "..."
+			if len(text) > truncLen {
+				text = text[:truncLen] + "..."
 			}
 			fmt.Fprintf(&sb, "%s: %q\n", resp.Speaker, text)
 		}
@@ -113,4 +126,26 @@ func FormatHistory(rounds []*ConvoRound) string {
 	}
 
 	return sb.String()
+}
+
+// HasGuestSpoken returns true if the given guest has any recorded response in
+// the history or the current round for the channel key.
+func (cb *ConvoBuffer) HasGuestSpoken(key, guestID string) bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	for _, round := range cb.history[key] {
+		for _, resp := range round.Responses {
+			if resp.GuestID == guestID {
+				return true
+			}
+		}
+	}
+	if cur, ok := cb.current[key]; ok {
+		for _, resp := range cur.Responses {
+			if resp.GuestID == guestID {
+				return true
+			}
+		}
+	}
+	return false
 }
