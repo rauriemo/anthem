@@ -10,6 +10,7 @@ claude_stderr.txt
 test.txt
 *.out
 cov_*
+coverage
 coverage/
 coverage_*
 harness
