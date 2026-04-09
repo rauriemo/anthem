@@ -3,12 +3,14 @@ package orchestrator
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/rauriemo/anthem/internal/agent"
 	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/config"
+	"github.com/rauriemo/anthem/internal/guests"
 	"github.com/rauriemo/anthem/internal/tracker"
 	"github.com/rauriemo/anthem/internal/types"
 	"github.com/rauriemo/anthem/internal/workspace"
@@ -403,5 +405,126 @@ func TestHandleUserMessage_StreamsDeltasAndDone(t *testing.T) {
 	}
 	if streamDoneCount != 1 {
 		t.Errorf("expected 1 stream done, got %d", streamDoneCount)
+	}
+}
+
+func TestHandleUserMessage_SkipsOrchestratorWhenGuestsActive(t *testing.T) {
+	var orchCalls int64
+
+	orchRunner := agent.NewMockRunner()
+	orchRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		atomic.AddInt64(&orchCalls, 1)
+		return &types.RunResult{
+			SessionID: "orch-s1",
+			Output:    `{"reasoning": "idle", "actions": []}`,
+			TokensIn:  10, TokensOut: 5,
+		}, nil
+	}
+
+	guestRunner := agent.NewMockRunner()
+	guestRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{
+			SessionID: "guest-s1",
+			Output:    "Guest response",
+			TokensIn:  10, TokensOut: 5,
+		}, nil
+	}
+
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, 0, 0, testLogger())
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "{{.issue.title}}",
+		Tracker:        tracker.NewMockTracker(nil),
+		Runner:         guestRunner,
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		OrchAgent:      orchAgent,
+		ChannelManager: mgr,
+	})
+
+	orch.guestIndex = &guests.GuestIndex{
+		Agents: map[string]guests.GuestAgent{
+			"writer-1": {ID: "writer-1", Name: "Story Writer", Description: "Writes stories"},
+		},
+	}
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind:  "test",
+		SenderID:     "user-1",
+		ThreadID:     "thread-guest",
+		Text:         "Write a chapter",
+		ActiveGuests: []string{"writer-1"},
+		Timestamp:    time.Now(),
+	})
+
+	if atomic.LoadInt64(&orchCalls) != 0 {
+		t.Errorf("expected orchestrator runner to NOT be called, but got %d calls", orchCalls)
+	}
+}
+
+func TestHandleUserMessage_IncludesOrchestratorWithSystemTag(t *testing.T) {
+	var leanCalls int64
+
+	generalRunner := agent.NewMockRunner()
+	generalRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		atomic.AddInt64(&leanCalls, 1)
+		if opts.OnStream != nil {
+			opts.OnStream("Status update")
+		}
+		return &types.RunResult{
+			SessionID: "lean-s1",
+			Output:    "Status: all good",
+			TokensIn:  10, TokensOut: 5,
+		}, nil
+	}
+
+	orchRunner := agent.NewMockRunner()
+
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, 0, 0, testLogger())
+
+	cfg := config.DefaultConfig()
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "{{.issue.title}}",
+		Runner:         generalRunner,
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		OrchAgent:      orchAgent,
+		ChannelManager: mgr,
+	})
+
+	orch.guestIndex = &guests.GuestIndex{
+		Agents: map[string]guests.GuestAgent{
+			"writer-1": {ID: "writer-1", Name: "Story Writer", Description: "Writes stories"},
+		},
+	}
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind:  "test",
+		SenderID:     "user-1",
+		ThreadID:     "thread-systag",
+		Text:         "[system:status] Show project status",
+		ActiveGuests: []string{"writer-1"},
+		Timestamp:    time.Now(),
+	})
+
+	if atomic.LoadInt64(&leanCalls) == 0 {
+		t.Error("expected lean handler to run for system tag even with active guests, but it was not called")
 	}
 }

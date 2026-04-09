@@ -1643,6 +1643,7 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 
 	// --- Guest dispatch for ALL modes (runs in parallel with mode handler) ---
 	var guestWg *sync.WaitGroup
+	var includeOrchestrator bool
 	if len(msg.ActiveGuests) > 0 && o.guestIndex != nil {
 		channelKey := msg.ChannelKind
 		o.convoBuf.RecordUserMessage(channelKey, msg.Text)
@@ -1661,10 +1662,13 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		var selectedGuests []string
 		if len(msg.ActiveGuests) <= RoutingThreshold {
 			selectedGuests = msg.ActiveGuests
+			// Below threshold: guests are the primary responders, orchestrator stays quiet
+			includeOrchestrator = false
 		} else {
 			summaries := o.buildGuestSummaries(msg.ActiveGuests)
 			result := routeToGuests(ctx, o.runner, msg.Text, summaries, history, sharedCtxText, o.logger)
 			selectedGuests = result.Guests
+			includeOrchestrator = result.IncludeOrchestrator
 			if result.ContextUpdate != "" {
 				o.sharedCtx.Update(channelKey, result.ContextUpdate)
 			}
@@ -1701,6 +1705,20 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 					logger:         o.logger,
 				})
 			}()
+		}
+	}
+
+	// When guests are dispatched and routing says orchestrator is not needed,
+	// let guests be the primary responders — skip orchestrator LLM response.
+	// System tags always require the orchestrator regardless of routing.
+	if guestWg != nil && !includeOrchestrator {
+		hasSystemTag := strings.Contains(msg.Text, "[system:build]") ||
+			strings.Contains(msg.Text, "[system:plan]") ||
+			strings.Contains(msg.Text, "[system:fast]") ||
+			strings.Contains(msg.Text, "[system:status]")
+		if !hasSystemTag {
+			o.finalizeGuestRound(ctx, msg, guestWg)
+			return
 		}
 	}
 
@@ -2182,17 +2200,7 @@ func (o *Orchestrator) finalizeGuestRound(ctx context.Context, msg channel.Incom
 
 // guestsDir returns the path to the project's agents/ directory.
 func (o *Orchestrator) guestsDir() string {
-	root := o.cfg.Workspace.Root
-	if root == "" || root == "." {
-		if cwd, err := os.Getwd(); err == nil {
-			root = cwd
-		}
-	} else if !filepath.IsAbs(root) {
-		if cwd, err := os.Getwd(); err == nil {
-			root = filepath.Join(cwd, root)
-		}
-	}
-	return filepath.Join(root, "agents")
+	return filepath.Join(o.projectRoot(), "agents")
 }
 
 var modelTagRe = regexp.MustCompile(`\[model:([^\]]+)\]`)

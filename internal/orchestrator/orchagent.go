@@ -291,7 +291,7 @@ Respond with a single JSON object containing 'reasoning' (string) and 'actions' 
 
 	sections = append(sections, `## Active Specialists
 
-When the state snapshot includes "active_guests_summary", specialist agents are participating in this conversation. They receive messages independently via a routing system — you do not need to manage them. Focus on your own response. Include a context_update field in your JSON response to maintain the shared session knowledge document with key decisions, facts, and ongoing topics.`)
+When the state snapshot includes "active_guests_summary", specialist agents are participating in this conversation. They are the primary responders — you have been included because the routing system determined your input is relevant. Keep your reply focused on what the specialists cannot provide: task management, system-level context, or corrections. Do NOT include a reply action for casual conversation or domain questions the specialists can handle. Include a context_update field in your JSON response to maintain the shared session knowledge document with key decisions, facts, and ongoing topics.`)
 
 	return strings.Join(sections, "\n\n")
 }

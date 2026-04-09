@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -185,6 +186,50 @@ func TestFallbackAllGuests_Empty(t *testing.T) {
 	result := fallbackAllGuests(nil)
 	if len(result.Guests) != 0 {
 		t.Errorf("expected 0 guests, got %d", len(result.Guests))
+	}
+}
+
+func TestFallbackAllGuests_OrchestratorExcluded(t *testing.T) {
+	summaries := []GuestSummary{{ID: "a", Name: "A"}}
+	result := fallbackAllGuests(summaries)
+	if result.IncludeOrchestrator {
+		t.Error("fallback should default IncludeOrchestrator to false")
+	}
+}
+
+func TestRoutingResult_ParsesIncludeOrchestrator(t *testing.T) {
+	tests := []struct {
+		name     string
+		json     string
+		wantOrch bool
+	}{
+		{
+			name:     "orchestrator included",
+			json:     `{"guests": ["a"], "include_orchestrator": true, "context_update": ""}`,
+			wantOrch: true,
+		},
+		{
+			name:     "orchestrator excluded",
+			json:     `{"guests": ["a"], "include_orchestrator": false, "context_update": ""}`,
+			wantOrch: false,
+		},
+		{
+			name:     "field omitted defaults to false",
+			json:     `{"guests": ["a"], "context_update": ""}`,
+			wantOrch: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var result RoutingResult
+			if err := json.Unmarshal([]byte(tt.json), &result); err != nil {
+				t.Fatalf("failed to parse JSON: %v", err)
+			}
+			if result.IncludeOrchestrator != tt.wantOrch {
+				t.Errorf("IncludeOrchestrator = %v, want %v", result.IncludeOrchestrator, tt.wantOrch)
+			}
+		})
 	}
 }
 

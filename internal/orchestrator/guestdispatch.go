@@ -28,8 +28,9 @@ type GuestSummary struct {
 }
 
 type RoutingResult struct {
-	Guests        []string `json:"guests"`
-	ContextUpdate string   `json:"context_update"`
+	Guests              []string `json:"guests"`
+	IncludeOrchestrator bool     `json:"include_orchestrator"`
+	ContextUpdate       string   `json:"context_update"`
 }
 
 type GuestPromptOpts struct {
@@ -66,8 +67,11 @@ func routeToGuests(
 	}
 
 	fmt.Fprintf(&sb, "\n## User Message\n%s\n", userMsg)
-	sb.WriteString("\nRespond with JSON only: {\"guests\": [\"id1\", ...], \"context_update\": \"updated session summary\"}\n")
+	sb.WriteString("\nRespond with JSON only: {\"guests\": [\"id1\", ...], \"include_orchestrator\": false, \"context_update\": \"updated session summary\"}\n")
 	sb.WriteString("Select guests whose expertise is relevant. Return empty guests array if none are relevant.\n")
+	sb.WriteString("Also decide whether the host orchestrator should respond alongside the specialists. ")
+	sb.WriteString("Set include_orchestrator to true ONLY if the message requires task management, system-level actions, or information the specialists cannot provide. ")
+	sb.WriteString("For general conversation, creative work, and domain questions, set it to false — the specialists are the primary responders.\n")
 	sb.WriteString("The context_update should summarize key decisions and facts from this conversation so far.\n")
 
 	result, err := runner.Run(ctx, types.RunOpts{
@@ -259,6 +263,13 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 		persona, err := guests.LoadPersona(p.guestsDir, guestID)
 		if err != nil {
 			p.logger.Warn("failed to load guest persona", "guest", guestID, "error", err)
+			if p.channelMgr != nil {
+				_ = p.channelMgr.Broadcast(p.ctx, channel.OutgoingMessage{
+					Text:     fmt.Sprintf("[%s failed to load]", agent.Name),
+					GuestID:  guestID,
+					ThreadID: p.msg.ThreadID,
+				})
+			}
 			continue
 		}
 
@@ -335,14 +346,21 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 				})
 			}
 
+			if err != nil {
+				p.logger.Warn("guest invocation failed", "guest", guestID, "error", err)
+				if p.channelMgr != nil {
+					_ = p.channelMgr.Broadcast(p.ctx, channel.OutgoingMessage{
+						Text:     fmt.Sprintf("[%s failed to respond]", agent.Name),
+						GuestID:  guestID,
+						ThreadID: p.msg.ThreadID,
+					})
+				}
+				return
+			}
+
 			responseText := result.Output
 			if responseText == "" {
 				responseText = fullText.String()
-			}
-
-			if err != nil {
-				p.logger.Warn("guest invocation failed", "guest", guestID, "error", err)
-				return
 			}
 
 			// Handle plan edits
@@ -389,7 +407,10 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 				}
 			}
 
-			if p.channelMgr != nil && chatText != "" {
+			// Only send a final text message when post-processing changed
+			// the response (plan edits, story edits). The raw response was
+			// already delivered via stream deltas.
+			if p.channelMgr != nil && chatText != "" && chatText != responseText {
 				_ = p.channelMgr.Broadcast(p.ctx, channel.OutgoingMessage{
 					Text:     chatText,
 					GuestID:  guestID,
