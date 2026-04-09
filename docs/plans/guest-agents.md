@@ -219,25 +219,49 @@ Add `testdata/agents/` with 2-3 sample agent markdown files for testing:
 - Include `guest_id` and `suggest_guest` fields in outgoing `res` frames
 - These fields are optional -- omit when null/empty to maintain backward compatibility with existing Prism versions
 
-## Phase 4 -- Independent Invocation (v2)
+## Phase 3 -- Unified Guest Dispatch (Shipped)
 
-### Context compilation
+### Runtime architecture (`internal/orchestrator/`)
 
-New method on Orchestrator: `CompileGuestContext(slug string, task string, conversationHistory []Message) string`
-- Loads full persona body
-- Appends `extra_context` from frontmatter
-- Includes relevant conversation history summary
-- Includes CLAUDE.md content (project standards)
-- Returns a compiled context string suitable for both local and cloud dispatch
+Guest dispatch is unified across all modes (fast, plan, agent). Three new files:
 
-### Local backend
+**`convobuffer.go`** -- Per-channel 3-round conversation history ring buffer.
+- `ConvoRound` holds `UserMessage string` and `Responses []ConvoResponse` (speaker + truncated text).
+- `RecordUserMessage(channelID, text)` finalizes current round and pushes a new one. FIFO eviction at `maxHistoryRounds` (3).
+- `RecordResponse(channelID, speaker, text)` appends to the current round.
+- `FormatHistory(channelID)` renders rounds newest-first as `[Round N] User: ... / Speaker: ...` with 200-char truncation.
 
-New method: `InvokeGuestLocal(slug string, compiledContext string, model string) (string, error)`
-- Makes a direct Claude API call using the agent's `model` field
-- System prompt = persona body + extra_context
-- User message = compiled task + context
-- Streams response back via the Prism adapter
-- Cost tracked under the guest agent's ID
+**`sharedcontext.go`** -- Per-channel in-memory session knowledge document.
+- `Get(channelID) string` returns current context (empty string if none).
+- `Update(channelID, content)` overwrites the document.
+- Updated after every round: for >3 guests, the routing call returns context updates; for <=3, a post-round summarization call generates it. Agent mode additionally extracts `context_update` from `OrchestratorResponse`.
+
+**`guestdispatch.go`** -- Core routing, prompt building, and invocation logic.
+- `RoutingThreshold = 3`: groups at/below threshold skip routing (all guests invoked directly); larger groups go through `routeToGuests` using a cheap model call.
+- `routeToGuests(ctx, runner, guests, userMsg, history, sharedCtx, plan)` returns a `RoutingResult` with selected `Guests []GuestSummary` and `ContextUpdate string`. Falls back to broadcasting all guests on routing failure.
+- `buildGuestPrompt(opts GuestPromptOpts)` assembles: persona body + project context + shared context + conversation history + user message. Mode-specific suffixes: plan mode includes active plan markdown and instructions for `plan-edit` code blocks; agent mode includes project state summary.
+- `invokeGuestStreaming(ctx, runner, prompt, guestID, channelID, send)` runs `agent.AgentRunner.Run` with `OnStream` callback for real-time streaming via the Prism adapter.
+- `extractPlanEdit(response)` parses `plan-edit` fenced code blocks from guest responses. Returns the content for application via `planStore.Save`. Thread-safe behind `planEditMu sync.Mutex`.
+- `dispatchSelectedGuests(ctx, params)` manages concurrent guest invocations with a semaphore (max 3 concurrent), records responses in ConvoBuffer, applies plan edits, and handles errors per-guest.
+
+### Orchestrator integration (`orchestrator.go`)
+
+`HandleUserMessage` extended with:
+- `convoBuf *ConvoBuffer` and `sharedCtx *SharedContext` initialized in `New()`.
+- `detectMode(msg)` returns `"fast"`, `"plan"`, or `"agent"`.
+- **@-mention fast path**: `handleGuestMention` bypasses orchestrator entirely, invokes the named guest with full context via `invokeGuestStreaming`, records in ConvoBuffer, sends response.
+- **Unified dispatch**: When `active_guests` are set, `buildGuestSummaries` compiles the roster. For <=3 guests, all are selected directly. For >3, `routeToGuests` selects relevant guests. `dispatchSelectedGuests` runs in a goroutine alongside the normal orchestrator mode handler.
+- **StateSnapshot extensions**: `ActiveGuestsSummary`, `SharedContext`, `ConversationHistory` injected when guests are present. `buildSystemPrompt` gains "Active Specialists" awareness section and "Response Format" guidance for `context_update` JSON field.
+- **`finalizeGuestRound`**: Waits for guest goroutine, then triggers `updateContextAfterRound` for small groups (<=3).
+- `guestsDir()` resolves `{project-root}/agents/` path.
+
+### Wire protocol additions
+
+- `sendStream` in `internal/channel/prism/adapter.go` now includes `GuestID` in `frame` struct for both `StreamDelta` and `StreamDone` messages.
+- `OrchestratorResponse` extended with `ContextUpdate string` for SharedContext writes from agent mode.
+- `OrchestratorAgent.lastResp` stores the latest response; `LastResponse()` accessor used by `HandleUserMessage` to extract `ContextUpdate`.
+
+## Phase 4 -- Cloud Execution (Planned)
 
 ### Cloud backend preparation
 
@@ -337,6 +361,29 @@ All new code must have table-driven unit tests. Follow existing patterns: interf
 **Context budget** (Phase 2):
 - Roster summary stays within expected token budget as active guest count grows (test with 1, 2, 4 guests)
 - Full persona injection doesn't exceed reasonable prompt size limits
+
+**Guest dispatch tests** (`guestdispatch_test.go` -- Shipped):
+- `extractPlanEdit`: with plan-edit block, without block, nested blocks
+- `buildGuestPrompt`: all modes (fast/plan/agent), section inclusion/omission based on opts
+- `extractJSON`: valid JSON, no JSON, nested objects, unclosed braces
+- `fallbackAllGuests`: normal fallback, empty guest list
+- `RoutingThreshold`: verify constant value is 3
+
+**ConvoBuffer tests** (`convobuffer_test.go` -- Shipped):
+- `RecordUserMessage` + `RecordResponse` basic flow
+- FIFO eviction at 3 rounds (newest kept, oldest dropped)
+- `History` returns rounds most-recent-first
+- `FormatHistory` truncation at 200 chars, empty history
+- `MultipleChannels`: independent channel isolation
+
+**SharedContext tests** (`sharedcontext_test.go` -- Shipped):
+- `GetEmpty`: returns empty string for unknown channel
+- `UpdateAndGet`: round-trip write/read
+- `Overwrite`: second update replaces first
+- `MultipleChannels`: independent channel isolation
+
+**OrchestratorAgent tests** (`orchagent_test.go` -- Updated):
+- `parseActions` now returns 3 values: `([]Action, *OrchestratorResponse, error)`. All test call sites capture the `OrchestratorResponse` (or discard with `_`)
 
 **Config hot-reload integration**:
 - Adding a new `.md` file to `agents/` -- appears in next scan

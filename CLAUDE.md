@@ -164,11 +164,19 @@ These are the source of truth for what to build and how.
 
 Update this section as phases are completed.
 
-## Guest Agents (Planned)
+## Guest Agents (Shipped)
 
-Guest agents are lightweight persona definitions (markdown files with YAML frontmatter) in a project's `agents/` directory. Anthem scans this directory on boot, generates `.agents-index.json`, and advertises the roster to Prism. On @-mention, the orchestrator injects the guest's persona into its prompt context.
+Guest agents are lightweight persona definitions (markdown files with YAML frontmatter) in a project's `agents/` directory. Anthem scans this directory on boot, generates `.agents-index.json`, and advertises the roster to Prism via `guest_agents` on `auth_ok`.
 
-Full implementation spec: `docs/plans/guest-agents.md`
+Full spec: `docs/plans/guest-agents.md`
+
+### Orchestration runtime (`internal/orchestrator/`)
+
+- **ConvoBuffer** (`convobuffer.go`): Per-channel 3-round ring buffer. `RecordUserMessage` finalizes the current round and starts a new one; `RecordResponse` appends speaker-labeled responses. `FormatHistory` renders rounds as prompt sections with 200-char truncation. Fed into routing calls and guest prompts.
+- **SharedContext** (`sharedcontext.go`): Per-channel in-memory session knowledge document. Updated every round across all modes. For >3 guests the routing call returns the update; for <=3 a lightweight post-round summarization call writes it. Agent mode additionally extracts `context_update` from `OrchestratorResponse`.
+- **Guest dispatch** (`guestdispatch.go`): Unified dispatch for all modes (fast/plan/agent). `RoutingThreshold` (default 3) -- groups at or below threshold skip routing and invoke all guests directly; larger groups go through a cheap model routing call (`routeToGuests`). Fallback: if routing fails, broadcast to all. Guests stream via `runner.Run` with `OnStream` callbacks. `dispatchSelectedGuests` manages concurrency (semaphore of 3), plan edit serialization (`planEditMu`), and ConvoBuffer recording. `extractPlanEdit` parses `plan-edit` fenced code blocks from guest responses in plan mode. `buildGuestPrompt` assembles persona + project + session context + history + user message (with mode-specific suffixes).
+- **Wire protocol**: `active_guests` and `mention` on inbound `req` frames; `guest_id` on outbound `res` and `stream` frames (including `StreamDelta` and `StreamDone`). @-mention bypasses routing and orchestrator.
+- **StateSnapshot extensions**: `ActiveGuestsSummary`, `SharedContext`, `ConversationHistory` injected when guests are active. System prompt gains "Active Specialists" awareness section. `OrchestratorResponse.ContextUpdate` extracted and applied to SharedContext.
 
 Key Anthem responsibilities:
 - `internal/guests/` package: scan `agents/`, parse frontmatter, generate index, load persona on demand
