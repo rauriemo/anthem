@@ -318,6 +318,20 @@ func TestBuildGuestPrompt_NoPrismDisplayForOtherChannels(t *testing.T) {
 	}
 }
 
+func TestBuildGuestPrompt_CharacterCommitment(t *testing.T) {
+	prompt := buildGuestPrompt("You are a game designer.", "", "", "", "Hello", GuestPromptOpts{})
+
+	if !strings.Contains(prompt, "## Character Commitment") {
+		t.Error("prompt should include Character Commitment section")
+	}
+	if !strings.Contains(prompt, "Never break character") {
+		t.Error("prompt should instruct never to break character")
+	}
+	if !strings.Contains(prompt, "Never say you are an AI") {
+		t.Error("prompt should instruct not to disclaim AI identity")
+	}
+}
+
 func TestBuildGuestPrompt_NoPrismDisplayForCLI(t *testing.T) {
 	prompt := buildGuestPrompt("You are a writer.", "Project", "", "", "Show me the docs", GuestPromptOpts{
 		Mode:        "agent",
