@@ -338,6 +338,7 @@ All new code must have table-driven unit tests. Follow existing patterns: interf
 - `req` with `active_guests` and `mention` fields -- adapter parses correctly
 - `req` without `active_guests`/`mention` (old client) -- fields default to nil/empty, no error
 - `res` with `guest_id` -- round-trip through adapter
+- `res` with `display_ids` -- round-trip through adapter (artifact links for chat bubbles)
 - `res` with `suggest_guest` object -- round-trip through adapter
 - `res` without guest fields -- unchanged behavior (backward compat)
 
