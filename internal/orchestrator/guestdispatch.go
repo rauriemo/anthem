@@ -583,12 +583,29 @@ func newStoryDisplayID() string {
 }
 
 func resolveGuestTools(agent guests.GuestAgent) []string {
+	if len(agent.AllowedTools) > 0 {
+		return agent.AllowedTools
+	}
 	fp := agent.RequirementsFingerprint
 	emptyFP := "sha256:" + fmt.Sprintf("%x", sha256Sum(nil))
 	if fp == emptyFP || fp == "" {
 		return nil
 	}
 	return []string{"WebSearch", "WebFetch"}
+}
+
+func isToolAllowed(toolName string, allowedTools []string) bool {
+	for _, pattern := range allowedTools {
+		if strings.HasSuffix(pattern, "*") {
+			prefix := pattern[:len(pattern)-1]
+			if strings.HasPrefix(toolName, prefix) {
+				return true
+			}
+		} else if pattern == toolName {
+			return true
+		}
+	}
+	return false
 }
 
 func sha256Sum(data []byte) [32]byte {

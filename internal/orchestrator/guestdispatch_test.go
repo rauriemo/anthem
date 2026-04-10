@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rauriemo/anthem/internal/guests"
 	"github.com/rauriemo/anthem/internal/types"
 )
 
@@ -464,6 +465,128 @@ func TestFallbackAllGuests_DirectedTextNil(t *testing.T) {
 	result := fallbackAllGuests([]GuestSummary{{ID: "a", Name: "A"}})
 	if result.DirectedText != nil {
 		t.Errorf("fallback should have nil DirectedText, got %v", result.DirectedText)
+	}
+}
+
+// --- resolveGuestTools tests ---
+
+func TestResolveGuestTools(t *testing.T) {
+	emptyFP := "sha256:" + fmt.Sprintf("%x", sha256Sum(nil))
+
+	tests := []struct {
+		name  string
+		agent guests.GuestAgent
+		want  []string
+	}{
+		{
+			name:  "AllowedTools takes precedence",
+			agent: guests.GuestAgent{AllowedTools: []string{"mcp__unity__*", "WebSearch"}, RequirementsFingerprint: "sha256:abc"},
+			want:  []string{"mcp__unity__*", "WebSearch"},
+		},
+		{
+			name:  "falls back to fingerprint check with requirements",
+			agent: guests.GuestAgent{RequirementsFingerprint: "sha256:notempty"},
+			want:  []string{"WebSearch", "WebFetch"},
+		},
+		{
+			name:  "empty fingerprint returns nil",
+			agent: guests.GuestAgent{RequirementsFingerprint: emptyFP},
+			want:  nil,
+		},
+		{
+			name:  "no fingerprint returns nil",
+			agent: guests.GuestAgent{},
+			want:  nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveGuestTools(tt.agent)
+			if len(got) != len(tt.want) {
+				t.Fatalf("resolveGuestTools() = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("resolveGuestTools()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// --- isToolAllowed tests ---
+
+func TestIsToolAllowed(t *testing.T) {
+	tests := []struct {
+		name         string
+		toolName     string
+		allowedTools []string
+		want         bool
+	}{
+		{
+			name:         "exact match",
+			toolName:     "WebSearch",
+			allowedTools: []string{"WebSearch", "WebFetch"},
+			want:         true,
+		},
+		{
+			name:         "exact no match",
+			toolName:     "Bash",
+			allowedTools: []string{"WebSearch", "WebFetch"},
+			want:         false,
+		},
+		{
+			name:         "wildcard match mcp",
+			toolName:     "mcp__mcp-unity__CreateObject",
+			allowedTools: []string{"mcp__mcp-unity__*"},
+			want:         true,
+		},
+		{
+			name:         "wildcard match http",
+			toolName:     "http__image_gen__generate",
+			allowedTools: []string{"http__image_gen__*"},
+			want:         true,
+		},
+		{
+			name:         "wildcard no match different prefix",
+			toolName:     "mcp__other__Foo",
+			allowedTools: []string{"mcp__mcp-unity__*"},
+			want:         false,
+		},
+		{
+			name:         "empty allowedTools denies all",
+			toolName:     "WebSearch",
+			allowedTools: []string{},
+			want:         false,
+		},
+		{
+			name:         "nil allowedTools denies all",
+			toolName:     "WebSearch",
+			allowedTools: nil,
+			want:         false,
+		},
+		{
+			name:         "mixed exact and wildcard",
+			toolName:     "WebSearch",
+			allowedTools: []string{"mcp__unity__*", "WebSearch"},
+			want:         true,
+		},
+		{
+			name:         "wildcard star alone matches everything",
+			toolName:     "anything",
+			allowedTools: []string{"*"},
+			want:         true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isToolAllowed(tt.toolName, tt.allowedTools)
+			if got != tt.want {
+				t.Errorf("isToolAllowed(%q, %v) = %v, want %v", tt.toolName, tt.allowedTools, got, tt.want)
+			}
+		})
 	}
 }
 
