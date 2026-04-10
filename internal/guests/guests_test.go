@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -137,8 +138,8 @@ func TestScanDirectory(t *testing.T) {
 			setup: func(t *testing.T) string {
 				return fixtureDir(t)
 			},
-			wantCount: 3, // game-designer, code-reviewer, no-body (incomplete + malformed skipped, txt ignored)
-			wantSlugs: []string{"game-designer", "code-reviewer", "no-body"},
+			wantCount: 4, // game-designer, code-reviewer, no-body, tooled-agent (incomplete + malformed + bad-auth-scheme skipped)
+			wantSlugs: []string{"game-designer", "code-reviewer", "no-body", "tooled-agent"},
 		},
 		{
 			name: "empty directory",
@@ -566,6 +567,132 @@ func TestScanDirectorySingleAgent(t *testing.T) {
 	}
 	if agent.Source != "local" {
 		t.Errorf("Source = %q, want %q", agent.Source, "local")
+	}
+}
+
+func TestParseFrontmatter_ToolPolicyFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+		errMsg  string
+		check   func(t *testing.T, agent GuestAgent)
+	}{
+		{
+			name:  "parses allowed_tools, mcp_servers, http_tools",
+			input: readFixture(t, "tooled-agent.md"),
+			check: func(t *testing.T, agent GuestAgent) {
+				if len(agent.AllowedTools) != 3 {
+					t.Fatalf("AllowedTools count = %d, want 3", len(agent.AllowedTools))
+				}
+				if agent.AllowedTools[0] != "mcp__mcp-unity__*" {
+					t.Errorf("AllowedTools[0] = %q", agent.AllowedTools[0])
+				}
+				if agent.AllowedTools[2] != "WebSearch" {
+					t.Errorf("AllowedTools[2] = %q", agent.AllowedTools[2])
+				}
+				if len(agent.MCPServers) != 1 {
+					t.Fatalf("MCPServers count = %d, want 1", len(agent.MCPServers))
+				}
+				srv := agent.MCPServers["mcp-unity"]
+				if srv.Command != "npx" {
+					t.Errorf("MCPServers[mcp-unity].Command = %q", srv.Command)
+				}
+				if len(srv.Args) != 2 || srv.Args[0] != "-y" {
+					t.Errorf("MCPServers[mcp-unity].Args = %v", srv.Args)
+				}
+				if srv.Env["UNITY_PORT"] != "8080" {
+					t.Errorf("MCPServers[mcp-unity].Env = %v", srv.Env)
+				}
+				if len(agent.HTTPTools) != 1 {
+					t.Fatalf("HTTPTools count = %d, want 1", len(agent.HTTPTools))
+				}
+				ht := agent.HTTPTools["image_gen"]
+				if ht.URL != "https://api.example.com/generate" {
+					t.Errorf("HTTPTools[image_gen].URL = %q", ht.URL)
+				}
+				if ht.Method != "POST" {
+					t.Errorf("HTTPTools[image_gen].Method = %q", ht.Method)
+				}
+				if ht.AuthTokenEnv != "IMAGE_API_KEY" {
+					t.Errorf("HTTPTools[image_gen].AuthTokenEnv = %q", ht.AuthTokenEnv)
+				}
+				if ht.AuthScheme != "bearer" {
+					t.Errorf("HTTPTools[image_gen].AuthScheme = %q", ht.AuthScheme)
+				}
+				if ht.TimeoutMS != 30000 {
+					t.Errorf("HTTPTools[image_gen].TimeoutMS = %d", ht.TimeoutMS)
+				}
+				if ht.ResponseArtifact == nil {
+					t.Fatal("HTTPTools[image_gen].ResponseArtifact is nil")
+				}
+				if ht.ResponseArtifact.Type != "image/png" {
+					t.Errorf("ResponseArtifact.Type = %q", ht.ResponseArtifact.Type)
+				}
+			},
+		},
+		{
+			name:    "rejects invalid auth_scheme",
+			input:   readFixture(t, "bad-auth-scheme.md"),
+			wantErr: true,
+			errMsg:  "auth_scheme",
+		},
+		{
+			name:  "empty auth_scheme is valid",
+			input: "---\nname: Agent\ndescription: test\nhttp_tools:\n  t:\n    url: http://x\n    method: GET\n---\n",
+			check: func(t *testing.T, agent GuestAgent) {
+				if agent.HTTPTools["t"].AuthScheme != "" {
+					t.Errorf("expected empty auth_scheme, got %q", agent.HTTPTools["t"].AuthScheme)
+				}
+			},
+		},
+		{
+			name:  "no tool fields is valid",
+			input: "---\nname: Plain\ndescription: no tools\n---\n",
+			check: func(t *testing.T, agent GuestAgent) {
+				if agent.AllowedTools != nil {
+					t.Errorf("expected nil AllowedTools, got %v", agent.AllowedTools)
+				}
+				if agent.MCPServers != nil {
+					t.Errorf("expected nil MCPServers, got %v", agent.MCPServers)
+				}
+				if agent.HTTPTools != nil {
+					t.Errorf("expected nil HTTPTools, got %v", agent.HTTPTools)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent, err := ParseFrontmatter([]byte(tt.input))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tt.errMsg != "" && !strings.Contains(err.Error(), tt.errMsg) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.errMsg)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.check != nil {
+				tt.check(t, agent)
+			}
+		})
+	}
+}
+
+func TestScanDirectory_SkipsInvalidAuthScheme(t *testing.T) {
+	dir := fixtureDir(t)
+	index, err := ScanDirectory(dir, nil)
+	if err != nil {
+		t.Fatalf("ScanDirectory: %v", err)
+	}
+	if _, ok := index.Agents["bad-auth-scheme"]; ok {
+		t.Error("bad-auth-scheme agent should be skipped due to invalid auth_scheme")
 	}
 }
 

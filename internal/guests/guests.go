@@ -15,19 +15,48 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// MCPServerRef is a local placeholder matching the shape of
+// mcpconfig.MCPServerRef from github.com/rauriemo/conduit/pkg/mcpconfig.
+// It will be replaced by the Conduit import in Phase 1b.
+type MCPServerRef struct {
+	Command string            `yaml:"command" json:"command"`
+	Args    []string          `yaml:"args,omitempty" json:"args,omitempty"`
+	Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	URL     string            `yaml:"url,omitempty" json:"url,omitempty"`
+}
+
+type ArtifactTemplate struct {
+	Type   string `yaml:"type" json:"type"`
+	SaveTo string `yaml:"save_to" json:"save_to"`
+}
+
+type HTTPToolConfig struct {
+	URL              string            `yaml:"url" json:"url"`
+	Method           string            `yaml:"method" json:"method"`
+	AuthTokenEnv     string            `yaml:"auth_token_env,omitempty" json:"auth_token_env,omitempty"`
+	AuthScheme       string            `yaml:"auth_scheme,omitempty" json:"auth_scheme,omitempty"`
+	RequestTemplate  map[string]any    `yaml:"request_template,omitempty" json:"request_template,omitempty"`
+	ResponseArtifact *ArtifactTemplate `yaml:"response_artifact,omitempty" json:"response_artifact,omitempty"`
+	TimeoutMS        int               `yaml:"timeout_ms,omitempty" json:"timeout_ms,omitempty"`
+	Description      string            `yaml:"description,omitempty" json:"description,omitempty"`
+}
+
 type GuestAgent struct {
-	ID                      string   `json:"id"`
-	Name                    string   `json:"name"`
-	Description             string   `json:"description"`
-	Role                    string   `json:"role,omitempty"`
-	Capabilities            []string `json:"capabilities,omitempty"`
-	Icon                    string   `json:"icon,omitempty"`
-	Model                   string   `json:"model,omitempty"`
-	Quotes                  []string `json:"quotes,omitempty"`
-	RequirementsFingerprint string   `json:"requirements_fingerprint"`
-	Scope                   string   `json:"scope"`
-	Source                  string   `json:"source"`
-	File                    string   `json:"file"`
+	ID                      string                      `json:"id"`
+	Name                    string                      `json:"name"`
+	Description             string                      `json:"description"`
+	Role                    string                      `json:"role,omitempty"`
+	Capabilities            []string                    `json:"capabilities,omitempty"`
+	Icon                    string                      `json:"icon,omitempty"`
+	Model                   string                      `json:"model,omitempty"`
+	Quotes                  []string                    `json:"quotes,omitempty"`
+	RequirementsFingerprint string                      `json:"requirements_fingerprint"`
+	AllowedTools            []string                    `json:"allowed_tools,omitempty"`
+	MCPServers              map[string]MCPServerRef     `json:"mcp_servers,omitempty"`
+	HTTPTools               map[string]HTTPToolConfig   `json:"http_tools,omitempty"`
+	Scope                   string                      `json:"scope"`
+	Source                  string                      `json:"source"`
+	File                    string                      `json:"file"`
 }
 
 type GuestIndex struct {
@@ -37,14 +66,17 @@ type GuestIndex struct {
 }
 
 type frontmatter struct {
-	Name         string         `yaml:"name"`
-	Description  string         `yaml:"description"`
-	Model        string         `yaml:"model"`
-	Role         string         `yaml:"role"`
-	Capabilities []string       `yaml:"capabilities"`
-	Icon         string         `yaml:"icon"`
-	Quotes       []string       `yaml:"quotes"`
-	Requirements map[string]any `yaml:"requirements"`
+	Name         string                       `yaml:"name"`
+	Description  string                       `yaml:"description"`
+	Model        string                       `yaml:"model"`
+	Role         string                       `yaml:"role"`
+	Capabilities []string                     `yaml:"capabilities"`
+	Icon         string                       `yaml:"icon"`
+	Quotes       []string                     `yaml:"quotes"`
+	Requirements map[string]any               `yaml:"requirements"`
+	AllowedTools []string                     `yaml:"allowed_tools"`
+	MCPServers   map[string]MCPServerRef      `yaml:"mcp_servers"`
+	HTTPTools    map[string]HTTPToolConfig     `yaml:"http_tools"`
 }
 
 const indexFile = ".agents-index.json"
@@ -161,6 +193,12 @@ func ParseFrontmatter(data []byte) (GuestAgent, error) {
 		return GuestAgent{}, fmt.Errorf("missing required field: description")
 	}
 
+	for name, tool := range fm.HTTPTools {
+		if tool.AuthScheme != "" && tool.AuthScheme != "bearer" {
+			return GuestAgent{}, fmt.Errorf("http_tools[%q]: auth_scheme must be \"bearer\" or empty, got %q", name, tool.AuthScheme)
+		}
+	}
+
 	return GuestAgent{
 		Name:                    fm.Name,
 		Description:             fm.Description,
@@ -170,6 +208,9 @@ func ParseFrontmatter(data []byte) (GuestAgent, error) {
 		Model:                   fm.Model,
 		Quotes:                  fm.Quotes,
 		RequirementsFingerprint: ComputeRequirementsFingerprint(fm.Requirements),
+		AllowedTools:            fm.AllowedTools,
+		MCPServers:              fm.MCPServers,
+		HTTPTools:               fm.HTTPTools,
 	}, nil
 }
 
