@@ -1692,29 +1692,30 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 			go func() {
 				defer guestWg.Done()
 				dispatchSelectedGuests(guestDispatchParams{
-					ctx:              ctx,
-					selectedIDs:      selectedGuests,
-					msg:              msg,
-					guestsDir:        guestsDir,
-					runner:           o.runner,
-					sharedCtx:        o.sharedCtx,
-					convoBuf:         o.convoBuf,
-					channelMgr:       o.channelMgr,
-					projectSummary:   projectSummary,
-					featureContext:   featureCtx,
-					mode:             mode,
-					channelKind:      msg.ChannelKind,
-					planContent:      planContent,
-					planStore:        o.planStore,
-					planSlug:         o.projectSlug(),
-					guestIndex:       o.guestIndex,
-					storyStore:       o.storyStore,
-					proposalStore:    o.proposalStore,
-					directedText:     directedText,
-					logger:           o.logger,
-					globalMCPServers: o.cfg.Agent.MCPServers,
-					projectRoot:      o.projectRoot(),
-					activeFeature:    o.cfg.ActiveFeature,
+					ctx:            ctx,
+					selectedIDs:    selectedGuests,
+					msg:            msg,
+					guestsDir:      guestsDir,
+					runner:         o.runner,
+					sharedCtx:      o.sharedCtx,
+					convoBuf:       o.convoBuf,
+					channelMgr:     o.channelMgr,
+					projectSummary: projectSummary,
+					featureContext: featureCtx,
+					mode:           mode,
+					channelKind:    msg.ChannelKind,
+					planContent:    planContent,
+					planStore:      o.planStore,
+					planSlug:       o.projectSlug(),
+					guestIndex:     o.guestIndex,
+					storyStore:     o.storyStore,
+					proposalStore:  o.proposalStore,
+					directedText:      directedText,
+					logger:            o.logger,
+					globalMCPServers:  o.cfg.Agent.MCPServers,
+					projectRoot:       o.projectRoot(),
+					activeFeature:     o.cfg.ActiveFeature,
+					guestMCPMaxTurns:  o.cfg.Orchestrator.GuestMCPMaxTurns,
 				})
 			}()
 		}
@@ -2006,20 +2007,21 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 		allowedTools = resolveGuestTools(o.guestIndex.Agents[guestID])
 	}
 
+	mergedMCP := harness.MergeGuestServers(o.cfg.Agent.MCPServers, nil)
 	if o.guestIndex != nil {
-		guestServers := o.guestIndex.Agents[guestID].MCPServers
-		if len(guestServers) > 0 {
-			merged := harness.MergeGuestServers(o.cfg.Agent.MCPServers, guestServers)
-			if err := harness.WriteMCPConfig(o.projectRoot(), merged); err != nil {
-				o.logger.Warn("failed to write guest MCP config", "guest", guestID, "error", err)
-			}
+		mergedMCP = harness.MergeGuestServers(o.cfg.Agent.MCPServers, o.guestIndex.Agents[guestID].MCPServers)
+	}
+	mcpActive := len(mergedMCP) > 0
+	if mcpActive && o.projectRoot() != "" {
+		if err := harness.WriteMCPConfig(o.projectRoot(), mergedMCP); err != nil {
+			o.logger.Warn("failed to write guest MCP config", "guest", guestID, "error", err)
 		}
 	}
 
 	mentionRunOpts := types.RunOpts{
 		Prompt:         prompt,
 		Model:          model,
-		MaxTurns:       1,
+		MaxTurns:       guestInvocationMaxTurns(mcpActive, o.cfg.Orchestrator.GuestMCPMaxTurns),
 		PermissionMode: "bypassPermissions",
 	}
 	if len(allowedTools) > 0 {
@@ -2055,6 +2057,7 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 	}
 
 	cleanText, displays := extractLeanDisplayBlocks(responseText)
+	normalizeDisplayComponentsDataImageURLs(displays)
 	var displayIDs []string
 	if len(displays) > 0 {
 		for _, comp := range displays {
@@ -2395,6 +2398,7 @@ func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.Incomi
 		responseText = result.Output
 	}
 	cleanText, displays := extractLeanDisplayBlocks(responseText)
+	normalizeDisplayComponentsDataImageURLs(displays)
 
 	for _, comp := range displays {
 		if o.channelMgr != nil {

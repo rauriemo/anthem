@@ -60,25 +60,25 @@ type HooksConfig struct {
 }
 
 type AgentConfig struct {
-	Command               string                            `yaml:"command"`
-	MaxTurns              int                               `yaml:"max_turns"`
-	MaxConcurrent         int                               `yaml:"max_concurrent"`
-	MaxConcurrentPerLabel map[string]int                    `yaml:"max_concurrent_per_label"`
-	StallTimeoutMS        int                               `yaml:"stall_timeout_ms"`
-	MaxRetryBackoffMS     int                               `yaml:"max_retry_backoff_ms"`
-	AllowedTools          []string                          `yaml:"allowed_tools"`
-	Model                 string                            `yaml:"model"`
+	Command               string                     `yaml:"command"`
+	MaxTurns              int                        `yaml:"max_turns"`
+	MaxConcurrent         int                        `yaml:"max_concurrent"`
+	MaxConcurrentPerLabel map[string]int             `yaml:"max_concurrent_per_label"`
+	StallTimeoutMS        int                        `yaml:"stall_timeout_ms"`
+	MaxRetryBackoffMS     int                        `yaml:"max_retry_backoff_ms"`
+	AllowedTools          []string                   `yaml:"allowed_tools"`
+	Model                 string                     `yaml:"model"`
 	MCPServers            map[string]mcpconfig.MCPServerRef `yaml:"mcp_servers"`
-	Skills                []string                          `yaml:"skills"`
-	PermissionMode        string                            `yaml:"permission_mode"`
-	SkipPermissions       bool                              `yaml:"skip_permissions"`
-	DeniedTools           []string                          `yaml:"denied_tools"`
-	AdditionalDirs        []string                          `yaml:"additional_dirs"`
-	ReviewEnabled         bool                              `yaml:"review_enabled"`
-	ReviewMaxTurns        int                               `yaml:"review_max_turns"`
-	ReviewMaxRetries      int                               `yaml:"review_max_retries"`
-	ReviewPrompt          string                            `yaml:"review_prompt"`
-	Profiles              map[string]AgentProfile           `yaml:"profiles,omitempty"`
+	Skills                []string                   `yaml:"skills"`
+	PermissionMode        string                     `yaml:"permission_mode"`
+	SkipPermissions       bool                       `yaml:"skip_permissions"`
+	DeniedTools           []string                   `yaml:"denied_tools"`
+	AdditionalDirs        []string                   `yaml:"additional_dirs"`
+	ReviewEnabled         bool                       `yaml:"review_enabled"`
+	ReviewMaxTurns        int                        `yaml:"review_max_turns"`
+	ReviewMaxRetries      int                        `yaml:"review_max_retries"`
+	ReviewPrompt          string                     `yaml:"review_prompt"`
+	Profiles              map[string]AgentProfile    `yaml:"profiles,omitempty"`
 }
 
 // MCPServerConfig is a backward-compatible alias for mcpconfig.MCPServerRef.
@@ -124,6 +124,10 @@ type OrchestratorConfig struct {
 	ExplorerMaxTurns       int  `yaml:"explorer_max_turns"`
 	MaxExplorers           int  `yaml:"max_explorers"`
 	EnableGuestSuggestions bool `yaml:"enable_guest_suggestions"`
+	// GuestMCPMaxTurns is the Claude Code --max-turns cap for guest invocations when
+	// MCP servers are active (global and/or per-guest). Tool-heavy workflows need
+	// multiple agentic turns before the final answer.
+	GuestMCPMaxTurns int `yaml:"guest_mcp_max_turns"`
 }
 
 type ServerConfig struct {
@@ -184,6 +188,7 @@ func DefaultConfig() Config {
 			PlanMaxTurns:     25,
 			ExplorerMaxTurns: 10,
 			MaxExplorers:     5,
+			GuestMCPMaxTurns: 16,
 		},
 		Maintenance: MaintenanceConfig{
 			ScanIntervalMS:        600000,

@@ -45,6 +45,53 @@ type GuestPromptOpts struct {
 
 var planEditBlockRe = regexp.MustCompile("(?s)```plan-edit\\s*\\n(.*?)\\n```")
 
+// defaultGuestMCPMaxTurns is used when orchestrator.guest_mcp_max_turns is unset (≤0).
+const defaultGuestMCPMaxTurns = 16
+
+// guestInvocationMaxTurns is the Claude Code --max-turns value for one guest Run.
+// MCP workflows need multiple agentic turns (tools, then final text / prism fences).
+func guestInvocationMaxTurns(mcpActive bool, configured int) int {
+	if !mcpActive {
+		return 1
+	}
+	if configured > 0 {
+		return configured
+	}
+	return defaultGuestMCPMaxTurns
+}
+
+// mergeMCPServersForSelectedGuests merges anthem global mcp_servers with every
+// selected guest's frontmatter mcp_servers (guest keys override global on collision).
+func mergeMCPServersForSelectedGuests(global map[string]mcpconfig.MCPServerRef, guestIndex *guests.GuestIndex, selectedIDs []string) map[string]mcpconfig.MCPServerRef {
+	if guestIndex == nil {
+		if len(global) == 0 {
+			return nil
+		}
+		out := make(map[string]mcpconfig.MCPServerRef, len(global))
+		for k, v := range global {
+			out[k] = v
+		}
+		return out
+	}
+	merged := make(map[string]mcpconfig.MCPServerRef)
+	for k, v := range global {
+		merged[k] = v
+	}
+	for _, gid := range selectedIDs {
+		ag, ok := guestIndex.Agents[gid]
+		if !ok {
+			continue
+		}
+		for k, v := range ag.MCPServers {
+			merged[k] = v
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
+}
+
 func routeToGuests(
 	ctx context.Context,
 	runner agent.AgentRunner,
@@ -226,6 +273,10 @@ func buildGuestPrompt(persona, projectSummary, sharedCtx, history, userMsg strin
 		sb.WriteString("HTML must be fully self-contained with all styles inline (no external stylesheets).\n")
 		sb.WriteString("You can also use ```markdown blocks for formatted text artifacts.\n")
 		sb.WriteString("Include a brief text explanation outside the block.\n\n")
+		sb.WriteString("### Images from tools (Unity MCP, etc.)\n\n")
+		sb.WriteString("When embedding captures as `<img src=\"...\">`, use a **single-line** `data:image/png;base64,<payload>` URL copied **verbatim** from tool output.\n")
+		sb.WriteString("Do **not** insert line breaks, spaces, or line-wrapping inside the base64 payload — the browser will reject the URL (`ERR_INVALID_URL`).\n")
+		sb.WriteString("Do not use placeholders, ellipses, or shortened base64; paste the full string from the tool result.\n\n")
 	}
 
 	fmt.Fprintf(&sb, "## User Message\n\n%s\n", userMsg)
@@ -260,50 +311,46 @@ func extractPlanEdit(response string) (explanation, planMarkdown string, hasEdit
 }
 
 type guestDispatchParams struct {
-	ctx              context.Context
-	selectedIDs      []string
-	msg              channel.IncomingMessage
-	guestsDir        string
-	runner           agent.AgentRunner
-	sharedCtx        *SharedContext
-	convoBuf         *ConvoBuffer
-	channelMgr       *channel.Manager
-	projectSummary   string
-	featureContext   string
-	mode             string
-	channelKind      string
-	planContent      string
-	planStore        *plans.Store
-	planSlug         string
-	guestIndex       *guests.GuestIndex
-	storyStore       *StoryStore
-	proposalStore    *ProposalStore
-	directedText     map[string]string
-	logger           *slog.Logger
-	globalMCPServers map[string]mcpconfig.MCPServerRef
-	projectRoot      string
-	activeFeature    string
+	ctx            context.Context
+	selectedIDs    []string
+	msg            channel.IncomingMessage
+	guestsDir      string
+	runner         agent.AgentRunner
+	sharedCtx      *SharedContext
+	convoBuf       *ConvoBuffer
+	channelMgr     *channel.Manager
+	projectSummary string
+	featureContext string
+	mode           string
+	channelKind    string
+	planContent    string
+	planStore      *plans.Store
+	planSlug       string
+	guestIndex     *guests.GuestIndex
+	storyStore     *StoryStore
+	proposalStore  *ProposalStore
+	directedText      map[string]string
+	logger            *slog.Logger
+	globalMCPServers  map[string]mcpconfig.MCPServerRef
+	projectRoot       string
+	activeFeature     string
+	guestMCPMaxTurns  int
 }
 
 var planEditMu sync.Mutex
 
 func dispatchSelectedGuests(p guestDispatchParams) {
-	if p.guestIndex != nil && p.projectRoot != "" {
-		allServers := make(map[string]mcpconfig.MCPServerRef)
-		for k, v := range p.globalMCPServers {
-			allServers[k] = v
-		}
-		for _, gid := range p.selectedIDs {
-			for k, v := range p.guestIndex.Agents[gid].MCPServers {
-				allServers[k] = v
-			}
-		}
-		if len(allServers) > 0 {
-			if err := harness.WriteMCPConfig(p.projectRoot, allServers); err != nil {
+	mcpRoundActive := false
+	if p.guestIndex != nil {
+		mergedMCP := mergeMCPServersForSelectedGuests(p.globalMCPServers, p.guestIndex, p.selectedIDs)
+		mcpRoundActive = len(mergedMCP) > 0
+		if mcpRoundActive && p.projectRoot != "" {
+			if err := harness.WriteMCPConfig(p.projectRoot, mergedMCP); err != nil {
 				p.logger.Warn("failed to write guest MCP config", "error", err)
 			}
 		}
 	}
+	guestMaxTurns := guestInvocationMaxTurns(mcpRoundActive, p.guestMCPMaxTurns)
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 3)
@@ -399,7 +446,7 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 			runOpts := types.RunOpts{
 				Prompt:         prompt,
 				Model:          model,
-				MaxTurns:       1,
+				MaxTurns:       guestMaxTurns,
 				PermissionMode: "bypassPermissions",
 				OnStream:       onStream,
 			}
@@ -453,6 +500,7 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 
 			// Extract prism-display blocks and broadcast as artifacts
 			cleanText, displays := extractLeanDisplayBlocks(responseText)
+			normalizeDisplayComponentsDataImageURLs(displays)
 			var displayIDs []string
 			if len(displays) > 0 {
 				for _, comp := range displays {
