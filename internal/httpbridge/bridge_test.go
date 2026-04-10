@@ -15,6 +15,47 @@ import (
 	"github.com/rauriemo/anthem/internal/guests"
 )
 
+// parseResponse is a test helper that unmarshals a JSON-RPC response line.
+func parseResponse(t *testing.T, data []byte) jsonRPCResponse {
+	t.Helper()
+	var resp jsonRPCResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("parsing response: %v", err)
+	}
+	return resp
+}
+
+// resultMap extracts resp.Result as map[string]any, failing the test if it cannot.
+func resultMap(t *testing.T, resp jsonRPCResponse) map[string]any {
+	t.Helper()
+	m, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result is not map[string]any: %T", resp.Result)
+	}
+	return m
+}
+
+// contentText extracts the first text from an MCP content array in the result.
+func contentText(t *testing.T, result map[string]any) string {
+	t.Helper()
+	content, ok := result["content"].([]any)
+	if !ok {
+		t.Fatal("content is not []any")
+	}
+	if len(content) == 0 {
+		t.Fatal("content is empty")
+	}
+	item, ok := content[0].(map[string]any)
+	if !ok {
+		t.Fatal("content[0] is not map[string]any")
+	}
+	text, ok := item["text"].(string)
+	if !ok {
+		t.Fatal("content[0].text is not string")
+	}
+	return text
+}
+
 func TestExtractInputVars(t *testing.T) {
 	tests := []struct {
 		name string
@@ -98,7 +139,10 @@ func TestResolveTemplate(t *testing.T) {
 			},
 			vars: map[string]string{"val": "hello"},
 			check: func(t *testing.T, result map[string]any) {
-				outer := result["outer"].(map[string]any)
+				outer, ok := result["outer"].(map[string]any)
+				if !ok {
+					t.Fatal("outer is not map[string]any")
+				}
 				if outer["inner"] != "hello" {
 					t.Errorf("inner = %v", outer["inner"])
 				}
@@ -111,7 +155,10 @@ func TestResolveTemplate(t *testing.T) {
 			},
 			vars: map[string]string{"a": "x", "b": "y"},
 			check: func(t *testing.T, result map[string]any) {
-				items := result["items"].([]any)
+				items, ok := result["items"].([]any)
+				if !ok {
+					t.Fatal("items is not []any")
+				}
 				if items[0] != "x" || items[1] != "static" || items[2] != "y" {
 					t.Errorf("items = %v", items)
 				}
@@ -172,15 +219,15 @@ func TestMCPProtocol_Initialize(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var resp jsonRPCResponse
-	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
-		t.Fatalf("parsing response: %v", err)
-	}
-	result := resp.Result.(map[string]any)
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
 	if result["protocolVersion"] != "2024-11-05" {
 		t.Errorf("protocolVersion = %v", result["protocolVersion"])
 	}
-	info := result["serverInfo"].(map[string]any)
+	info, ok := result["serverInfo"].(map[string]any)
+	if !ok {
+		t.Fatal("serverInfo is not map[string]any")
+	}
 	if info["name"] != "anthem-http-bridge" {
 		t.Errorf("server name = %v", info["name"])
 	}
@@ -206,24 +253,33 @@ func TestMCPProtocol_ToolsList(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var resp jsonRPCResponse
-	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
-		t.Fatalf("parsing response: %v", err)
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
+	toolList, ok := result["tools"].([]any)
+	if !ok {
+		t.Fatal("tools is not []any")
 	}
-	result := resp.Result.(map[string]any)
-	toolList := result["tools"].([]any)
 	if len(toolList) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(toolList))
 	}
-	tool := toolList[0].(map[string]any)
+	tool, ok := toolList[0].(map[string]any)
+	if !ok {
+		t.Fatal("tool is not map[string]any")
+	}
 	if tool["name"] != "http__image-gen__call" {
 		t.Errorf("tool name = %v", tool["name"])
 	}
 	if tool["description"] != "Generate images" {
 		t.Errorf("description = %v", tool["description"])
 	}
-	schema := tool["inputSchema"].(map[string]any)
-	props := schema["properties"].(map[string]any)
+	schema, ok := tool["inputSchema"].(map[string]any)
+	if !ok {
+		t.Fatal("inputSchema is not map[string]any")
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("properties is not map[string]any")
+	}
 	if _, ok := props["prompt"]; !ok {
 		t.Error("missing prompt property")
 	}
@@ -235,7 +291,10 @@ func TestMCPProtocol_ToolsList(t *testing.T) {
 func TestMCPProtocol_ToolCall_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
-		json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decoding request body: %v", err)
+			return
+		}
 		if body["query"] != "hello world" {
 			t.Errorf("unexpected body: %v", body)
 		}
@@ -267,13 +326,9 @@ func TestMCPProtocol_ToolCall_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var resp jsonRPCResponse
-	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
-		t.Fatalf("parsing response: %v", err)
-	}
-	result := resp.Result.(map[string]any)
-	content := result["content"].([]any)
-	text := content[0].(map[string]any)["text"].(string)
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
+	text := contentText(t, result)
 	if !strings.Contains(text, "ok") {
 		t.Errorf("unexpected result text: %s", text)
 	}
@@ -305,7 +360,9 @@ func TestMCPProtocol_ToolCall_AuthBearer(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	Run(tools, strings.NewReader(input), &out)
+	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
 
 	if gotAuth != "Bearer secret-token-123" {
 		t.Errorf("auth header = %q, want %q", gotAuth, "Bearer secret-token-123")
@@ -338,7 +395,9 @@ func TestMCPProtocol_ToolCall_AuthAPIKey(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	Run(tools, strings.NewReader(input), &out)
+	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
 
 	if gotKey != "gemini-key-456" {
 		t.Errorf("api key header = %q, want %q", gotKey, "gemini-key-456")
@@ -350,7 +409,7 @@ func TestMCPProtocol_ToolCall_ArtifactSave(t *testing.T) {
 	b64Image := base64.StdEncoding.EncodeToString(imageData)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := map[string]any{
+		apiResp := map[string]any{
 			"candidates": []map[string]any{{
 				"content": map[string]any{
 					"parts": []map[string]any{{
@@ -362,7 +421,9 @@ func TestMCPProtocol_ToolCall_ArtifactSave(t *testing.T) {
 				},
 			}},
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(apiResp); err != nil {
+			t.Errorf("encoding response: %v", err)
+		}
 	}))
 	defer srv.Close()
 
@@ -403,11 +464,9 @@ func TestMCPProtocol_ToolCall_ArtifactSave(t *testing.T) {
 		t.Errorf("artifact content = %q, want %q", string(data), "fake-png-data")
 	}
 
-	var resp jsonRPCResponse
-	json.Unmarshal(out.Bytes(), &resp)
-	result := resp.Result.(map[string]any)
-	content := result["content"].([]any)
-	text := content[0].(map[string]any)["text"].(string)
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
+	text := contentText(t, result)
 	if !strings.Contains(text, "cat.png") {
 		t.Errorf("result text should mention file: %s", text)
 	}
@@ -416,10 +475,11 @@ func TestMCPProtocol_ToolCall_ArtifactSave(t *testing.T) {
 func TestMCPProtocol_UnknownMethod(t *testing.T) {
 	input := `{"jsonrpc":"2.0","id":1,"method":"unknown/method","params":{}}` + "\n"
 	var out bytes.Buffer
-	Run(nil, strings.NewReader(input), &out)
+	if err := Run(nil, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
 
-	var resp jsonRPCResponse
-	json.Unmarshal(out.Bytes(), &resp)
+	resp := parseResponse(t, out.Bytes())
 	if resp.Error == nil {
 		t.Fatal("expected error response")
 	}
@@ -449,16 +509,16 @@ func TestMCPProtocol_ToolCall_HTTPError(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	Run(tools, strings.NewReader(input), &out)
+	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
 
-	var resp jsonRPCResponse
-	json.Unmarshal(out.Bytes(), &resp)
-	result := resp.Result.(map[string]any)
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
 	if result["isError"] != true {
 		t.Error("expected isError=true for HTTP 403")
 	}
-	content := result["content"].([]any)
-	text := content[0].(map[string]any)["text"].(string)
+	text := contentText(t, result)
 	if !strings.Contains(text, "403") {
 		t.Errorf("error text should mention status code: %s", text)
 	}
@@ -478,10 +538,11 @@ func TestMCPProtocol_ToolCall_UnknownTool(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	Run(tools, strings.NewReader(input), &out)
+	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
 
-	var resp jsonRPCResponse
-	json.Unmarshal(out.Bytes(), &resp)
+	resp := parseResponse(t, out.Bytes())
 	if resp.Error == nil {
 		t.Fatal("expected error for unknown tool")
 	}
@@ -493,10 +554,11 @@ func TestMCPProtocol_ToolCall_UnknownTool(t *testing.T) {
 func TestMCPProtocol_MalformedJSON(t *testing.T) {
 	input := "this is not json\n"
 	var out bytes.Buffer
-	Run(nil, strings.NewReader(input), &out)
+	if err := Run(nil, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
 
-	var resp jsonRPCResponse
-	json.Unmarshal(out.Bytes(), &resp)
+	resp := parseResponse(t, out.Bytes())
 	if resp.Error == nil {
 		t.Fatal("expected parse error")
 	}
@@ -508,7 +570,9 @@ func TestMCPProtocol_MalformedJSON(t *testing.T) {
 func TestMCPProtocol_NotificationsInitialized(t *testing.T) {
 	input := `{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n"
 	var out bytes.Buffer
-	Run(nil, strings.NewReader(input), &out)
+	if err := Run(nil, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
 
 	if out.Len() != 0 {
 		t.Errorf("expected no output for notification, got %q", out.String())
@@ -531,22 +595,38 @@ func TestMCPProtocol_ToolsList_FilenameInjection(t *testing.T) {
 
 	input := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}` + "\n"
 	var out bytes.Buffer
-	Run(tools, strings.NewReader(input), &out)
+	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
 
-	var resp jsonRPCResponse
-	json.Unmarshal(out.Bytes(), &resp)
-	result := resp.Result.(map[string]any)
-	toolList := result["tools"].([]any)
-	tool := toolList[0].(map[string]any)
-	schema := tool["inputSchema"].(map[string]any)
-	props := schema["properties"].(map[string]any)
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
+	toolList, ok := result["tools"].([]any)
+	if !ok {
+		t.Fatal("tools is not []any")
+	}
+	tool, ok := toolList[0].(map[string]any)
+	if !ok {
+		t.Fatal("tool is not map[string]any")
+	}
+	schema, ok := tool["inputSchema"].(map[string]any)
+	if !ok {
+		t.Fatal("inputSchema is not map[string]any")
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("properties is not map[string]any")
+	}
 	if _, ok := props["filename"]; !ok {
 		t.Error("filename should be auto-injected into schema from response_artifact.save_to")
 	}
 	if _, ok := props["prompt"]; !ok {
 		t.Error("prompt should be in schema from request_template")
 	}
-	req := schema["required"].([]any)
+	req, ok := schema["required"].([]any)
+	if !ok {
+		t.Fatal("required is not []any")
+	}
 	if len(req) != 2 {
 		t.Errorf("expected 2 required fields, got %d", len(req))
 	}
@@ -578,7 +658,9 @@ func TestMCPProtocol_ToolCall_DefaultAuthScheme(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	Run(tools, strings.NewReader(input), &out)
+	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
 
 	if gotAuth != "Bearer default-token" {
 		t.Errorf("default auth should be Bearer, got %q", gotAuth)
@@ -594,23 +676,23 @@ func TestMCPProtocol_MultipleRequests(t *testing.T) {
 		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}` + "\n"
 
 	var out bytes.Buffer
-	Run(tools, strings.NewReader(input), &out)
+	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
 
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 responses, got %d: %q", len(lines), out.String())
 	}
 
-	var resp1 jsonRPCResponse
-	json.Unmarshal([]byte(lines[0]), &resp1)
-	result1 := resp1.Result.(map[string]any)
+	resp1 := parseResponse(t, []byte(lines[0]))
+	result1 := resultMap(t, resp1)
 	if result1["protocolVersion"] != "2024-11-05" {
 		t.Errorf("first response should be initialize result")
 	}
 
-	var resp2 jsonRPCResponse
-	json.Unmarshal([]byte(lines[1]), &resp2)
-	result2 := resp2.Result.(map[string]any)
+	resp2 := parseResponse(t, []byte(lines[1]))
+	result2 := resultMap(t, resp2)
 	if _, ok := result2["tools"]; !ok {
 		t.Errorf("second response should be tools/list result")
 	}
