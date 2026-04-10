@@ -14,6 +14,7 @@ type Config struct {
 	Server          ServerConfig          `yaml:"server"`
 	Guests          []string              `yaml:"guests"`
 	MaxActiveGuests int                   `yaml:"max_active_guests"`
+	ActiveFeature   string                `yaml:"active_feature"`
 }
 
 type ChannelTargetConfig struct {

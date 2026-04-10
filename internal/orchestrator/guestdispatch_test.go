@@ -468,6 +468,32 @@ func TestFallbackAllGuests_DirectedTextNil(t *testing.T) {
 	}
 }
 
+// --- feature context injection tests ---
+
+func TestBuildGuestPrompt_WithFeatureContext(t *testing.T) {
+	prompt := buildGuestPrompt("You are a 2D artist.", "Game project", "", "", "Draw a sprite", GuestPromptOpts{
+		FeatureContext: "## Feature Context: tower-defense\nPhase: prototyping\n\n### Plan Summary\nBuild towers.",
+	})
+	if !strings.Contains(prompt, "## Feature Context: tower-defense") {
+		t.Error("prompt should contain feature context header")
+	}
+	if !strings.Contains(prompt, "Phase: prototyping") {
+		t.Error("prompt should contain feature phase")
+	}
+	if !strings.Contains(prompt, "Build towers.") {
+		t.Error("prompt should contain plan summary")
+	}
+}
+
+func TestBuildGuestPrompt_NoFeatureContextWhenEmpty(t *testing.T) {
+	prompt := buildGuestPrompt("You are a designer.", "", "", "", "Do something", GuestPromptOpts{
+		FeatureContext: "",
+	})
+	if strings.Contains(prompt, "## Feature Context") {
+		t.Error("should not include feature context when empty")
+	}
+}
+
 // --- resolveGuestTools tests ---
 
 func TestResolveGuestTools(t *testing.T) {

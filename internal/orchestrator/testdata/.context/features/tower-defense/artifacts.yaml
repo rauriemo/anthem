@@ -1,0 +1,35 @@
+schema_version: "1"
+artifacts:
+  - id: a001
+    type: image/png
+    path: assets/sprites/goblin-walk.png
+    created_by: 2d-artist
+    created_at: "2026-04-05T10:00:00Z"
+    feature: tower-defense
+    status: approved
+    approved_by: art-director
+    description: Goblin enemy walk cycle sprite sheet
+    source_artifact: ""
+    tags: sprite,enemy
+  - id: a002
+    type: image/png
+    path: assets/sprites/arrow-tower.png
+    created_by: 2d-artist
+    created_at: "2026-04-06T14:00:00Z"
+    feature: tower-defense
+    status: pending-review
+    approved_by: ""
+    description: Arrow tower sprite
+    source_artifact: ""
+    tags: sprite,tower
+  - id: a003
+    type: image/png
+    path: assets/sprites/rejected-goblin.png
+    created_by: 2d-artist
+    created_at: "2026-04-04T09:00:00Z"
+    feature: tower-defense
+    status: rejected
+    approved_by: ""
+    description: Old goblin design (rejected)
+    source_artifact: ""
+    tags: sprite,enemy

@@ -1680,6 +1680,13 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 				projectSummary = o.projectCtx.ProjectSummary
 			}
 
+			featureCtx := ""
+			if o.cfg.ActiveFeature != "" {
+				if fc, err := HydrateFeatureContext(o.projectRoot(), o.cfg.ActiveFeature); err == nil {
+					featureCtx = fc
+				}
+			}
+
 			guestWg = &sync.WaitGroup{}
 			guestWg.Add(1)
 			go func() {
@@ -1694,6 +1701,7 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 					convoBuf:       o.convoBuf,
 					channelMgr:     o.channelMgr,
 					projectSummary: projectSummary,
+					featureContext: featureCtx,
 					mode:           mode,
 					channelKind:    msg.ChannelKind,
 					planContent:    planContent,

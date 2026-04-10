@@ -1,0 +1,23 @@
+schema_version: "1"
+decisions:
+  - id: d001
+    date: "2026-04-01"
+    decision: Use pixel art style for all sprites
+    rationale: Matches project aesthetic and reduces asset creation time
+    decided_by: art-director
+    status: final
+    affects: 2d-artist
+  - id: d002
+    date: "2026-04-02"
+    decision: Towers cost gold, not gems
+    rationale: Simpler economy for prototype phase
+    decided_by: game-designer
+    status: final
+    affects: game-designer
+  - id: d003
+    date: "2026-04-03"
+    decision: Add flying enemies
+    rationale: More variety
+    decided_by: game-designer
+    status: draft
+    affects: game-designer

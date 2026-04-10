@@ -33,11 +33,12 @@ type RoutingResult struct {
 }
 
 type GuestPromptOpts struct {
-	Mode         string
-	ChannelKind  string
-	PlanContent  string
-	StoryContext *StoryContext
-	FocusText    string
+	Mode           string
+	ChannelKind    string
+	PlanContent    string
+	StoryContext   *StoryContext
+	FocusText      string
+	FeatureContext string
 }
 
 var planEditBlockRe = regexp.MustCompile("(?s)```plan-edit\\s*\\n(.*?)\\n```")
@@ -158,6 +159,11 @@ func buildGuestPrompt(persona, projectSummary, sharedCtx, history, userMsg strin
 		sb.WriteString("\n\n")
 	}
 
+	if opts.FeatureContext != "" {
+		sb.WriteString(opts.FeatureContext)
+		sb.WriteString("\n\n")
+	}
+
 	if sharedCtx != "" {
 		sb.WriteString("## Session Context\n")
 		sb.WriteString(sharedCtx)
@@ -261,6 +267,7 @@ type guestDispatchParams struct {
 	convoBuf       *ConvoBuffer
 	channelMgr     *channel.Manager
 	projectSummary string
+	featureContext string
 	mode           string
 	channelKind    string
 	planContent    string
@@ -334,11 +341,12 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 		}
 
 		prompt := buildGuestPrompt(persona, p.projectSummary, sharedCtxText, history, p.msg.Text, GuestPromptOpts{
-			Mode:         p.mode,
-			ChannelKind:  p.channelKind,
-			PlanContent:  p.planContent,
-			StoryContext: storyCtx,
-			FocusText:    focusText,
+			Mode:           p.mode,
+			ChannelKind:    p.channelKind,
+			PlanContent:    p.planContent,
+			StoryContext:   storyCtx,
+			FocusText:      focusText,
+			FeatureContext: p.featureContext,
 		})
 
 		var allowedTools []string
