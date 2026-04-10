@@ -260,29 +260,29 @@ func extractPlanEdit(response string) (explanation, planMarkdown string, hasEdit
 }
 
 type guestDispatchParams struct {
-	ctx            context.Context
-	selectedIDs    []string
-	msg            channel.IncomingMessage
-	guestsDir      string
-	runner         agent.AgentRunner
-	sharedCtx      *SharedContext
-	convoBuf       *ConvoBuffer
-	channelMgr     *channel.Manager
-	projectSummary string
-	featureContext string
-	mode           string
-	channelKind    string
-	planContent    string
-	planStore      *plans.Store
-	planSlug       string
-	guestIndex     *guests.GuestIndex
-	storyStore     *StoryStore
-	proposalStore  *ProposalStore
-	directedText      map[string]string
-	logger            *slog.Logger
-	globalMCPServers  map[string]mcpconfig.MCPServerRef
-	projectRoot       string
-	activeFeature     string
+	ctx              context.Context
+	selectedIDs      []string
+	msg              channel.IncomingMessage
+	guestsDir        string
+	runner           agent.AgentRunner
+	sharedCtx        *SharedContext
+	convoBuf         *ConvoBuffer
+	channelMgr       *channel.Manager
+	projectSummary   string
+	featureContext   string
+	mode             string
+	channelKind      string
+	planContent      string
+	planStore        *plans.Store
+	planSlug         string
+	guestIndex       *guests.GuestIndex
+	storyStore       *StoryStore
+	proposalStore    *ProposalStore
+	directedText     map[string]string
+	logger           *slog.Logger
+	globalMCPServers map[string]mcpconfig.MCPServerRef
+	projectRoot      string
+	activeFeature    string
 }
 
 var planEditMu sync.Mutex
