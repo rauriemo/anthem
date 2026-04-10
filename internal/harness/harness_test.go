@@ -18,6 +18,7 @@ type testMCPEntry struct {
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 func TestWriteMCPConfig_SingleServer(t *testing.T) {
@@ -707,6 +708,173 @@ func TestResolveSkillRefs_PreservesOrder(t *testing.T) {
 		if result[i] != want {
 			t.Errorf("result[%d] = %q, want %q", i, result[i], want)
 		}
+	}
+}
+
+func TestMergeGuestServers_GuestOverridesGlobal(t *testing.T) {
+	global := map[string]config.MCPServerConfig{
+		"unity": {Command: "npx", Args: []string{"unity-global"}},
+	}
+	guest := map[string]config.MCPServerConfig{
+		"unity":   {Command: "node", Args: []string{"unity-local"}},
+		"semgrep": {Command: "semgrep-mcp"},
+	}
+
+	result := MergeGuestServers(global, guest)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 servers, got %d", len(result))
+	}
+	if result["unity"].Command != "node" {
+		t.Errorf("guest should override global: command = %q, want node", result["unity"].Command)
+	}
+	if _, ok := result["semgrep"]; !ok {
+		t.Error("missing semgrep from guest servers")
+	}
+}
+
+func TestMergeGuestServers_BothEmpty(t *testing.T) {
+	result := MergeGuestServers(nil, nil)
+	if result != nil {
+		t.Errorf("expected nil for both empty, got %v", result)
+	}
+}
+
+func TestMergeGuestServers_GlobalOnly(t *testing.T) {
+	global := map[string]config.MCPServerConfig{
+		"unity": {Command: "npx"},
+	}
+	result := MergeGuestServers(global, nil)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(result))
+	}
+}
+
+func TestMergeGuestServers_GuestOnly(t *testing.T) {
+	guest := map[string]config.MCPServerConfig{
+		"custom": {Command: "my-server"},
+	}
+	result := MergeGuestServers(nil, guest)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 server, got %d", len(result))
+	}
+}
+
+func TestWriteMCPConfig_TypeMigration(t *testing.T) {
+	dir := t.TempDir()
+	servers := map[string]config.MCPServerConfig{
+		"legacy": {Command: "npx", Args: []string{"-y", "mcp-server"}},
+	}
+
+	if err := WriteMCPConfig(dir, servers); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out testMCPJSON
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := out.MCPServers["legacy"]
+	if !ok {
+		t.Fatal("missing legacy server")
+	}
+	if entry.Command != "npx" {
+		t.Errorf("command = %q, want npx", entry.Command)
+	}
+}
+
+func TestWriteMCPConfig_MixedTransports(t *testing.T) {
+	dir := t.TempDir()
+	servers := map[string]config.MCPServerConfig{
+		"mcp-unity": {
+			Type:    "stdio",
+			Command: "node",
+			Args:    []string{"server.js"},
+		},
+		"remote": {
+			Type:    "http",
+			URL:     "http://localhost:9090/mcp",
+			Headers: map[string]string{"X-Api-Key": "test123"},
+		},
+	}
+
+	if err := WriteMCPConfig(dir, servers); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out testMCPJSON
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(out.MCPServers) != 2 {
+		t.Fatalf("expected 2 servers, got %d", len(out.MCPServers))
+	}
+
+	stdio := out.MCPServers["mcp-unity"]
+	if stdio.Command != "node" {
+		t.Errorf("stdio command = %q, want node", stdio.Command)
+	}
+
+	http := out.MCPServers["remote"]
+	if http.URL != "http://localhost:9090/mcp" {
+		t.Errorf("http url = %q, want http://localhost:9090/mcp", http.URL)
+	}
+	if http.Headers["X-Api-Key"] != "test123" {
+		t.Errorf("http header X-Api-Key = %q, want test123", http.Headers["X-Api-Key"])
+	}
+}
+
+func TestWriteMCPConfig_EmptyNonNilMap(t *testing.T) {
+	dir := t.TempDir()
+	servers := map[string]config.MCPServerConfig{}
+
+	if err := WriteMCPConfig(dir, servers); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(dir, ".mcp.json")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("expected no file for empty non-nil map")
+	}
+}
+
+func TestMergeGuestServers_CrossTransportOverride(t *testing.T) {
+	global := map[string]config.MCPServerConfig{
+		"server": {Type: "stdio", Command: "npx", Args: []string{"old"}},
+	}
+	guest := map[string]config.MCPServerConfig{
+		"server": {Type: "http", URL: "http://localhost:8080/mcp"},
+	}
+
+	result := MergeGuestServers(global, guest)
+	if result["server"].Type != "http" {
+		t.Errorf("expected guest HTTP to override global stdio, got type = %q", result["server"].Type)
+	}
+	if result["server"].URL != "http://localhost:8080/mcp" {
+		t.Errorf("expected guest URL, got %q", result["server"].URL)
+	}
+	if result["server"].Command != "" {
+		t.Errorf("expected command to be empty after override, got %q", result["server"].Command)
+	}
+}
+
+func TestMergeGuestServers_EmptyNonNilMaps(t *testing.T) {
+	result := MergeGuestServers(
+		map[string]config.MCPServerConfig{},
+		map[string]config.MCPServerConfig{},
+	)
+	if result != nil {
+		t.Errorf("expected nil for two empty non-nil maps, got %v", result)
 	}
 }
 

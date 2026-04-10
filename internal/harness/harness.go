@@ -109,6 +109,22 @@ func ResolveMCPServers(registry map[string]mcpconfig.MCPServerRef, globalRefs []
 	return merged
 }
 
+// MergeGuestServers merges global config servers with per-guest inline server
+// declarations from frontmatter. Guest servers take precedence on name collision.
+func MergeGuestServers(global map[string]mcpconfig.MCPServerRef, guest map[string]mcpconfig.MCPServerRef) map[string]mcpconfig.MCPServerRef {
+	if len(global) == 0 && len(guest) == 0 {
+		return nil
+	}
+	merged := make(map[string]mcpconfig.MCPServerRef, len(global)+len(guest))
+	for k, v := range global {
+		merged[k] = v
+	}
+	for k, v := range guest {
+		merged[k] = v
+	}
+	return merged
+}
+
 // ResolveSkillRefs merges global baseline skills with profile-specific refs, deduplicating.
 func ResolveSkillRefs(globalSkills []string, profileRefs []string) []string {
 	seen := make(map[string]bool, len(globalSkills)+len(profileRefs))

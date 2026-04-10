@@ -262,6 +262,11 @@ Anthem uses a three-layer "Registry + Reference" architecture for agent configur
 agent:
   # Layer 1: MCP Server Registry (capabilities — define once)
   mcp_servers:
+    # Unity: prefer Unity's official MCP relay (com.unity.ai.assistant 2.x), not npx.
+    # Example (Windows path — use your %USERPROFILE%\.unity\relay\relay_win.exe):
+    # unity:
+    #   command: "C:/Users/You/.unity/relay/relay_win.exe"
+    #   args: ["--mcp"]
     unity:
       command: "npx"
       args: ["-y", "@anthropic/unity-mcp-server"]
@@ -297,7 +302,9 @@ agent:
   review_max_retries: 1
 ```
 
-**MCP servers** are external tools (Unity Editor, semgrep, databases) registered by name. **Skills** are SKILL.md knowledge packages (OWASP checklists, coding patterns) Claude Code discovers automatically. **Profiles** compose these by reference — `mcp_refs` and `skill_refs` point to registry entries. Adding a new agent type (animator, database agent, image generator) requires only a YAML profile entry.
+**MCP servers** are external tools (Unity Editor via [Unity MCP](https://docs.unity3d.com/Packages/com.unity.ai.assistant@2.0/manual/unity-mcp-overview.html), semgrep, databases) registered by name. **Skills** are SKILL.md knowledge packages (OWASP checklists, coding patterns) Claude Code discovers automatically. **Profiles** compose these by reference — `mcp_refs` and `skill_refs` point to registry entries. Adding a new agent type (animator, database agent, image generator) requires only a YAML profile entry.
+
+**Guest agents** (project `agents/*.md`) can declare their own `mcp_servers` and `allowed_tools`; Anthem merges them with this global registry when dispatching a guest and writes the combined **`{workspace}/.mcp.json`** so Claude Code can attach to Unity and other stdio/HTTP MCP servers.
 
 Before each agent launch, Anthem writes `.mcp.json` and copies skills to `.claude/skills/` in the workspace. Claude Code auto-discovers both via its native three-level progressive loading.
 

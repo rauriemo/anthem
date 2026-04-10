@@ -15,8 +15,10 @@ import (
 	"github.com/rauriemo/anthem/internal/agent"
 	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/guests"
+	"github.com/rauriemo/anthem/internal/harness"
 	"github.com/rauriemo/anthem/internal/plans"
 	"github.com/rauriemo/anthem/internal/types"
+	"github.com/rauriemo/conduit/pkg/mcpconfig"
 )
 
 type GuestSummary struct {
@@ -276,13 +278,33 @@ type guestDispatchParams struct {
 	guestIndex     *guests.GuestIndex
 	storyStore     *StoryStore
 	proposalStore  *ProposalStore
-	directedText   map[string]string
-	logger         *slog.Logger
+	directedText      map[string]string
+	logger            *slog.Logger
+	globalMCPServers  map[string]mcpconfig.MCPServerRef
+	projectRoot       string
+	activeFeature     string
 }
 
 var planEditMu sync.Mutex
 
 func dispatchSelectedGuests(p guestDispatchParams) {
+	if p.guestIndex != nil && p.projectRoot != "" {
+		allServers := make(map[string]mcpconfig.MCPServerRef)
+		for k, v := range p.globalMCPServers {
+			allServers[k] = v
+		}
+		for _, gid := range p.selectedIDs {
+			for k, v := range p.guestIndex.Agents[gid].MCPServers {
+				allServers[k] = v
+			}
+		}
+		if len(allServers) > 0 {
+			if err := harness.WriteMCPConfig(p.projectRoot, allServers); err != nil {
+				p.logger.Warn("failed to write guest MCP config", "error", err)
+			}
+		}
+	}
+
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 3)
 
@@ -385,7 +407,23 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 				runOpts.AllowedTools = allowedTools
 			}
 
+			if p.activeFeature != "" {
+				if stErr := SetTaskActive(p.projectRoot, p.activeFeature, guestID, p.msg.Text); stErr != nil {
+					p.logger.Warn("failed to set task-state active", "guest", guestID, "error", stErr)
+				}
+			}
+
 			result, err := p.runner.Run(p.ctx, runOpts)
+
+			if p.activeFeature != "" {
+				output := ""
+				if result != nil && result.Output != "" {
+					output = truncateOutput(result.Output, 200)
+				}
+				if stErr := UpdateTaskState(p.projectRoot, p.activeFeature, guestID, "idle", output); stErr != nil {
+					p.logger.Warn("failed to update task-state", "guest", guestID, "error", stErr)
+				}
+			}
 
 			// Send stream-done
 			if p.channelMgr != nil {

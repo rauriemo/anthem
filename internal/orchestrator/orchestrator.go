@@ -1710,8 +1710,11 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 					guestIndex:     o.guestIndex,
 					storyStore:     o.storyStore,
 					proposalStore:  o.proposalStore,
-					directedText:   directedText,
-					logger:         o.logger,
+					directedText:      directedText,
+					logger:            o.logger,
+					globalMCPServers:  o.cfg.Agent.MCPServers,
+					projectRoot:       o.projectRoot(),
+					activeFeature:     o.cfg.ActiveFeature,
 				})
 			}()
 		}
@@ -2003,8 +2006,16 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 		allowedTools = resolveGuestTools(o.guestIndex.Agents[guestID])
 	}
 
-	// Run without streaming so display blocks can be extracted before
-	// any text reaches the frontend (matches routed guest dispatch path).
+	if o.guestIndex != nil {
+		guestServers := o.guestIndex.Agents[guestID].MCPServers
+		if len(guestServers) > 0 {
+			merged := harness.MergeGuestServers(o.cfg.Agent.MCPServers, guestServers)
+			if err := harness.WriteMCPConfig(o.projectRoot(), merged); err != nil {
+				o.logger.Warn("failed to write guest MCP config", "guest", guestID, "error", err)
+			}
+		}
+	}
+
 	mentionRunOpts := types.RunOpts{
 		Prompt:         prompt,
 		Model:          model,
@@ -2015,11 +2026,27 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 		mentionRunOpts.AllowedTools = allowedTools
 	}
 
+	if o.cfg.ActiveFeature != "" {
+		if err := SetTaskActive(o.projectRoot(), o.cfg.ActiveFeature, guestID, msg.Text); err != nil {
+			o.logger.Warn("failed to set task-state active", "guest", guestID, "error", err)
+		}
+	}
+
 	result, runErr := o.runner.Run(ctx, mentionRunOpts)
 
 	responseText := ""
 	if result != nil {
 		responseText = result.Output
+	}
+
+	if o.cfg.ActiveFeature != "" {
+		output := ""
+		if result != nil && result.Output != "" {
+			output = truncateOutput(result.Output, 200)
+		}
+		if err := UpdateTaskState(o.projectRoot(), o.cfg.ActiveFeature, guestID, "idle", output); err != nil {
+			o.logger.Warn("failed to update task-state", "guest", guestID, "error", err)
+		}
 	}
 
 	if runErr != nil {
