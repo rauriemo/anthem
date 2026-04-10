@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rauriemo/anthem/internal/config"
+	"github.com/rauriemo/anthem/internal/guests"
 )
 
 type testMCPJSON struct {
@@ -875,6 +876,79 @@ func TestMergeGuestServers_EmptyNonNilMaps(t *testing.T) {
 	)
 	if result != nil {
 		t.Errorf("expected nil for two empty non-nil maps, got %v", result)
+	}
+}
+
+func TestHTTPToolsToMCPServers(t *testing.T) {
+	tests := []struct {
+		name      string
+		tools     map[string]guests.HTTPToolConfig
+		wantKeys  []string
+		wantNil   bool
+		checkFunc func(t *testing.T, result map[string]config.MCPServerConfig)
+	}{
+		{
+			name:    "nil map",
+			tools:   nil,
+			wantNil: true,
+		},
+		{
+			name:    "empty map",
+			tools:   map[string]guests.HTTPToolConfig{},
+			wantNil: true,
+		},
+		{
+			name: "single tool",
+			tools: map[string]guests.HTTPToolConfig{
+				"nano-banana": {
+					URL:          "https://api.example.com/generate",
+					Method:       "POST",
+					AuthTokenEnv: "GEMINI_API_KEY",
+					AuthScheme:   "api-key",
+				},
+			},
+			wantKeys: []string{"http__nano-banana"},
+			checkFunc: func(t *testing.T, result map[string]config.MCPServerConfig) {
+				srv := result["http__nano-banana"]
+				if srv.Command != "anthem" {
+					t.Errorf("Command = %q, want %q", srv.Command, "anthem")
+				}
+				if len(srv.Args) != 1 || srv.Args[0] != "http-bridge" {
+					t.Errorf("Args = %v, want [http-bridge]", srv.Args)
+				}
+				if srv.Env["ANTHEM_HTTP_BRIDGE_CONFIG"] == "" {
+					t.Error("missing ANTHEM_HTTP_BRIDGE_CONFIG env")
+				}
+			},
+		},
+		{
+			name: "multiple tools",
+			tools: map[string]guests.HTTPToolConfig{
+				"tool-a": {URL: "http://a", Method: "GET"},
+				"tool-b": {URL: "http://b", Method: "POST"},
+			},
+			wantKeys: []string{"http__tool-a", "http__tool-b"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := HTTPToolsToMCPServers(tt.tools)
+			if tt.wantNil {
+				if result != nil {
+					t.Fatalf("expected nil, got %v", result)
+				}
+				return
+			}
+			for _, key := range tt.wantKeys {
+				if _, ok := result[key]; !ok {
+					t.Errorf("missing key %q", key)
+				}
+			}
+			if tt.checkFunc != nil {
+				tt.checkFunc(t, result)
+			}
+		})
 	}
 }
 

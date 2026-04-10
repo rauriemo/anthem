@@ -1,6 +1,8 @@
 package harness
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -8,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/rauriemo/anthem/internal/guests"
 	"github.com/rauriemo/conduit/pkg/mcpbridge"
 	"github.com/rauriemo/conduit/pkg/mcpconfig"
 )
@@ -123,6 +126,40 @@ func MergeGuestServers(global map[string]mcpconfig.MCPServerRef, guest map[strin
 		merged[k] = v
 	}
 	return merged
+}
+
+// HTTPToolsToMCPServers converts a map of http_tools configs into synthetic MCP server
+// refs that point to `anthem http-bridge`. Each tool gets its own bridge process with
+// the config passed via ANTHEM_HTTP_BRIDGE_CONFIG env var (base64-encoded JSON).
+func HTTPToolsToMCPServers(httpTools map[string]guests.HTTPToolConfig) map[string]mcpconfig.MCPServerRef {
+	if len(httpTools) == 0 {
+		return nil
+	}
+	result := make(map[string]mcpconfig.MCPServerRef, len(httpTools))
+	for id, cfg := range httpTools {
+		toolMap := map[string]guests.HTTPToolConfig{id: cfg}
+		data, err := json.Marshal(toolMap)
+		if err != nil {
+			continue
+		}
+		encoded := base64.StdEncoding.EncodeToString(data)
+
+		env := map[string]string{
+			"ANTHEM_HTTP_BRIDGE_CONFIG": encoded,
+		}
+		if cfg.AuthTokenEnv != "" {
+			env[cfg.AuthTokenEnv] = os.Getenv(cfg.AuthTokenEnv)
+		}
+
+		serverKey := fmt.Sprintf("http__%s", id)
+		result[serverKey] = mcpconfig.MCPServerRef{
+			Type:    mcpconfig.TransportStdio,
+			Command: "anthem",
+			Args:    []string{"http-bridge"},
+			Env:     env,
+		}
+	}
+	return result
 }
 
 // ResolveSkillRefs merges global baseline skills with profile-specific refs, deduplicating.

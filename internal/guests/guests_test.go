@@ -638,6 +638,15 @@ func TestParseFrontmatter_ToolPolicyFields(t *testing.T) {
 			errMsg:  "auth_scheme",
 		},
 		{
+			name:  "api-key auth_scheme is valid",
+			input: "---\nname: Agent\ndescription: test\nhttp_tools:\n  t:\n    url: http://x\n    method: POST\n    auth_scheme: api-key\n    auth_token_env: MY_KEY\n---\n",
+			check: func(t *testing.T, agent GuestAgent) {
+				if agent.HTTPTools["t"].AuthScheme != "api-key" {
+					t.Errorf("expected api-key auth_scheme, got %q", agent.HTTPTools["t"].AuthScheme)
+				}
+			},
+		},
+		{
 			name:  "empty auth_scheme is valid",
 			input: "---\nname: Agent\ndescription: test\nhttp_tools:\n  t:\n    url: http://x\n    method: GET\n---\n",
 			check: func(t *testing.T, agent GuestAgent) {

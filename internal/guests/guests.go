@@ -185,8 +185,8 @@ func ParseFrontmatter(data []byte) (GuestAgent, error) {
 	}
 
 	for name, tool := range fm.HTTPTools {
-		if tool.AuthScheme != "" && tool.AuthScheme != "bearer" {
-			return GuestAgent{}, fmt.Errorf("http_tools[%q]: auth_scheme must be \"bearer\" or empty, got %q", name, tool.AuthScheme)
+		if tool.AuthScheme != "" && tool.AuthScheme != "bearer" && tool.AuthScheme != "api-key" {
+			return GuestAgent{}, fmt.Errorf("http_tools[%q]: auth_scheme must be \"bearer\", \"api-key\", or empty, got %q", name, tool.AuthScheme)
 		}
 	}
 

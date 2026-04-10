@@ -85,6 +85,9 @@ func mergeMCPServersForSelectedGuests(global map[string]mcpconfig.MCPServerRef, 
 		for k, v := range ag.MCPServers {
 			merged[k] = v
 		}
+		for k, v := range harness.HTTPToolsToMCPServers(ag.HTTPTools) {
+			merged[k] = v
+		}
 	}
 	if len(merged) == 0 {
 		return nil

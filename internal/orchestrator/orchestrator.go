@@ -2010,6 +2010,11 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 	mergedMCP := harness.MergeGuestServers(o.cfg.Agent.MCPServers, nil)
 	if o.guestIndex != nil {
 		mergedMCP = harness.MergeGuestServers(o.cfg.Agent.MCPServers, o.guestIndex.Agents[guestID].MCPServers)
+		if agent := o.guestIndex.Agents[guestID]; agent.HTTPTools != nil {
+			for k, v := range harness.HTTPToolsToMCPServers(agent.HTTPTools) {
+				mergedMCP[k] = v
+			}
+		}
 	}
 	mcpActive := len(mergedMCP) > 0
 	if mcpActive && o.projectRoot() != "" {

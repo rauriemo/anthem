@@ -16,6 +16,7 @@ import (
 	"github.com/rauriemo/anthem/internal/agent/claude"
 	"github.com/rauriemo/anthem/internal/audit"
 	"github.com/rauriemo/anthem/internal/channel"
+	"github.com/rauriemo/anthem/internal/httpbridge"
 	dispatchch "github.com/rauriemo/anthem/internal/channel/dispatch"
 	prismch "github.com/rauriemo/anthem/internal/channel/prism"
 	slackch "github.com/rauriemo/anthem/internal/channel/slack"
@@ -53,6 +54,7 @@ func rootCmd() *cobra.Command {
 		runCmd(),
 		validateCmd(),
 		versionCmd(),
+		httpBridgeCmd(),
 	)
 
 	return root
@@ -484,6 +486,21 @@ func createFileIfNotExists(path, content string) error {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	return nil
+}
+
+func httpBridgeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "http-bridge",
+		Short:  "Run as an MCP stdio server bridging HTTP tool configs",
+		Hidden: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			tools, err := httpbridge.LoadConfigFromEnv()
+			if err != nil {
+				return fmt.Errorf("loading http-bridge config: %w", err)
+			}
+			return httpbridge.Run(tools, os.Stdin, os.Stdout)
+		},
+	}
 }
 
 func parseLogLevel(s string) slog.Level {
