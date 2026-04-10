@@ -2011,8 +2011,15 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 	if o.guestIndex != nil {
 		mergedMCP = harness.MergeGuestServers(o.cfg.Agent.MCPServers, o.guestIndex.Agents[guestID].MCPServers)
 		if agent := o.guestIndex.Agents[guestID]; agent.HTTPTools != nil {
-			for k, v := range harness.HTTPToolsToMCPServers(agent.HTTPTools) {
-				mergedMCP[k] = v
+			httpServers := harness.HTTPToolsToMCPServers(agent.HTTPTools)
+			if len(httpServers) > 0 {
+				if mergedMCP == nil {
+					mergedMCP = httpServers
+				} else {
+					for k, v := range httpServers {
+						mergedMCP[k] = v
+					}
+				}
 			}
 		}
 	}
