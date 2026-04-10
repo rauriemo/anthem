@@ -25,12 +25,20 @@ func NewPlatformProcessManager() *WindowsProcessManager {
 	}
 }
 
+// closeWinHandle closes a Windows handle (best-effort; errors are not propagated).
+func closeWinHandle(h windows.Handle) {
+	if h == 0 {
+		return
+	}
+	_ = windows.CloseHandle(h) //nolint:errcheck // best-effort cleanup during teardown
+}
+
 func (w *WindowsProcessManager) Start(cmd *exec.Cmd) error {
 	job, jobErr := createJobObject()
 
 	if err := cmd.Start(); err != nil {
 		if jobErr == nil {
-			windows.CloseHandle(job)
+			closeWinHandle(job)
 		}
 		return err
 	}
@@ -45,16 +53,16 @@ func (w *WindowsProcessManager) Start(cmd *exec.Cmd) error {
 		uint32(cmd.Process.Pid),
 	)
 	if err != nil {
-		windows.CloseHandle(job)
+		closeWinHandle(job)
 		return nil
 	}
 
 	if err := windows.AssignProcessToJobObject(job, proc); err != nil {
-		windows.CloseHandle(proc)
-		windows.CloseHandle(job)
+		closeWinHandle(proc)
+		closeWinHandle(job)
 		return nil
 	}
-	windows.CloseHandle(proc)
+	closeWinHandle(proc)
 
 	w.mu.Lock()
 	w.jobs[cmd] = job
@@ -79,7 +87,7 @@ func createJobObject() (windows.Handle, error) {
 		uint32(unsafe.Sizeof(info)),
 	)
 	if err != nil {
-		windows.CloseHandle(job)
+		closeWinHandle(job)
 		return 0, err
 	}
 
@@ -96,7 +104,7 @@ func (w *WindowsProcessManager) terminateJob(cmd *exec.Cmd) error {
 
 	if ok {
 		err := windows.TerminateJobObject(job, 1)
-		windows.CloseHandle(job)
+		closeWinHandle(job)
 		return err
 	}
 
