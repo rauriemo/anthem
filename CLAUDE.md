@@ -146,6 +146,225 @@ These are the source of truth for what to build and how.
 
 **Phase 5 (future)**: WhatsApp channel adapter, GoReleaser binaries, code signing, demo video.
 
+## MCP Platform -- Active Build Scope
+
+This section describes the current work-in-progress: integrating shared feature context, tool brokering, and artifact pipelines into the guest agent system.
+
+### Architecture Overview
+
+Three tool types for guest agents:
+- **MCP tools** -- persistent, stateful connections to complex tool surfaces (Unity Editor via mcp-unity). Managed via Conduit Pool (`github.com/rauriemo/conduit/pkg/mcpclient`).
+- **Brokered HTTP/API tools** -- simple request/response calls to external APIs (image generation, video generation, 3D conversion). Anthem brokers these natively.
+- **Pure reasoning agents** -- story, design, review agents. No tools; value comes from seeing shared feature context.
+
+Anthem is the brokered execution engine for both MCP and HTTP/API tool calls. The model never calls tools directly -- Anthem intercepts `tool_use` blocks, enforces allowlists, executes the call, and injects the result back.
+
+### Phase 1a: Context + Policy (current priority)
+
+**1. Shared Feature Context (`.context/`)**
+
+Projects (e.g. RebelTower) contain a `.context/features/{feature-name}/` directory with four files:
+- `plan.md` -- YAML frontmatter (`schema_version`, `feature`, `phase`, `owner`) + markdown body
+- `decisions.yaml` -- structured decision log (`schema_version: "1"`, list of decisions with `id`, `date`, `decision`, `rationale`, `decided_by`, `status: draft|final|superseded`, `affects`)
+- `artifacts.yaml` -- asset/output registry (`schema_version: "1"`, list of artifacts with `id`, `type`, `path`, `created_by`, `created_at`, `feature`, `status: draft|pending-review|approved|rejected`, `approved_by`, `description`, `source_artifact`, `tags`)
+- `task-state.yaml` -- agent activity (`schema_version: "1"`, `feature`, `phase`, `updated_at`, `agents` map with `status: idle|active|blocked|done`, `current_task`, `last_output`, `last_updated`)
+
+**2. Context Hydration**
+
+On guest dispatch, Anthem reads `.context/features/{active-feature}/` and injects a context block into the guest system prompt:
+
+```
+## Feature Context: {feature name}
+Phase: {phase}
+
+### Plan Summary
+[contents of plan.md body]
+
+### Recent Decisions
+[final entries from decisions.yaml]
+
+### Available Artifacts
+[entries from artifacts.yaml where status != rejected]
+
+### Your Activity
+[this agent's section from task-state.yaml]
+```
+
+Implementation: new function in `internal/orchestrator/` that reads `.context/` files from the project workspace, parses YAML/frontmatter, and constructs the injection string. Called before guest prompt construction in `dispatchSelectedGuests`.
+
+The active feature is determined from WORKFLOW.md frontmatter (new `active_feature` field) or from user message context.
+
+TODO (post-v1): add relevance filtering as artifacts.yaml grows (cap by recency, e.g. last 20).
+
+**3. Guest Policy Fields**
+
+Add to `internal/guests/guests.go`:
+
+```go
+type frontmatter struct {
+    // ... existing fields ...
+    AllowedTools []string                             `yaml:"allowed_tools"`
+    MCPServers   map[string]mcpconfig.MCPServerRef    `yaml:"mcp_servers"`
+    HTTPTools    map[string]HTTPToolConfig             `yaml:"http_tools"`
+}
+
+type GuestAgent struct {
+    // ... existing fields ...
+    AllowedTools []string                             `json:"allowed_tools,omitempty"`
+    MCPServers   map[string]mcpconfig.MCPServerRef    `json:"mcp_servers,omitempty"`
+    HTTPTools    map[string]HTTPToolConfig             `json:"http_tools,omitempty"`
+}
+```
+
+`MCPServerRef` comes from `github.com/rauriemo/conduit/pkg/mcpconfig` (Phase 1b import). Until then, define a local placeholder struct with the same shape.
+
+`HTTPToolConfig` is Anthem-native:
+
+```go
+type HTTPToolConfig struct {
+    URL              string            `yaml:"url" json:"url"`
+    Method           string            `yaml:"method" json:"method"`
+    AuthTokenEnv     string            `yaml:"auth_token_env,omitempty" json:"auth_token_env,omitempty"`
+    AuthScheme       string            `yaml:"auth_scheme,omitempty" json:"auth_scheme,omitempty"` // v1: "bearer" only
+    RequestTemplate  map[string]any    `yaml:"request_template,omitempty" json:"request_template,omitempty"`
+    ResponseArtifact *ArtifactTemplate `yaml:"response_artifact,omitempty" json:"response_artifact,omitempty"`
+    TimeoutMS        int               `yaml:"timeout_ms,omitempty" json:"timeout_ms,omitempty"`
+    Description      string            `yaml:"description,omitempty" json:"description,omitempty"`
+}
+
+type ArtifactTemplate struct {
+    Type   string `yaml:"type" json:"type"`
+    SaveTo string `yaml:"save_to" json:"save_to"`
+}
+```
+
+Validation: `auth_scheme` must be `"bearer"` or empty in v1. Reject other values at parse time.
+
+**4. Replace resolveGuestTools**
+
+Current `resolveGuestTools` in `guestdispatch.go` (line 585) uses a binary fingerprint check. Replace with:
+
+```go
+func resolveGuestTools(agent guests.GuestAgent) []string {
+    if len(agent.AllowedTools) > 0 {
+        return agent.AllowedTools
+    }
+    // Backward compat: fall back to fingerprint check for agents without allowed_tools
+    fp := agent.RequirementsFingerprint
+    emptyFP := "sha256:" + fmt.Sprintf("%x", sha256Sum(nil))
+    if fp == emptyFP || fp == "" {
+        return nil
+    }
+    return []string{"WebSearch", "WebFetch"}
+}
+```
+
+**5. Allowlist Enforcement**
+
+New function:
+
+```go
+func isToolAllowed(toolName string, allowedTools []string) bool
+```
+
+- Empty `allowedTools` with non-empty tool declarations = deny all (deny-by-default)
+- Wildcard: `mcp__mcp-unity__*` matches all mcp-unity tools
+- Wildcard: `http__image_gen__*` matches all image gen operations
+- Exact: `WebSearch` matches only WebSearch
+- No match = denied, error returned to Claude
+
+### Phase 1b: Conduit Import (after Phase 1a validation)
+
+After Phase 1a is validated end-to-end (dispatch a guest agent, confirm context injection works):
+
+1. `go get github.com/rauriemo/conduit`
+2. Replace `config.MCPServerConfig` (line 81 in `internal/config/config.go`) with `mcpconfig.MCPServerRef`
+3. Replace `harness.WriteMCPConfig` (line 28 in `internal/harness/harness.go`) with `mcpbridge.WriteMCPConfig`
+4. Remove local `mcpJSON`/`mcpServerEntry` structs from harness.go
+
+### Phase 2: Brokered Execution (after Conduit import)
+
+**Brokered MCP Execution:**
+- On guest dispatch, if `MCPServers` is non-empty, connect Conduit Pool to each declared server
+- In the agentic loop, when Claude emits `tool_use` with name starting `mcp__`: check allowlist, call `Pool.CallTool`, inject result
+- Tool name format: `mcp__{server-name}__{tool-name}`
+
+**Brokered HTTP/API Execution:**
+- On guest dispatch, if `HTTPTools` is non-empty, expose each as a tool definition to the Claude API
+- In the agentic loop, when Claude emits `tool_use` with name starting `http__`: check allowlist, render request template via `${input.*}` simple substitution (no Go `text/template`), sanitize `save_to` path (must stay within project root), execute HTTP request, save artifact, register in `artifacts.yaml`, inject result
+- Tool name format: `http__{tool-name}__{operation}`
+
+**Template engine (v1):** `${input.prompt}` is replaced with the value of `input.prompt` from tool_use input. No expression evaluation, no conditionals. Prevents template injection.
+
+**Path sanitization:** `response_artifact.save_to` is canonicalized after substitution. Reject any path that escapes the project root (`../` traversal).
+
+**Artifact Registration:**
+- Write to `artifacts.yaml` in the feature directory
+- Use `sync.Mutex` keyed by feature path to serialize concurrent writes
+- Set `status: pending-review`, `created_by: {agent-role}`
+- Update `task-state.yaml` agent section on dispatch (active) and completion (idle)
+
+**Unified Brokered Execution Loop:**
+
+```
+while Claude has not emitted final response:
+    response = call Claude API with messages + tool definitions
+
+    if response contains tool_use:
+        for each tool_use block:
+            if tool name starts with "mcp__":
+                check allowlist -> Pool.CallTool (Conduit)
+            elif tool name starts with "http__":
+                check allowlist -> render template -> HTTP request -> save artifact
+            else:
+                check allowlist -> built-in tool handler (WebSearch, etc.)
+            inject tool_result into conversation
+
+    elif response is final text:
+        update task-state.yaml
+        send notification if configured
+        break
+```
+
+**Notifications:** On agent completion, send structured message to Prism:
+
+```json
+{
+  "type": "agent_completed",
+  "agent": "2d-artist",
+  "feature": "tower-defense-level-1",
+  "artifacts": [{"id": "...", "path": "...", "status": "pending-review"}],
+  "message": "Generated goblin enemy sprite sheet (4-frame walk cycle)"
+}
+```
+
+### Security Constraints
+
+- `auth_scheme`: v1 supports `bearer` only. Validate at frontmatter parse time.
+- Auth tokens: NEVER written to files. Only env var names stored. Resolved via `os.Getenv` at call time. If env var is empty, fail with clear error.
+- Allowlists: per-guest, not per-server. Deny-by-default.
+- Path sanitization: `save_to` must resolve within project root. Reject `../` traversal.
+- Audit: log every tool invocation (tool name, agent, timestamp, success/failure). Log failed permission checks.
+
+### Key Files to Modify
+
+- `internal/guests/guests.go` -- add `AllowedTools`, `MCPServers`, `HTTPTools` to frontmatter/GuestAgent structs, add `HTTPToolConfig`/`ArtifactTemplate` types
+- `internal/orchestrator/guestdispatch.go` -- replace `resolveGuestTools`, add `isToolAllowed`, wire context hydration into dispatch, add brokered execution loop
+- `internal/config/config.go` -- `MCPServerConfig` will be replaced with Conduit import (Phase 1b)
+- `internal/harness/harness.go` -- `WriteMCPConfig` will be replaced with Conduit bridge (Phase 1b)
+- New file: `internal/orchestrator/context.go` (or similar) -- context hydration logic
+- New file: `internal/orchestrator/toolbroker.go` (or similar) -- brokered execution engine
+
+### Testing Requirements
+
+- Frontmatter parsing: verify `AllowedTools`, `MCPServers`, `HTTPTools` parse correctly, verify `auth_scheme` validation rejects non-bearer
+- `isToolAllowed`: wildcard matching, exact matching, deny-by-default, empty allowlist
+- Path sanitization: reject `../` traversal, accept valid paths
+- Context hydration: read `.context/` files, verify injection format
+- Artifact registration: append to `artifacts.yaml`, verify mutex serialization
+- Brokered HTTP execution: template substitution, HTTP call, artifact save (integration test with httptest)
+- Brokered MCP execution: Pool.CallTool mock (integration test)
+
 **Post-Phase 4 work completed** (Plan Modes, Model Selection, Label Automation):
 - Plan/build/agent channel modes: `[system:plan]` routes to markdown planning (saved to `~/.anthem/plans/`), `[system:build]` routes to subtask creation from approved plan, default routes to full agent mode with plan context injected.
 - Model selection: `[model:xxx]` tag parsed from messages and threaded to all execution paths (lean, plan, build, agent). Supports all Claude model variants.
