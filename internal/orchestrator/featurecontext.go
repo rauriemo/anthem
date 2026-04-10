@@ -11,13 +11,13 @@ import (
 )
 
 type DecisionEntry struct {
-	ID        string `yaml:"id"`
-	Date      string `yaml:"date"`
-	Decision  string `yaml:"decision"`
-	Rationale string `yaml:"rationale"`
-	DecidedBy string `yaml:"decided_by"`
-	Status    string `yaml:"status"`
-	Affects   string `yaml:"affects"`
+	ID        string   `yaml:"id"`
+	Date      string   `yaml:"date"`
+	Decision  string   `yaml:"decision"`
+	Rationale string   `yaml:"rationale"`
+	DecidedBy string   `yaml:"decided_by"`
+	Status    string   `yaml:"status"`
+	Affects   []string `yaml:"affects"`
 }
 
 type DecisionsFile struct {
@@ -26,17 +26,17 @@ type DecisionsFile struct {
 }
 
 type ArtifactEntry struct {
-	ID             string `yaml:"id"`
-	Type           string `yaml:"type"`
-	Path           string `yaml:"path"`
-	CreatedBy      string `yaml:"created_by"`
-	CreatedAt      string `yaml:"created_at"`
-	Feature        string `yaml:"feature"`
-	Status         string `yaml:"status"`
-	ApprovedBy     string `yaml:"approved_by"`
-	Description    string `yaml:"description"`
-	SourceArtifact string `yaml:"source_artifact"`
-	Tags           string `yaml:"tags"`
+	ID             string   `yaml:"id"`
+	Type           string   `yaml:"type"`
+	Path           string   `yaml:"path"`
+	CreatedBy      string   `yaml:"created_by"`
+	CreatedAt      string   `yaml:"created_at"`
+	Feature        string   `yaml:"feature"`
+	Status         string   `yaml:"status"`
+	ApprovedBy     string   `yaml:"approved_by"`
+	Description    string   `yaml:"description"`
+	SourceArtifact string   `yaml:"source_artifact"`
+	Tags           []string `yaml:"tags"`
 }
 
 type ArtifactsFile struct {

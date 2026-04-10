@@ -1,7 +1,6 @@
 package harness
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -9,42 +8,26 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/rauriemo/anthem/internal/config"
+	"github.com/rauriemo/conduit/pkg/mcpbridge"
+	"github.com/rauriemo/conduit/pkg/mcpconfig"
 )
 
-// mcpJSON matches Claude Code's .mcp.json schema.
-type mcpJSON struct {
-	MCPServers map[string]mcpServerEntry `json:"mcpServers"`
-}
-
-type mcpServerEntry struct {
-	Command string            `json:"command"`
-	Args    []string          `json:"args,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-}
-
 // WriteMCPConfig writes a .mcp.json file into wsPath that Claude Code auto-discovers.
-// If servers is empty, no file is written.
-func WriteMCPConfig(wsPath string, servers map[string]config.MCPServerConfig) error {
+// Delegates to conduit's mcpbridge package. Applies backward-compat migration for
+// servers that have a Command but no explicit Type (defaults to stdio).
+func WriteMCPConfig(wsPath string, servers map[string]mcpconfig.MCPServerRef) error {
 	if len(servers) == 0 {
 		return nil
 	}
 
-	out := mcpJSON{MCPServers: make(map[string]mcpServerEntry, len(servers))}
-	for name, s := range servers {
-		out.MCPServers[name] = mcpServerEntry{
-			Command: s.Command,
-			Args:    s.Args,
-			Env:     s.Env,
+	migrated := make(map[string]mcpconfig.MCPServerRef, len(servers))
+	for name, ref := range servers {
+		if ref.Type == "" && ref.Command != "" {
+			ref.Type = mcpconfig.TransportStdio
 		}
+		migrated[name] = ref
 	}
-
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal mcp config: %w", err)
-	}
-
-	return os.WriteFile(filepath.Join(wsPath, ".mcp.json"), data, 0644)
+	return mcpbridge.WriteMCPConfig(wsPath, migrated)
 }
 
 // PrepareSkills copies skill directories into the workspace's .claude/skills/ directory
@@ -102,8 +85,8 @@ func PrepareSkills(wsPath string, skillRefs []string, builtinDir string, logger 
 }
 
 // ResolveMCPServers merges global baseline servers with profile-specific refs.
-func ResolveMCPServers(registry map[string]config.MCPServerConfig, globalRefs []string, profileRefs []string) map[string]config.MCPServerConfig {
-	merged := make(map[string]config.MCPServerConfig)
+func ResolveMCPServers(registry map[string]mcpconfig.MCPServerRef, globalRefs []string, profileRefs []string) map[string]mcpconfig.MCPServerRef {
+	merged := make(map[string]mcpconfig.MCPServerRef)
 
 	// Global baseline: all servers in the registry are available to all agents
 	// (the registry itself is the global baseline in the current design)

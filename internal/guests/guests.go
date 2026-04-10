@@ -12,18 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rauriemo/conduit/pkg/mcpconfig"
 	"gopkg.in/yaml.v3"
 )
-
-// MCPServerRef is a local placeholder matching the shape of
-// mcpconfig.MCPServerRef from github.com/rauriemo/conduit/pkg/mcpconfig.
-// It will be replaced by the Conduit import in Phase 1b.
-type MCPServerRef struct {
-	Command string            `yaml:"command" json:"command"`
-	Args    []string          `yaml:"args,omitempty" json:"args,omitempty"`
-	Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
-	URL     string            `yaml:"url,omitempty" json:"url,omitempty"`
-}
 
 type ArtifactTemplate struct {
 	Type   string `yaml:"type" json:"type"`
@@ -42,21 +33,21 @@ type HTTPToolConfig struct {
 }
 
 type GuestAgent struct {
-	ID                      string                      `json:"id"`
-	Name                    string                      `json:"name"`
-	Description             string                      `json:"description"`
-	Role                    string                      `json:"role,omitempty"`
-	Capabilities            []string                    `json:"capabilities,omitempty"`
-	Icon                    string                      `json:"icon,omitempty"`
-	Model                   string                      `json:"model,omitempty"`
-	Quotes                  []string                    `json:"quotes,omitempty"`
-	RequirementsFingerprint string                      `json:"requirements_fingerprint"`
-	AllowedTools            []string                    `json:"allowed_tools,omitempty"`
-	MCPServers              map[string]MCPServerRef     `json:"mcp_servers,omitempty"`
-	HTTPTools               map[string]HTTPToolConfig   `json:"http_tools,omitempty"`
-	Scope                   string                      `json:"scope"`
-	Source                  string                      `json:"source"`
-	File                    string                      `json:"file"`
+	ID                      string                            `json:"id"`
+	Name                    string                            `json:"name"`
+	Description             string                            `json:"description"`
+	Role                    string                            `json:"role,omitempty"`
+	Capabilities            []string                          `json:"capabilities,omitempty"`
+	Icon                    string                            `json:"icon,omitempty"`
+	Model                   string                            `json:"model,omitempty"`
+	Quotes                  []string                          `json:"quotes,omitempty"`
+	RequirementsFingerprint string                            `json:"requirements_fingerprint"`
+	AllowedTools            []string                          `json:"allowed_tools,omitempty"`
+	MCPServers              map[string]mcpconfig.MCPServerRef `json:"mcp_servers,omitempty"`
+	HTTPTools               map[string]HTTPToolConfig         `json:"http_tools,omitempty"`
+	Scope                   string                            `json:"scope"`
+	Source                  string                            `json:"source"`
+	File                    string                            `json:"file"`
 }
 
 type GuestIndex struct {
@@ -66,17 +57,17 @@ type GuestIndex struct {
 }
 
 type frontmatter struct {
-	Name         string                       `yaml:"name"`
-	Description  string                       `yaml:"description"`
-	Model        string                       `yaml:"model"`
-	Role         string                       `yaml:"role"`
-	Capabilities []string                     `yaml:"capabilities"`
-	Icon         string                       `yaml:"icon"`
-	Quotes       []string                     `yaml:"quotes"`
-	Requirements map[string]any               `yaml:"requirements"`
-	AllowedTools []string                     `yaml:"allowed_tools"`
-	MCPServers   map[string]MCPServerRef      `yaml:"mcp_servers"`
-	HTTPTools    map[string]HTTPToolConfig     `yaml:"http_tools"`
+	Name         string                            `yaml:"name"`
+	Description  string                            `yaml:"description"`
+	Model        string                            `yaml:"model"`
+	Role         string                            `yaml:"role"`
+	Capabilities []string                          `yaml:"capabilities"`
+	Icon         string                            `yaml:"icon"`
+	Quotes       []string                          `yaml:"quotes"`
+	Requirements map[string]any                    `yaml:"requirements"`
+	AllowedTools []string                          `yaml:"allowed_tools"`
+	MCPServers   map[string]mcpconfig.MCPServerRef `yaml:"mcp_servers"`
+	HTTPTools    map[string]HTTPToolConfig         `yaml:"http_tools"`
 }
 
 const indexFile = ".agents-index.json"

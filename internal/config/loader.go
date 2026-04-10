@@ -8,6 +8,7 @@ import (
 	"text/template"
 
 	"github.com/Masterminds/sprig/v3"
+	"github.com/rauriemo/conduit/pkg/mcpconfig"
 	"gopkg.in/yaml.v3"
 )
 
@@ -40,7 +41,20 @@ func Parse(data []byte) (*Config, string, error) {
 		return nil, "", fmt.Errorf("parsing YAML front matter: %w", err)
 	}
 
+	migrateMCPServers(cfg.Agent.MCPServers)
+
 	return &cfg, string(body), nil
+}
+
+// migrateMCPServers defaults Type to "stdio" for servers that have a Command
+// but no explicit Type, providing backward compatibility with pre-Conduit configs.
+func migrateMCPServers(servers map[string]mcpconfig.MCPServerRef) {
+	for name, ref := range servers {
+		if ref.Type == "" && ref.Command != "" {
+			ref.Type = mcpconfig.TransportStdio
+			servers[name] = ref
+		}
+	}
 }
 
 // RenderBody renders the template body with the given data using sprig functions.

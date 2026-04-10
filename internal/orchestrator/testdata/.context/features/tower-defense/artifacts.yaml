@@ -10,7 +10,9 @@ artifacts:
     approved_by: art-director
     description: Goblin enemy walk cycle sprite sheet
     source_artifact: ""
-    tags: sprite,enemy
+    tags:
+      - sprite
+      - enemy
   - id: a002
     type: image/png
     path: assets/sprites/arrow-tower.png
@@ -21,7 +23,9 @@ artifacts:
     approved_by: ""
     description: Arrow tower sprite
     source_artifact: ""
-    tags: sprite,tower
+    tags:
+      - sprite
+      - tower
   - id: a003
     type: image/png
     path: assets/sprites/rejected-goblin.png
@@ -32,4 +36,6 @@ artifacts:
     approved_by: ""
     description: Old goblin design (rejected)
     source_artifact: ""
-    tags: sprite,enemy
+    tags:
+      - sprite
+      - enemy

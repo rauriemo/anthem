@@ -1983,11 +1983,19 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 		}
 	}
 
+	featureCtx := ""
+	if o.cfg.ActiveFeature != "" {
+		if fc, err := HydrateFeatureContext(o.projectRoot(), o.cfg.ActiveFeature); err == nil {
+			featureCtx = fc
+		}
+	}
+
 	prompt := buildGuestPrompt(persona, projectSummary, sharedCtxText, history, msg.Text, GuestPromptOpts{
-		Mode:         mode,
-		ChannelKind:  msg.ChannelKind,
-		PlanContent:  planContent,
-		StoryContext: storyCtx,
+		Mode:           mode,
+		ChannelKind:    msg.ChannelKind,
+		PlanContent:    planContent,
+		StoryContext:   storyCtx,
+		FeatureContext: featureCtx,
 	})
 
 	var allowedTools []string

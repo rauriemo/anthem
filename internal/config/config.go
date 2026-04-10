@@ -1,5 +1,7 @@
 package config
 
+import "github.com/rauriemo/conduit/pkg/mcpconfig"
+
 type Config struct {
 	Tracker         TrackerConfig         `yaml:"tracker"`
 	Polling         PollingConfig         `yaml:"polling"`
@@ -66,7 +68,7 @@ type AgentConfig struct {
 	MaxRetryBackoffMS     int                        `yaml:"max_retry_backoff_ms"`
 	AllowedTools          []string                   `yaml:"allowed_tools"`
 	Model                 string                     `yaml:"model"`
-	MCPServers            map[string]MCPServerConfig `yaml:"mcp_servers"`
+	MCPServers            map[string]mcpconfig.MCPServerRef `yaml:"mcp_servers"`
 	Skills                []string                   `yaml:"skills"`
 	PermissionMode        string                     `yaml:"permission_mode"`
 	SkipPermissions       bool                       `yaml:"skip_permissions"`
@@ -79,11 +81,9 @@ type AgentConfig struct {
 	Profiles              map[string]AgentProfile    `yaml:"profiles,omitempty"`
 }
 
-type MCPServerConfig struct {
-	Command string            `yaml:"command"`
-	Args    []string          `yaml:"args"`
-	Env     map[string]string `yaml:"env,omitempty"`
-}
+// MCPServerConfig is a backward-compatible alias for mcpconfig.MCPServerRef.
+// Existing YAML configs that omit "type" are migrated via MigrateMCPServers.
+type MCPServerConfig = mcpconfig.MCPServerRef
 
 type AgentProfile struct {
 	PromptPrefix  string   `yaml:"prompt_prefix"`

@@ -9,6 +9,17 @@ import (
 	"github.com/rauriemo/anthem/internal/config"
 )
 
+type testMCPJSON struct {
+	MCPServers map[string]testMCPEntry `json:"mcpServers"`
+}
+
+type testMCPEntry struct {
+	Command string            `json:"command"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	URL     string            `json:"url,omitempty"`
+}
+
 func TestWriteMCPConfig_SingleServer(t *testing.T) {
 	dir := t.TempDir()
 	servers := map[string]config.MCPServerConfig{
@@ -24,7 +35,7 @@ func TestWriteMCPConfig_SingleServer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var out mcpJSON
+	var out testMCPJSON
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +70,7 @@ func TestWriteMCPConfig_MultipleServers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var out mcpJSON
+	var out testMCPJSON
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +117,7 @@ func TestWriteMCPConfig_OverwritesExisting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var out mcpJSON
+	var out testMCPJSON
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +145,7 @@ func TestWriteMCPConfig_EnvVars(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var out mcpJSON
+	var out testMCPJSON
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatal(err)
 	}
