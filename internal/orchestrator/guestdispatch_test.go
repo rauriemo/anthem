@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/rauriemo/anthem/internal/agent"
+	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/guests"
 	"github.com/rauriemo/anthem/internal/types"
 )
@@ -728,4 +731,144 @@ func (m *mockSuggestRunner) Kill(_ int) error {
 
 func testSuggestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestDispatchSelectedGuests_StreamsDeltas(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	agentsDir := dir + "/agents"
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agentsDir+"/artist.md", []byte("---\nname: Artist\ndescription: draws things\nrole: artist\n---\nYou are an artist."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		if opts.OnStream != nil {
+			opts.OnStream("Hello ")
+			opts.OnStream("world")
+		}
+		return &types.RunResult{Output: "Hello world"}, nil
+	}
+
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	idx := &guests.GuestIndex{
+		Agents: map[string]guests.GuestAgent{
+			"artist": {ID: "artist", Name: "Artist", Description: "draws things"},
+		},
+	}
+
+	dispatchSelectedGuests(guestDispatchParams{
+		ctx:         context.Background(),
+		selectedIDs: []string{"artist"},
+		msg: channel.IncomingMessage{
+			ChannelKind: "test",
+			ThreadID:    "t1",
+			Text:        "Draw something",
+		},
+		guestsDir:  agentsDir,
+		runner:     runner,
+		sharedCtx:  NewSharedContext(),
+		convoBuf:   NewConvoBuffer(),
+		channelMgr: mgr,
+		logger:     testSuggestLogger(),
+		guestIndex: idx,
+	})
+
+	sent := ch.sentMessages()
+	var deltas []string
+	doneCount := 0
+	var textMsgs []string
+	for _, m := range sent {
+		if m.StreamDelta != "" {
+			deltas = append(deltas, m.StreamDelta)
+			if m.GuestID != "artist" {
+				t.Errorf("stream delta GuestID = %q, want artist", m.GuestID)
+			}
+			if m.ThreadID != "t1" {
+				t.Errorf("stream delta ThreadID = %q, want t1", m.ThreadID)
+			}
+		}
+		if m.StreamDone {
+			doneCount++
+			if m.GuestID != "artist" {
+				t.Errorf("stream done GuestID = %q, want artist", m.GuestID)
+			}
+		}
+		if m.Text != "" && !strings.HasPrefix(m.Text, "[") {
+			textMsgs = append(textMsgs, m.Text)
+		}
+	}
+
+	if len(deltas) == 0 {
+		t.Fatal("expected at least one stream delta, got none")
+	}
+	if doneCount != 1 {
+		t.Errorf("expected 1 stream done, got %d", doneCount)
+	}
+	if len(textMsgs) > 0 {
+		t.Errorf("expected no duplicate final Text (content was streamed), got %v", textMsgs)
+	}
+}
+
+func TestDispatchSelectedGuests_StreamDoneOnError(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	agentsDir := dir + "/agents"
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agentsDir+"/broken.md", []byte("---\nname: Broken\ndescription: fails\nrole: test\n---\nFails."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return nil, fmt.Errorf("simulated failure")
+	}
+
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	idx := &guests.GuestIndex{
+		Agents: map[string]guests.GuestAgent{
+			"broken": {ID: "broken", Name: "Broken", Description: "fails"},
+		},
+	}
+
+	dispatchSelectedGuests(guestDispatchParams{
+		ctx:         context.Background(),
+		selectedIDs: []string{"broken"},
+		msg: channel.IncomingMessage{
+			ChannelKind: "test",
+			ThreadID:    "t2",
+			Text:        "Do something",
+		},
+		guestsDir:  agentsDir,
+		runner:     runner,
+		sharedCtx:  NewSharedContext(),
+		convoBuf:   NewConvoBuffer(),
+		channelMgr: mgr,
+		logger:     testSuggestLogger(),
+		guestIndex: idx,
+	})
+
+	sent := ch.sentMessages()
+	doneCount := 0
+	for _, m := range sent {
+		if m.StreamDone {
+			doneCount++
+		}
+	}
+	if doneCount != 1 {
+		t.Errorf("expected StreamDone even on error, got %d", doneCount)
+	}
 }

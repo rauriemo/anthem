@@ -432,18 +432,18 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			// Send stream-start indicator
-			if p.channelMgr != nil {
-				_ = p.channelMgr.Broadcast(p.ctx, channel.OutgoingMessage{
-					StreamDelta: "",
-					GuestID:     guestID,
-					ThreadID:    p.msg.ThreadID,
-				})
-			}
-
 			var fullText strings.Builder
+			streamed := false
 			onStream := func(delta string) {
 				fullText.WriteString(delta)
+				streamed = true
+				if p.channelMgr != nil {
+					_ = p.channelMgr.Broadcast(p.ctx, channel.OutgoingMessage{
+						StreamDelta: delta,
+						GuestID:     guestID,
+						ThreadID:    p.msg.ThreadID,
+					})
+				}
 			}
 
 			runOpts := types.RunOpts{
@@ -565,9 +565,11 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 				}
 			}
 
-			// Guests run silently (no stream deltas to chat), so always
-			// send the final text as a single chat message.
-			if p.channelMgr != nil && chatText != "" {
+			// Send final text only when content differs from what was
+			// streamed (e.g. display extraction, plan/story edits, or
+			// displayIDs that need attaching).
+			skipFinal := streamed && chatText == responseText && len(displayIDs) == 0
+			if p.channelMgr != nil && chatText != "" && !skipFinal {
 				_ = p.channelMgr.Broadcast(p.ctx, channel.OutgoingMessage{
 					Text:       chatText,
 					GuestID:    guestID,

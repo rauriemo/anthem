@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -526,5 +527,99 @@ func TestHandleUserMessage_IncludesOrchestratorWithSystemTag(t *testing.T) {
 
 	if atomic.LoadInt64(&leanCalls) == 0 {
 		t.Error("expected lean handler to run for system tag even with active guests, but it was not called")
+	}
+}
+
+func TestHandleGuestMention_StreamsDeltas(t *testing.T) {
+	dir := t.TempDir()
+	agentsDir := dir + "/agents"
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agentsDir+"/writer-1.md", []byte("---\nname: Writer\ndescription: writes\nrole: writer\n---\nYou write."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	guestRunner := agent.NewMockRunner()
+	guestRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		if opts.OnStream != nil {
+			opts.OnStream("Once ")
+			opts.OnStream("upon a time.")
+		}
+		return &types.RunResult{Output: "Once upon a time."}, nil
+	}
+
+	orchRunner := agent.NewMockRunner()
+
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, 0, 0, testLogger())
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = dir
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "{{.issue.title}}",
+		Tracker:        tracker.NewMockTracker(nil),
+		Runner:         guestRunner,
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		OrchAgent:      orchAgent,
+		ChannelManager: mgr,
+	})
+
+	orch.guestIndex = &guests.GuestIndex{
+		Agents: map[string]guests.GuestAgent{
+			"writer-1": {ID: "writer-1", Name: "Writer", Description: "writes"},
+		},
+	}
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind:  "test",
+		SenderID:     "user-1",
+		ThreadID:     "thread-mention",
+		Text:         "Tell me a story",
+		ActiveGuests: []string{"writer-1"},
+		Mention:      "writer-1",
+		Timestamp:    time.Now(),
+	})
+
+	sent := ch.sentMessages()
+	var deltas []string
+	doneCount := 0
+	var textMsgs []string
+	for _, m := range sent {
+		if m.StreamDelta != "" {
+			deltas = append(deltas, m.StreamDelta)
+			if m.GuestID != "writer-1" {
+				t.Errorf("stream delta GuestID = %q, want writer-1", m.GuestID)
+			}
+			if m.ThreadID != "thread-mention" {
+				t.Errorf("stream delta ThreadID = %q, want thread-mention", m.ThreadID)
+			}
+		}
+		if m.StreamDone {
+			doneCount++
+			if m.GuestID != "writer-1" {
+				t.Errorf("stream done GuestID = %q, want writer-1", m.GuestID)
+			}
+		}
+		if m.Text != "" && !m.Ack {
+			textMsgs = append(textMsgs, m.Text)
+		}
+	}
+
+	if len(deltas) < 2 {
+		t.Fatalf("expected at least 2 stream deltas, got %d: %v", len(deltas), deltas)
+	}
+	if doneCount != 1 {
+		t.Errorf("expected 1 stream done, got %d", doneCount)
+	}
+	if len(textMsgs) > 0 {
+		t.Errorf("expected no duplicate final Text (content was streamed), got %v", textMsgs)
 	}
 }

@@ -2030,11 +2030,24 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 		}
 	}
 
+	streamed := false
+	onMentionStream := func(delta string) {
+		streamed = true
+		if o.channelMgr != nil {
+			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+				StreamDelta: delta,
+				GuestID:     guestID,
+				ThreadID:    msg.ThreadID,
+			})
+		}
+	}
+
 	mentionRunOpts := types.RunOpts{
 		Prompt:         prompt,
 		Model:          model,
 		MaxTurns:       guestInvocationMaxTurns(mcpActive, o.cfg.Orchestrator.GuestMCPMaxTurns),
 		PermissionMode: "bypassPermissions",
+		OnStream:       onMentionStream,
 	}
 	if len(allowedTools) > 0 {
 		mentionRunOpts.AllowedTools = allowedTools
@@ -2047,6 +2060,14 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 	}
 
 	result, runErr := o.runner.Run(ctx, mentionRunOpts)
+
+	if o.channelMgr != nil {
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			StreamDone: true,
+			GuestID:    guestID,
+			ThreadID:   msg.ThreadID,
+		})
+	}
 
 	responseText := ""
 	if result != nil {
@@ -2127,7 +2148,8 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 		}
 	}
 
-	if o.channelMgr != nil && chatText != "" {
+	skipFinal := streamed && chatText == responseText && len(displayIDs) == 0
+	if o.channelMgr != nil && chatText != "" && !skipFinal {
 		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
 			Text:       chatText,
 			GuestID:    guestID,
