@@ -981,9 +981,9 @@ func TestAsyncPolling_Timeout(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST":
-			json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-never"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-never"})
 		case r.Method == "GET":
-			json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-never", "done": false})
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-never", "done": false})
 		}
 	}))
 	defer srv.Close()
@@ -1184,9 +1184,9 @@ func TestAsyncPolling_FilenameValidation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST":
-			json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-fn"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-fn"})
 		case strings.Contains(r.URL.Path, "operations/"):
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"name": "operations/op-fn",
 				"done": true,
 				"response": map[string]any{
@@ -1196,7 +1196,7 @@ func TestAsyncPolling_FilenameValidation(t *testing.T) {
 				},
 			})
 		case strings.Contains(r.URL.Path, "/download/"):
-			w.Write([]byte("video"))
+			_, _ = w.Write([]byte("video"))
 		}
 	}))
 	defer srv.Close()
