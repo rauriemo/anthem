@@ -887,42 +887,42 @@ func buildTestGuestIndex(ids ...string) *guests.GuestIndex {
 
 func TestDetectInviteIntent_MatchesInactiveGuest(t *testing.T) {
 	idx := buildTestGuestIndex("tolkien", "shigeru")
-	result := detectInviteIntent("invite tolkien to the chat", nil, idx)
-	if result == nil {
-		t.Fatal("expected match, got nil")
+	results := detectInviteIntent("invite tolkien to the chat", nil, idx)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(results))
 	}
-	if result.GuestID != "tolkien" {
-		t.Errorf("guest_id = %q, want %q", result.GuestID, "tolkien")
+	if results[0].GuestID != "tolkien" {
+		t.Errorf("guest_id = %q, want %q", results[0].GuestID, "tolkien")
 	}
-	if result.Reason == "" {
+	if results[0].Reason == "" {
 		t.Error("expected non-empty reason")
 	}
 }
 
 func TestDetectInviteIntent_IgnoresActiveGuest(t *testing.T) {
 	idx := buildTestGuestIndex("tolkien", "shigeru")
-	result := detectInviteIntent("invite tolkien to the chat", []string{"tolkien"}, idx)
-	if result != nil {
-		t.Errorf("expected nil for already-active guest, got %+v", result)
+	results := detectInviteIntent("invite tolkien to the chat", []string{"tolkien"}, idx)
+	if results != nil {
+		t.Errorf("expected nil for already-active guest, got %+v", results)
 	}
 }
 
 func TestDetectInviteIntent_NoMatchForUnrelatedMessage(t *testing.T) {
 	idx := buildTestGuestIndex("tolkien", "shigeru")
-	result := detectInviteIntent("tell me about tolkien's writing style", nil, idx)
-	if result != nil {
-		t.Errorf("expected nil for message without invite verb, got %+v", result)
+	results := detectInviteIntent("tell me about tolkien's writing style", nil, idx)
+	if results != nil {
+		t.Errorf("expected nil for message without invite verb, got %+v", results)
 	}
 }
 
 func TestDetectInviteIntent_CaseInsensitive(t *testing.T) {
 	idx := buildTestGuestIndex("tolkien")
-	result := detectInviteIntent("INVITE TOLKIEN", nil, idx)
-	if result == nil {
-		t.Fatal("expected case-insensitive match, got nil")
+	results := detectInviteIntent("INVITE TOLKIEN", nil, idx)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(results))
 	}
-	if result.GuestID != "tolkien" {
-		t.Errorf("guest_id = %q, want %q", result.GuestID, "tolkien")
+	if results[0].GuestID != "tolkien" {
+		t.Errorf("guest_id = %q, want %q", results[0].GuestID, "tolkien")
 	}
 }
 
@@ -931,19 +931,19 @@ func TestDetectInviteIntent_MatchesByName(t *testing.T) {
 		"narrative-writer": {ID: "narrative-writer", Name: "Tolkien"},
 	}
 	idx := &guests.GuestIndex{Agents: agents}
-	result := detectInviteIntent("add Tolkien please", nil, idx)
-	if result == nil {
-		t.Fatal("expected match by name, got nil")
+	results := detectInviteIntent("add Tolkien please", nil, idx)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(results))
 	}
-	if result.GuestID != "narrative-writer" {
-		t.Errorf("guest_id = %q, want %q", result.GuestID, "narrative-writer")
+	if results[0].GuestID != "narrative-writer" {
+		t.Errorf("guest_id = %q, want %q", results[0].GuestID, "narrative-writer")
 	}
 }
 
 func TestDetectInviteIntent_NilIndex(t *testing.T) {
-	result := detectInviteIntent("invite tolkien", nil, nil)
-	if result != nil {
-		t.Errorf("expected nil for nil index, got %+v", result)
+	results := detectInviteIntent("invite tolkien", nil, nil)
+	if results != nil {
+		t.Errorf("expected nil for nil index, got %+v", results)
 	}
 }
 
@@ -954,10 +954,39 @@ func TestDetectInviteIntent_AlternateVerbs(t *testing.T) {
 		"pull in tolkien",
 		"add tolkien to the chat",
 	} {
-		result := detectInviteIntent(text, nil, idx)
-		if result == nil {
+		results := detectInviteIntent(text, nil, idx)
+		if len(results) == 0 {
 			t.Errorf("expected match for %q, got nil", text)
 		}
+	}
+}
+
+func TestDetectInviteIntent_MultipleGuests(t *testing.T) {
+	idx := buildTestGuestIndex("tolkien", "shigeru", "walt")
+	results := detectInviteIntent("add tolkien and walt please", nil, idx)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 matches, got %d: %+v", len(results), results)
+	}
+	got := map[string]bool{}
+	for _, r := range results {
+		got[r.GuestID] = true
+	}
+	if !got["tolkien"] || !got["walt"] {
+		t.Errorf("expected tolkien and walt, got %v", got)
+	}
+	if got["shigeru"] {
+		t.Error("shigeru should not be matched")
+	}
+}
+
+func TestDetectInviteIntent_MultipleGuests_PartiallyActive(t *testing.T) {
+	idx := buildTestGuestIndex("tolkien", "shigeru", "walt")
+	results := detectInviteIntent("invite tolkien and walt", []string{"tolkien"}, idx)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 match (tolkien already active), got %d: %+v", len(results), results)
+	}
+	if results[0].GuestID != "walt" {
+		t.Errorf("guest_id = %q, want %q", results[0].GuestID, "walt")
 	}
 }
 
