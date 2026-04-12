@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -62,24 +63,40 @@ func writeSizedPNG(t *testing.T, path string, w, h int, contentRect image.Rectan
 	}
 }
 
+// failCmd returns an exec.Cmd that exits with code 1 on any platform.
+func failCmd(ctx context.Context) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.CommandContext(ctx, "cmd", "/c", "exit", "1")
+	}
+	return exec.CommandContext(ctx, "false")
+}
+
+// noopCmd returns an exec.Cmd that succeeds silently on any platform.
+func noopCmd(ctx context.Context) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.CommandContext(ctx, "cmd", "/c", "echo", "ok")
+	}
+	return exec.CommandContext(ctx, "true")
+}
+
+// copyFileCmd creates a platform-appropriate exec.Cmd that copies src to dst.
+func copyFileCmd(ctx context.Context, src, dst string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.CommandContext(ctx, "cmd", "/c", "copy", "/y", filepath.FromSlash(src), filepath.FromSlash(dst))
+	}
+	return exec.CommandContext(ctx, "cp", src, dst)
+}
+
 // mockCmdRunner returns a CmdRunner that copies src to the command's output
 // path (the last argument).
 func mockCmdRunner(src string, fail bool) func(ctx context.Context, name string, args ...string) *exec.Cmd {
 	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		if fail {
-			return exec.CommandContext(ctx, "cmd", "/c", "exit", "1")
+			return failCmd(ctx)
 		}
 		outPath := args[len(args)-1]
-		return exec.CommandContext(ctx, copyCmd(), copyArgs(src, outPath)...)
+		return copyFileCmd(ctx, src, outPath)
 	}
-}
-
-func copyCmd() string {
-	return "cmd"
-}
-
-func copyArgs(src, dst string) []string {
-	return []string{"/c", "copy", "/y", filepath.FromSlash(src), filepath.FromSlash(dst)}
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +169,7 @@ func TestRemoveBackground_CmdFails(t *testing.T) {
 	proc := &RemoveBackgroundProcessor{
 		LookPath: func(string) (string, error) { return "rembg", nil },
 		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
-			return exec.CommandContext(ctx, "cmd", "/c", "exit", "1")
+			return failCmd(ctx)
 		},
 	}
 	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
@@ -336,7 +353,7 @@ func TestExtractVideoFrames_Success(t *testing.T) {
 			for i := 1; i <= 4; i++ {
 				writePNGToPath(filepath.Join(outDir, fmt.Sprintf("frame_%04d.png", i)), 32, 32)
 			}
-			return exec.CommandContext(ctx, "cmd", "/c", "echo", "ok")
+			return noopCmd(ctx)
 		},
 	}
 
@@ -372,7 +389,7 @@ func TestExtractVideoFrames_DefaultFPS(t *testing.T) {
 			outPattern := args[len(args)-1]
 			outDir := filepath.Dir(outPattern)
 			writePNGToPath(filepath.Join(outDir, "frame_0001.png"), 32, 32)
-			return exec.CommandContext(ctx, "cmd", "/c", "echo", "ok")
+			return noopCmd(ctx)
 		},
 	}
 
@@ -401,7 +418,7 @@ func TestExtractVideoFrames_CmdFails(t *testing.T) {
 	proc := &ExtractVideoFramesProcessor{
 		LookPath: func(string) (string, error) { return "ffmpeg", nil },
 		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
-			return exec.CommandContext(ctx, "cmd", "/c", "exit", "1")
+			return failCmd(ctx)
 		},
 	}
 

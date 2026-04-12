@@ -1451,25 +1451,6 @@ func TestMCPProtocol_ToolCall_FileInput_Integration(t *testing.T) {
 
 	var capturedBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := os.ReadFile(r.Body.(*os.File).Name())
-		if body == nil {
-			var buf bytes.Buffer
-			buf.ReadFrom(r.Body)
-			body = buf.Bytes()
-		}
-		capturedBody = make([]byte, 0)
-		var buf bytes.Buffer
-		buf.ReadFrom(r.Body)
-		capturedBody = buf.Bytes()
-		w.WriteHeader(200)
-		w.Write([]byte(`{"ok":true}`))
-	}))
-	defer srv.Close()
-
-	// Re-do: capture body properly
-	capturedBody = nil
-	srv.Close()
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var buf bytes.Buffer
 		buf.ReadFrom(r.Body)
 		capturedBody = buf.Bytes()
@@ -1493,9 +1474,9 @@ func TestMCPProtocol_ToolCall_FileInput_Integration(t *testing.T) {
 		},
 	}}
 
-	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}
+	input := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"http__test-file__call","arguments":{"image":"sprite.png","prompt":"bounce"}}}
-`)
+`
 
 	var out bytes.Buffer
 	if err := Run(tools, root, strings.NewReader(input), &out); err != nil {

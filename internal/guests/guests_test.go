@@ -1165,7 +1165,7 @@ http_tools:
 		if pp[0].Op != "remove_background" {
 			t.Errorf("Op = %q", pp[0].Op)
 		}
-		if pp[0].Config != nil && len(pp[0].Config) > 0 {
+		if len(pp[0].Config) > 0 {
 			t.Errorf("Config should be nil/empty, got %v", pp[0].Config)
 		}
 	})
