@@ -1,0 +1,11 @@
+schema_version: "1"
+types:
+  sprite:
+    - key: width
+      description: "Pixel width"
+    - key: height
+      description: "Pixel height"
+    - key: frames
+      description: "Number of animation frames"
+    - key: palette
+      description: "Color palette name"

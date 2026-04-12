@@ -1765,6 +1765,12 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		return
 	}
 
+	// --- Context inspection command ---
+	if strings.Contains(msg.Text, "[system:context]") {
+		o.handleContextCommand(ctx, msg)
+		return
+	}
+
 	// --- Guest dispatch for ALL modes (runs in parallel with mode handler) ---
 	var guestWg *sync.WaitGroup
 	var includeOrchestrator bool
@@ -2482,6 +2488,35 @@ func buildLeanPrompt(projectCtx *ProjectContext, msg channel.IncomingMessage) st
 	}
 
 	return prompt.String()
+}
+
+func (o *Orchestrator) handleContextCommand(ctx context.Context, msg channel.IncomingMessage) {
+	if o.channelMgr == nil {
+		return
+	}
+	var sb strings.Builder
+	if o.cfg.ActiveFeature != "" {
+		fc, err := HydrateFeatureContext(o.projectRoot(), o.cfg.ActiveFeature)
+		if err != nil {
+			sb.WriteString("Error reading feature context: " + err.Error())
+		} else if fc != "" {
+			sb.WriteString(fc)
+		} else {
+			sb.WriteString("No feature context found.\n")
+		}
+	} else {
+		sb.WriteString("No active feature configured.\n")
+	}
+	sharedCtx := o.sharedCtx.Get(msg.ChannelKind)
+	if sharedCtx != "" {
+		sb.WriteString("\n## Session Context\n")
+		sb.WriteString(sharedCtx)
+		sb.WriteString("\n")
+	}
+	_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+		Text:     sb.String(),
+		ThreadID: msg.ThreadID,
+	})
 }
 
 func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.IncomingMessage, model string) {

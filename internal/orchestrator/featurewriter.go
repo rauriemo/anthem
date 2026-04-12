@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,9 +32,16 @@ func featureDir(projectRoot, feature string) string {
 	return filepath.Join(projectRoot, ".context", "features", feature)
 }
 
+// TaskStateUpdate holds optional rich fields for UpdateTaskState.
+type TaskStateUpdate struct {
+	Progress string
+	BlockedOn string
+	Produces []string
+}
+
 // UpdateTaskState sets an agent's status and last_output in task-state.yaml.
 // Writes are serialized per feature path via featureLock.
-func UpdateTaskState(projectRoot, feature, agentName, status, lastOutput string) error {
+func UpdateTaskState(projectRoot, feature, agentName, status, lastOutput string, opts ...TaskStateUpdate) error {
 	dir := featureDir(projectRoot, feature)
 	path := filepath.Join(dir, "task-state.yaml")
 
@@ -56,19 +64,31 @@ func UpdateTaskState(projectRoot, feature, agentName, status, lastOutput string)
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	ts.Agents[agentName] = TaskAgentState{
+	agent := TaskAgentState{
 		Status:      status,
 		CurrentTask: "",
 		LastOutput:  lastOutput,
 		LastUpdated: now,
 	}
+	if len(opts) > 0 {
+		agent.Progress = opts[0].Progress
+		agent.BlockedOn = opts[0].BlockedOn
+		agent.Produces = opts[0].Produces
+	}
+	ts.Agents[agentName] = agent
 	ts.UpdatedAt = now
 
 	return writeYAML(path, &ts)
 }
 
+// TaskActiveOpts holds optional fields for SetTaskActive.
+type TaskActiveOpts struct {
+	Dependencies []string
+	Produces     []string
+}
+
 // SetTaskActive marks an agent as active with the given task description.
-func SetTaskActive(projectRoot, feature, agentName, taskDescription string) error {
+func SetTaskActive(projectRoot, feature, agentName, taskDescription string, opts ...TaskActiveOpts) error {
 	dir := featureDir(projectRoot, feature)
 	path := filepath.Join(dir, "task-state.yaml")
 
@@ -95,6 +115,10 @@ func SetTaskActive(projectRoot, feature, agentName, taskDescription string) erro
 	agent.Status = "active"
 	agent.CurrentTask = taskDescription
 	agent.LastUpdated = now
+	if len(opts) > 0 {
+		agent.Dependencies = opts[0].Dependencies
+		agent.Produces = opts[0].Produces
+	}
 	ts.Agents[agentName] = agent
 	ts.UpdatedAt = now
 
@@ -128,6 +152,98 @@ func AppendArtifact(projectRoot, feature string, entry ArtifactEntry) error {
 
 	af.Artifacts = append(af.Artifacts, entry)
 	return writeYAML(path, &af)
+}
+
+// AppendArtifactValidated adds an entry to artifacts.yaml and logs a warning
+// for any metadata keys not in the registry for the entry's artifact type.
+func AppendArtifactValidated(projectRoot, feature string, entry ArtifactEntry, knownKeys map[string][]MetadataKeyDef, logger *slog.Logger) error {
+	if len(entry.Metadata) > 0 && knownKeys != nil && logger != nil {
+		typeName := strings.SplitN(entry.Type, "/", 2)[0]
+		defs := knownKeys[typeName]
+		known := make(map[string]struct{}, len(defs))
+		for _, d := range defs {
+			known[d.Key] = struct{}{}
+		}
+		for k := range entry.Metadata {
+			if _, ok := known[k]; !ok {
+				logger.Warn("unknown metadata key for artifact type",
+					"key", k, "artifact_type", typeName, "artifact_id", entry.ID)
+			}
+		}
+	}
+	return AppendArtifact(projectRoot, feature, entry)
+}
+
+// AppendChangelog adds a changelog entry to changelog.yaml for the given feature.
+// The entry ID is auto-generated as log-{N} where N is the next sequential number.
+func AppendChangelog(projectRoot, feature string, entry ChangelogEntry) error {
+	dir := featureDir(projectRoot, feature)
+	path := filepath.Join(dir, "changelog.yaml")
+
+	mu := featureLock(dir)
+	mu.Lock()
+	defer mu.Unlock()
+
+	var cf ChangelogFile
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reading changelog: %w", err)
+	}
+	if err == nil {
+		if err := yaml.Unmarshal(data, &cf); err != nil {
+			return fmt.Errorf("parsing changelog: %w", err)
+		}
+	}
+
+	if cf.SchemaVersion == "" {
+		cf.SchemaVersion = "1"
+	}
+
+	if entry.ID == "" {
+		entry.ID = fmt.Sprintf("log-%03d", len(cf.Entries)+1)
+	}
+	if entry.Timestamp == "" {
+		entry.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	cf.Entries = append(cf.Entries, entry)
+	return writeYAML(path, &cf)
+}
+
+// UpdateTaskProgress updates an agent's progress and blocked_on without changing status.
+func UpdateTaskProgress(projectRoot, feature, agentName, progress, blockedOn string) error {
+	dir := featureDir(projectRoot, feature)
+	path := filepath.Join(dir, "task-state.yaml")
+
+	mu := featureLock(dir)
+	mu.Lock()
+	defer mu.Unlock()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading task-state: %w", err)
+	}
+
+	var ts TaskStateFile
+	if err := yaml.Unmarshal(data, &ts); err != nil {
+		return fmt.Errorf("parsing task-state: %w", err)
+	}
+
+	if ts.Agents == nil {
+		ts.Agents = make(map[string]TaskAgentState)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	agent := ts.Agents[agentName]
+	if progress != "" {
+		agent.Progress = progress
+	}
+	agent.BlockedOn = blockedOn
+	agent.LastUpdated = now
+	ts.Agents[agentName] = agent
+	ts.UpdatedAt = now
+
+	return writeYAML(path, &ts)
 }
 
 // SanitizeSavePath validates that rawPath resolves within projectRoot.

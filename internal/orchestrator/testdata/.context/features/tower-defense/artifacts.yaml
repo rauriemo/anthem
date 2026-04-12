@@ -10,6 +10,13 @@ artifacts:
     approved_by: art-director
     description: Goblin enemy walk cycle sprite sheet
     source_artifact: ""
+    metadata:
+      width: "64"
+      height: "64"
+      frames: "4"
+      palette: "earth-tones"
+    depends_on:
+      - concept-art-enemies
     tags:
       - sprite
       - enemy

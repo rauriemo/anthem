@@ -961,6 +961,33 @@ func TestDetectInviteIntent_AlternateVerbs(t *testing.T) {
 	}
 }
 
+func TestBuildGuestPrompt_ContextReportingInstructions(t *testing.T) {
+	prompt := buildGuestPrompt("You are an artist.", "Game", "", "", "Draw sprites", GuestPromptOpts{
+		FeatureContext: "## Feature Context: td\nPhase: scene-layout",
+	})
+
+	if !strings.Contains(prompt, "## Context Reporting") {
+		t.Error("prompt should include Context Reporting section when feature context is present")
+	}
+	if !strings.Contains(prompt, "context_report") {
+		t.Error("prompt should mention context_report format")
+	}
+	if !strings.Contains(prompt, "sprite") {
+		t.Error("prompt should mention canonical metadata keys")
+	}
+	if !strings.Contains(prompt, "kebab-case") {
+		t.Error("prompt should mention stable ID requirement")
+	}
+}
+
+func TestBuildGuestPrompt_NoContextReportingWithoutFeature(t *testing.T) {
+	prompt := buildGuestPrompt("You are a designer.", "", "", "", "Hello", GuestPromptOpts{})
+
+	if strings.Contains(prompt, "## Context Reporting") {
+		t.Error("should not include Context Reporting when no feature context")
+	}
+}
+
 func TestBuildGuestPrompt_UserContextInjected(t *testing.T) {
 	prompt := buildGuestPrompt("You are a designer.", "Project", "", "", "Hello", GuestPromptOpts{
 		UserContext: "Prefers visual explanations\nLikes dark mode",

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -534,5 +535,271 @@ func TestCrossFeatureLocking(t *testing.T) {
 		if err := yaml.Unmarshal(data, &ts); err != nil {
 			t.Fatalf("cross-feature writes to %s produced invalid YAML: %v", pair.feature, err)
 		}
+	}
+}
+
+func TestAppendChangelog(t *testing.T) {
+	root := t.TempDir()
+	feature := "test-feature"
+	dir := filepath.Join(root, ".context", "features", feature)
+	seedTaskState(t, dir)
+
+	changelogPath := filepath.Join(dir, "changelog.yaml")
+	if _, err := os.Stat(changelogPath); err == nil {
+		t.Fatal("changelog.yaml should not exist before AppendChangelog")
+	}
+
+	entry := ChangelogEntry{
+		Agent:   "miyazaki",
+		Action:  "asset_created",
+		Summary: "Created sprite",
+	}
+	if err := AppendChangelog(root, feature, entry); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(changelogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cf ChangelogFile
+	if err := yaml.Unmarshal(data, &cf); err != nil {
+		t.Fatal(err)
+	}
+	if cf.SchemaVersion != "1" {
+		t.Errorf("schema_version = %q, want 1", cf.SchemaVersion)
+	}
+	if len(cf.Entries) != 1 {
+		t.Fatalf("entries len = %d, want 1", len(cf.Entries))
+	}
+	if cf.Entries[0].ID != "log-001" {
+		t.Errorf("entry id = %q, want log-001", cf.Entries[0].ID)
+	}
+	if cf.Entries[0].Agent != "miyazaki" || cf.Entries[0].Action != "asset_created" || cf.Entries[0].Summary != "Created sprite" {
+		t.Errorf("entry = %+v", cf.Entries[0])
+	}
+}
+
+func TestAppendChangelog_ToEmptyFile(t *testing.T) {
+	root := t.TempDir()
+	feature := "test-feature"
+	dir := filepath.Join(root, ".context", "features", feature)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "changelog.yaml"), []byte(`schema_version: "1"
+entries: []
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := AppendChangelog(root, feature, ChangelogEntry{Agent: "eiji", Action: "scene_edit", Summary: "placed tower"}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "changelog.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cf ChangelogFile
+	if err := yaml.Unmarshal(data, &cf); err != nil {
+		t.Fatal(err)
+	}
+	if len(cf.Entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(cf.Entries))
+	}
+}
+
+func TestAppendChangelog_ConcurrentWrites(t *testing.T) {
+	root := t.TempDir()
+	feature := "test-feature"
+	dir := filepath.Join(root, ".context", "features", feature)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "changelog.yaml"), []byte(`schema_version: "1"
+entries: []
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_ = AppendChangelog(root, feature, ChangelogEntry{
+				Agent:   "miyazaki",
+				Action:  "log",
+				Summary: fmt.Sprintf("entry-%d", idx),
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	data, err := os.ReadFile(filepath.Join(dir, "changelog.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cf ChangelogFile
+	if err := yaml.Unmarshal(data, &cf); err != nil {
+		t.Fatalf("concurrent writes produced invalid YAML: %v", err)
+	}
+	if len(cf.Entries) != 20 {
+		t.Errorf("expected 20 entries, got %d", len(cf.Entries))
+	}
+}
+
+func TestSetTaskActive_WithDependencies(t *testing.T) {
+	root := t.TempDir()
+	feature := "test-feature"
+	dir := filepath.Join(root, ".context", "features", feature)
+	seedTaskState(t, dir)
+
+	opts := TaskActiveOpts{
+		Dependencies: []string{"sprite-goblin"},
+		Produces:     []string{"scene-level-1"},
+	}
+	if err := SetTaskActive(root, feature, "miyazaki", "Build scene", opts); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "task-state.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var ts TaskStateFile
+	if err := yaml.Unmarshal(data, &ts); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := ts.Agents["miyazaki"]
+	if !reflect.DeepEqual(agent.Dependencies, []string{"sprite-goblin"}) {
+		t.Errorf("dependencies = %v", agent.Dependencies)
+	}
+	if !reflect.DeepEqual(agent.Produces, []string{"scene-level-1"}) {
+		t.Errorf("produces = %v", agent.Produces)
+	}
+}
+
+func TestUpdateTaskState_WithProgress(t *testing.T) {
+	root := t.TempDir()
+	feature := "test-feature"
+	dir := filepath.Join(root, ".context", "features", feature)
+	seedTaskState(t, dir)
+
+	upd := TaskStateUpdate{
+		Progress:  "3/8 done",
+		BlockedOn: "dec-002",
+		Produces:  []string{"sprite-orc"},
+	}
+	if err := UpdateTaskState(root, feature, "miyazaki", "active", "sprites/orc.png", upd); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "task-state.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var ts TaskStateFile
+	if err := yaml.Unmarshal(data, &ts); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := ts.Agents["miyazaki"]
+	if agent.Progress != "3/8 done" {
+		t.Errorf("progress = %q", agent.Progress)
+	}
+	if agent.BlockedOn != "dec-002" {
+		t.Errorf("blocked_on = %q", agent.BlockedOn)
+	}
+	if !reflect.DeepEqual(agent.Produces, []string{"sprite-orc"}) {
+		t.Errorf("produces = %v", agent.Produces)
+	}
+}
+
+func TestUpdateTaskProgress(t *testing.T) {
+	root := t.TempDir()
+	feature := "test-feature"
+	dir := filepath.Join(root, ".context", "features", feature)
+	seedTaskState(t, dir)
+
+	if err := SetTaskActive(root, feature, "miyazaki", "Art pass"); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateTaskProgress(root, feature, "miyazaki", "5/8 done", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "task-state.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var ts TaskStateFile
+	if err := yaml.Unmarshal(data, &ts); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := ts.Agents["miyazaki"]
+	if agent.Status != "active" {
+		t.Errorf("status = %q, want active", agent.Status)
+	}
+	if agent.Progress != "5/8 done" {
+		t.Errorf("progress = %q, want 5/8 done", agent.Progress)
+	}
+}
+
+func TestAppendArtifact_WithRichMetadata(t *testing.T) {
+	root := t.TempDir()
+	feature := "test-feature"
+	dir := filepath.Join(root, ".context", "features", feature)
+	seedArtifacts(t, dir, `schema_version: "1"
+artifacts: []
+`)
+
+	entry := ArtifactEntry{
+		ID:          "rich-001",
+		Type:        "image/png",
+		Path:        "assets/sheet.png",
+		CreatedBy:   "miyazaki",
+		Status:      "pending-review",
+		Description: "Sprite with metadata",
+		Metadata:    map[string]string{"width": "64", "frames": "4"},
+		DependsOn:   []string{"concept-art"},
+		Consumers:   []string{"eiji"},
+	}
+
+	if err := AppendArtifact(root, feature, entry); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "artifacts.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var af ArtifactsFile
+	if err := yaml.Unmarshal(data, &af); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(af.Artifacts) != 1 {
+		t.Fatalf("expected 1 artifact, got %d", len(af.Artifacts))
+	}
+	got := af.Artifacts[0]
+	if !reflect.DeepEqual(got.Metadata, map[string]string{"width": "64", "frames": "4"}) {
+		t.Errorf("metadata = %v", got.Metadata)
+	}
+	if !reflect.DeepEqual(got.DependsOn, []string{"concept-art"}) {
+		t.Errorf("depends_on = %v", got.DependsOn)
+	}
+	if !reflect.DeepEqual(got.Consumers, []string{"eiji"}) {
+		t.Errorf("consumers = %v", got.Consumers)
 	}
 }

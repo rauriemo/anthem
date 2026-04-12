@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rauriemo/anthem/internal/agent"
 	"github.com/rauriemo/anthem/internal/channel"
@@ -289,6 +290,41 @@ func buildGuestPrompt(persona, projectSummary, sharedCtx, history, userMsg strin
 		sb.WriteString("Do not use placeholders, ellipses, or shortened base64; paste the full string from the tool result.\n\n")
 	}
 
+	if opts.FeatureContext != "" {
+		sb.WriteString("## Context Reporting\n\n")
+		sb.WriteString("After your response, you may optionally include a structured report so the system can track your work.\n")
+		sb.WriteString("Place this JSON block at the END of your response (after all conversational text):\n\n")
+		sb.WriteString("```json\n")
+		sb.WriteString("{\"context_report\": {\n")
+		sb.WriteString("  \"action\": \"asset_created | document_edit | decision_made | task_completed\",\n")
+		sb.WriteString("  \"summary\": \"Brief description of what you did\",\n")
+		sb.WriteString("  \"artifact\": {\n")
+		sb.WriteString("    \"id\": \"kebab-case-id\",\n")
+		sb.WriteString("    \"type\": \"image/png | text/markdown | ...\",\n")
+		sb.WriteString("    \"path\": \"relative/path/to/file\",\n")
+		sb.WriteString("    \"description\": \"What this artifact is\",\n")
+		sb.WriteString("    \"tags\": [\"tag1\", \"tag2\"],\n")
+		sb.WriteString("    \"metadata\": {\"key\": \"value\"},\n")
+		sb.WriteString("    \"depends_on\": [\"source-artifact-id\"],\n")
+		sb.WriteString("    \"status\": \"draft\"\n")
+		sb.WriteString("  },\n")
+		sb.WriteString("  \"progress\": \"3/8 sprites complete\",\n")
+		sb.WriteString("  \"blocked_on\": null,\n")
+		sb.WriteString("  \"produces\": [\"artifact-id-1\", \"artifact-id-2\"]\n")
+		sb.WriteString("}}\n")
+		sb.WriteString("```\n\n")
+		sb.WriteString("Rules:\n")
+		sb.WriteString("- The report is optional. If you don't include one, a generic task_completed entry is created.\n")
+		sb.WriteString("- Include \"artifact\" only when you create or modify a file.\n")
+		sb.WriteString("- Use stable kebab-case IDs for all references.\n")
+		sb.WriteString("- \"progress\" and \"blocked_on\" help other agents understand your status.\n")
+		sb.WriteString("- Use canonical metadata keys: ")
+		sb.WriteString("sprite (width, height, frames, palette, format), ")
+		sb.WriteString("document (word_count, sections, format), ")
+		sb.WriteString("scene (tile_count, layers, dimensions), ")
+		sb.WriteString("audio (duration_ms, sample_rate, channels).\n\n")
+	}
+
 	fmt.Fprintf(&sb, "## User Message\n\n%s\n", userMsg)
 
 	if opts.FocusText != "" {
@@ -479,7 +515,76 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 				if result != nil && result.Output != "" {
 					output = truncateOutput(result.Output, 200)
 				}
-				if stErr := UpdateTaskState(p.projectRoot, p.activeFeature, guestID, "idle", output); stErr != nil {
+
+				var stateOpts TaskStateUpdate
+				rawOutput := ""
+				if result != nil {
+					rawOutput = result.Output
+				}
+				report, parseErr := ParseContextReport(rawOutput)
+				if parseErr != nil {
+					p.logger.Warn("failed to parse context_report", "guest", guestID, "error", parseErr)
+				}
+
+				if report != nil {
+					if report.Artifact != nil {
+						art := ArtifactEntry{
+							ID:          report.Artifact.ID,
+							Type:        report.Artifact.Type,
+							Path:        report.Artifact.Path,
+							CreatedBy:   guestID,
+							CreatedAt:   time.Now().UTC().Format(time.RFC3339),
+							Feature:     p.activeFeature,
+							Status:      report.Artifact.Status,
+							Description: report.Artifact.Description,
+							Tags:        report.Artifact.Tags,
+							Metadata:    report.Artifact.Metadata,
+							DependsOn:   report.Artifact.DependsOn,
+						}
+						if art.Status == "" {
+							art.Status = "draft"
+						}
+						if aErr := AppendArtifact(p.projectRoot, p.activeFeature, art); aErr != nil {
+							p.logger.Warn("failed to register artifact", "guest", guestID, "error", aErr)
+						}
+					}
+
+					action := report.Action
+					if action == "" {
+						action = "task_completed"
+					}
+					summary := report.Summary
+					if summary == "" {
+						summary = output
+					}
+					logEntry := ChangelogEntry{
+						Agent:   guestID,
+						Action:  action,
+						Summary: summary,
+					}
+					if report.Artifact != nil {
+						logEntry.ArtifactID = report.Artifact.ID
+						logEntry.Tags = report.Artifact.Tags
+					}
+					if clErr := AppendChangelog(p.projectRoot, p.activeFeature, logEntry); clErr != nil {
+						p.logger.Warn("failed to append changelog", "guest", guestID, "error", clErr)
+					}
+
+					stateOpts.Progress = report.Progress
+					stateOpts.BlockedOn = report.BlockedOn
+					stateOpts.Produces = report.Produces
+				} else if output != "" {
+					logEntry := ChangelogEntry{
+						Agent:   guestID,
+						Action:  "task_completed",
+						Summary: output,
+					}
+					if clErr := AppendChangelog(p.projectRoot, p.activeFeature, logEntry); clErr != nil {
+						p.logger.Warn("failed to append changelog", "guest", guestID, "error", clErr)
+					}
+				}
+
+				if stErr := UpdateTaskState(p.projectRoot, p.activeFeature, guestID, "idle", output, stateOpts); stErr != nil {
 					p.logger.Warn("failed to update task-state", "guest", guestID, "error", stErr)
 				}
 			}

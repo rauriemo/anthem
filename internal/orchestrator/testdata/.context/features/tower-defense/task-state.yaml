@@ -1,4 +1,4 @@
-schema_version: "1"
+schema_version: "2"
 feature: tower-defense
 phase: prototyping
 updated_at: "2026-04-07T12:00:00Z"
@@ -6,10 +6,16 @@ agents:
   2d-artist:
     status: active
     current_task: Drawing fire tower sprite
+    progress: "3/8 sprites complete"
+    produces:
+      - fire-tower-sprite
+      - ice-tower-sprite
     last_output: Completed goblin walk cycle
     last_updated: "2026-04-07T12:00:00Z"
   game-designer:
     status: idle
     current_task: ""
+    dependencies:
+      - fire-tower-sprite
     last_output: Balanced tower costs
     last_updated: "2026-04-06T18:00:00Z"
