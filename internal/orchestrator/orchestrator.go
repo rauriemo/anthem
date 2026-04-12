@@ -67,6 +67,7 @@ type Orchestrator struct {
 	sharedCtx       *SharedContext
 	storyStore      *StoryStore
 	proposalStore   *ProposalStore
+	activeRespecs   map[string]*respecSession
 
 	wg            sync.WaitGroup
 	mu            sync.Mutex
@@ -725,6 +726,11 @@ func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, a
 				o.logger.Warn("update_voice failed", "section", action.SectionName, "error", err)
 			}
 
+		case ActionUpdateAgentMeta:
+			if err := o.executeUpdateAgentMeta(ctx, action); err != nil {
+				o.logger.Warn("update_agent_meta failed", "file", action.AgentFile, "error", err)
+			}
+
 		case ActionCreateSubtasks:
 			activeLabel := ""
 			if len(o.cfg.Tracker.Labels.Active) > 0 {
@@ -1078,6 +1084,17 @@ func (o *Orchestrator) executeUpdateVoice(ctx context.Context, action Action) er
 	voicePath := filepath.Join(home, ".anthem", "VOICE.md")
 	changelogPath := filepath.Join(home, ".anthem", "voice-changelog.md")
 
+	// If agent_file is set and is NOT orchestrator.md, write directly to that file
+	if action.AgentFile != "" && action.AgentFile != "orchestrator.md" {
+		targetPath := filepath.Join(o.projectRoot(), "agents", action.AgentFile)
+		o.logger.Info("voice section routed to agent file", "section", action.SectionName, "target", action.AgentFile)
+		if err := voice.UpdateAgentSection(targetPath, action.SectionName, action.SectionContent); err != nil {
+			return fmt.Errorf("updating %s: %w", action.AgentFile, err)
+		}
+		o.logger.Info("voice updated", "section", action.SectionName, "target", action.AgentFile)
+		return nil
+	}
+
 	// Route based on explicit section allowlists
 	var diff string
 	if voice.IsAgentSection(action.SectionName) {
@@ -1148,6 +1165,62 @@ func (o *Orchestrator) executeUpdateVoice(ctx context.Context, action Action) er
 	if o.auditLogger != nil {
 		if err := o.auditLogger.Record(ctx, ev); err != nil {
 			o.logger.Warn("failed to record voice audit event", "error", err)
+		}
+	}
+
+	return nil
+}
+
+func (o *Orchestrator) executeUpdateAgentMeta(ctx context.Context, action Action) error {
+	targetPath := filepath.Join(o.projectRoot(), "agents", action.AgentFile)
+
+	fields := make(map[string]any)
+	if action.AgentName != "" {
+		fields["name"] = action.AgentName
+	}
+	if action.AgentDescription != "" {
+		fields["description"] = action.AgentDescription
+	}
+	if action.AgentRole != "" {
+		fields["role"] = action.AgentRole
+	}
+	if len(action.AgentCapabilities) > 0 {
+		fields["capabilities"] = action.AgentCapabilities
+	}
+	if action.AgentIcon != "" {
+		fields["icon"] = action.AgentIcon
+	}
+	if len(action.AgentQuotes) > 0 {
+		fields["quotes"] = action.AgentQuotes
+	}
+
+	if err := voice.UpdateAgentFrontmatter(targetPath, fields); err != nil {
+		return fmt.Errorf("updating agent meta for %s: %w", action.AgentFile, err)
+	}
+
+	// Reload orchestrator persona if this was the orchestrator
+	if action.AgentFile == "orchestrator.md" && o.orchAgent != nil {
+		body, err := guests.LoadOrchestratorPersona(filepath.Join(o.projectRoot(), "agents"))
+		if err == nil {
+			o.orchAgent.SetOrchPersona(body)
+		}
+	}
+
+	o.logger.Info("agent meta updated", "file", action.AgentFile)
+
+	inputJSON, _ := json.Marshal(action)
+	ev := audit.AuditEvent{
+		Timestamp:   time.Now(),
+		EventType:   "agent_meta.updated",
+		ActionName:  strPtr("update_agent_meta"),
+		ActionInput: strPtr(string(inputJSON)),
+	}
+	if o.currentWave != nil {
+		ev.WaveID = &o.currentWave.ID
+	}
+	if o.auditLogger != nil {
+		if err := o.auditLogger.Record(ctx, ev); err != nil {
+			o.logger.Warn("failed to record agent_meta audit event", "error", err)
 		}
 	}
 
@@ -1686,6 +1759,12 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		return
 	}
 
+	// --- Respec flow: intercept before guest dispatch ---
+	if strings.Contains(msg.Text, "[system:respec") || o.hasActiveRespec(msg.ChannelKind) {
+		o.handleRespecMessage(ctx, msg, model)
+		return
+	}
+
 	// --- Guest dispatch for ALL modes (runs in parallel with mode handler) ---
 	var guestWg *sync.WaitGroup
 	var includeOrchestrator bool
@@ -1969,6 +2048,8 @@ func (o *Orchestrator) sendFollowUp(ctx context.Context, original channel.Incomi
 // detectMode returns the mode tag in the message text.
 func (o *Orchestrator) detectMode(text string) string {
 	switch {
+	case strings.Contains(text, "[system:respec"):
+		return "respec"
 	case strings.Contains(text, "[system:build]"):
 		return "build"
 	case strings.Contains(text, "[system:plan]"):

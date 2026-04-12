@@ -196,7 +196,8 @@ Available action types:
 - dispatch: Start an executor for a task. Required: task_id. Optional: profile (one of "coder", "architect", "tester", "debugger"). Default: "coder". Use "architect" for read-only analysis, "tester" for writing tests, "debugger" for fixing review-failed tasks.
 - skip: Skip a task this wave. Required: task_id, reason.
 - comment: Post a comment on a tracker issue. Required: task_id, body.
-- update_voice: Propose a VOICE.md section update. Required: section_name, section_content.
+- update_voice: Propose a VOICE.md section update. Required: section_name, section_content. Optional: agent_file (target a specific agent .md file instead of the default section routing).
+- update_agent_meta: Update an agent's YAML frontmatter fields. Required: agent_file, agent_name. Optional: agent_description, agent_role, agent_capabilities (array), agent_icon, agent_quotes (array).
 - request_approval: Flag a task for human review. Required: task_id.
 - close_wave: Mark the current wave as exhausted. No extra fields.
 - create_subtasks: Create subtasks as new tracker issues. Required: subtasks list with title, body, labels. Optional: depends_on (list of 1-based ordinal task numbers from this batch, e.g. [1, 2] means "depends on the 1st and 2nd subtasks"). The daemon remaps ordinals to real issue IDs after creation.

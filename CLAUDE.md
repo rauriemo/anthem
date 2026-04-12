@@ -33,7 +33,7 @@ These are the source of truth for what to build and how.
 - **Template engine**: sprig (`github.com/Masterminds/sprig/v3`) for WORKFLOW.md body rendering.
 - **Orchestrator module pattern**: All dispatch/reconciliation/state logic in `orchestrator.go`.
 - **Orchestrator modes**: Plan (markdown-only), Build (plan -> subtasks), Agent (full JSON actions). Falls back to mechanical dispatch on failure.
-- **Contract-first tool surface**: 10 action types with schemas, risk levels, idempotency. JSON structured output.
+- **Contract-first tool surface**: 12 action types with schemas, risk levels, idempotency. JSON structured output. `update_agent_meta` writes YAML frontmatter; `update_voice` extended with optional `agent_file` for guest targeting.
 - **Three-layer state**: Event Log (SQLite audit), State Snapshot (in-memory), Knowledge Artifacts (repo docs).
 - **Channel system**: Pluggable adapters (Slack Socket Mode, Dispatch WebSocket, Prism WebSocket).
 - **Agent profiles**: Named profiles (coder/architect/tester/debugger/explorer) composing MCP server refs + skill refs.
@@ -77,7 +77,7 @@ See `docs/plans/architecture.md` and `docs/plans/implementation.md` for implemen
 
 **Unity Editor MCP:** Prefer **Unity’s official MCP** with `com.unity.ai.assistant` **2.x**: the stdio entrypoint is the **relay** binary with `--mcp` (installed under `~/.unity/relay/`, on Windows `%USERPROFILE%\.unity\relay\relay_win.exe`). User must approve external clients in **Edit → Project Settings → AI → Unity MCP**. Docs: [Unity MCP overview](https://docs.unity3d.com/Packages/com.unity.ai.assistant@2.0/manual/unity-mcp-overview.html), [Get started](https://docs.unity3d.com/Packages/com.unity.ai.assistant@2.0/manual/unity-mcp-get-started.html). Tool names vary by package version (e.g. `Unity_GetConsoleLogs`, `Unity_RunCommand`); do not assume older doc examples like `Unity_ManageScene` exist.
 
-**Primary code paths:** `internal/orchestrator/orchestrator.go` (guest mention + MCP write + `executeUpdateVoice` routing), `internal/orchestrator/orchagent.go` (`buildSystemPrompt` with `orchPersona` + `userContext`), `internal/orchestrator/guestdispatch.go` (parallel guests + MCP merge + `userContext` injection), `internal/orchestrator/featurewriter.go`, `internal/harness/harness.go` (`WriteMCPConfig`, `MergeGuestServers`), `internal/guests/guests.go` (`LoadOrchestratorPersona`, `ScanDirectory` with orchestrator exclusion), `internal/voice/voice.go` (`IsAgentSection`, `UpdateAgentSection`), `internal/voice/migrate.go` (`MigrateVoiceToOrchestrator`).
+**Primary code paths:** `internal/orchestrator/orchestrator.go` (guest mention + MCP write + `executeUpdateVoice` routing + `executeUpdateAgentMeta` + `[system:respec]` routing), `internal/orchestrator/orchagent.go` (`buildSystemPrompt` with `orchPersona` + `userContext`), `internal/orchestrator/respec.go` (`handleRespecMessage`, `buildRespecSystemPrompt`, `parseRespecTarget`, session tracking), `internal/orchestrator/guestdispatch.go` (parallel guests + MCP merge + `userContext` injection), `internal/orchestrator/featurewriter.go`, `internal/harness/harness.go` (`WriteMCPConfig`, `MergeGuestServers`), `internal/guests/guests.go` (`LoadOrchestratorPersona`, `LoadAgentFrontmatter`, `ScanDirectory` with orchestrator exclusion), `internal/voice/voice.go` (`IsAgentSection`, `UpdateAgentSection`, `UpdateAgentFrontmatter`), `internal/voice/migrate.go` (`MigrateVoiceToOrchestrator`).
 
 **Security (unchanged intent):** `auth_scheme` for HTTP tools: bearer-only at parse time where enforced; never persist auth tokens in YAML or `.mcp.json` — only env var names. Deny-by-default allowlists when `allowed_tools` is empty but tools are declared.
 
@@ -98,8 +98,9 @@ Full spec: `docs/plans/guest-agents.md`
 - **StateSnapshot extensions**: `ActiveGuestsSummary`, `SharedContext`, `ConversationHistory` injected when guests are active. System prompt gains "Active Specialists" awareness section. `OrchestratorResponse.ContextUpdate` extracted and applied to SharedContext.
 
 Key Anthem responsibilities:
-- `internal/guests/` package: scan `agents/` (skip `orchestrator.md`), parse frontmatter, generate index, load persona on demand, `LoadOrchestratorPersona()` for orchestrator identity
-- `internal/voice/` package: section routing (`IsAgentSection`), `UpdateAgentSection()` for writing to agent .md files, `MigrateVoiceToOrchestrator()` for first-run migration
+- `internal/guests/` package: scan `agents/` (skip `orchestrator.md`), parse frontmatter, generate index, load persona on demand, `LoadOrchestratorPersona()` for orchestrator identity, `LoadAgentFrontmatter()` for generic frontmatter loading
+- `internal/voice/` package: section routing (`IsAgentSection`), `UpdateAgentSection()` for writing to agent .md files, `UpdateAgentFrontmatter()` for YAML frontmatter merging, `MigrateVoiceToOrchestrator()` for first-run migration
+- `internal/orchestrator/respec.go`: conversational `/respec` flow -- `[system:respec]` tag routing, per-channel session tracking (`activeRespecs`), cancel handling, write-per-phase action execution. Uses `update_agent_meta` for frontmatter and `update_voice` with `agent_file` for body sections
 - WebSocket protocol: `guest_agents` in auth, `active_guests`/`mention` in req, `guest_id`/`suggest_guest` in res
 - Orchestrator: compressed context injection (roster summary for all active guests, full persona only for the responding guest), capability-matching suggestions. Orchestrator prompts receive `orchPersona` (from `orchestrator.md`) + `userContext` (from `VOICE.md`). Guest prompts receive `userContext`.
 - Config: `guests` allowlist and `max_active_guests` in WORKFLOW.md frontmatter

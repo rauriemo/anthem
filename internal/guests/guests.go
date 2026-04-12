@@ -187,6 +187,33 @@ func LoadOrchestratorPersona(dir string) (string, error) {
 	return body, nil
 }
 
+// LoadAgentFrontmatter reads any agent .md file and returns its YAML
+// frontmatter as a generic map. Returns an empty map (not an error) if the
+// file doesn't exist or has no frontmatter.
+func LoadAgentFrontmatter(agentPath string) (map[string]any, error) {
+	data, err := os.ReadFile(agentPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]any), nil
+		}
+		return nil, fmt.Errorf("reading agent file %s: %w", agentPath, err)
+	}
+
+	yamlBytes, _, err := splitFrontmatterDelimiters(data)
+	if err != nil {
+		return make(map[string]any), nil
+	}
+
+	var fm map[string]any
+	if err := yaml.Unmarshal(yamlBytes, &fm); err != nil {
+		return nil, fmt.Errorf("parsing YAML frontmatter in %s: %w", agentPath, err)
+	}
+	if fm == nil {
+		fm = make(map[string]any)
+	}
+	return fm, nil
+}
+
 func ParseFrontmatter(data []byte) (GuestAgent, error) {
 	yamlBytes, _, err := splitFrontmatterDelimiters(data)
 	if err != nil {

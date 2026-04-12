@@ -137,6 +137,8 @@ On Windows, if Smart App Control blocks `go run`, build and run the binary direc
 - **Plan storage**: markdown plans saved to `~/.anthem/plans/{project-slug}/` with YAML frontmatter. Plan history and latest draft injected into agent-mode context for seamless plan-to-agent handoff
 - **Auto-label on subtask creation**: newly created subtasks auto-receive the first configured active label (e.g. `todo`) if not already present, ensuring immediate visibility in kanban and dispatch
 - **Dependency ordinal remapping**: `depends_on` in `create_subtasks` uses 1-based ordinals (e.g. `[1, 2]`); the daemon remaps to real GitHub issue IDs after creation
+- **Agent respec flow**: conversational `/respec` command for creating or updating any agent's `.md` file. The orchestrator walks through 5 phases (identity, personality, focus, coordination, flavor), writing changes after each phase. Supports orchestrator (`/respec`) and guest agents (`/respec <name>`). Cancel mid-flow with `/respec cancel`; all changes written so far are kept
+- **`update_agent_meta` action**: writes YAML frontmatter fields (name, description, role, capabilities, icon, quotes) to any agent file. Path-safe validation prevents writes outside `agents/`
 
 ## CLI Commands
 
@@ -459,6 +461,16 @@ The orchestrator evolves both files via the `update_voice` action. Character sec
 **Migration**: On first run after upgrading, Anthem automatically migrates existing Identity/Personality sections from `~/.anthem/VOICE.md` to `agents/orchestrator.md`. If `orchestrator.md` already exists, migration is a no-op (a warning is logged if stale personality sections remain in VOICE.md).
 
 > **Note**: `orchestrator.md` is not a guest agent. It lives in `agents/` for authoring consistency but is explicitly excluded from the `GuestIndex` and never appears in Prism's guest roster.
+
+#### Agent Respec
+
+The `/respec` command starts a conversational flow for creating or updating an agent's `.md` file. The orchestrator walks through 5 phases (Core Identity, Personality, Focus & Scope, Coordination, Flavor), presenting 2-4 questions per phase and writing changes to the file immediately after each answer.
+
+- `/respec` -- respec the project's orchestrator agent
+- `/respec <name>` -- respec a guest agent (creates the file if new)
+- `/respec cancel` -- stop the flow (all changes written so far are kept)
+
+During a respec session, all messages in the channel are automatically routed to the respec handler. Only one respec can be active per channel at a time. The flow uses `update_agent_meta` for YAML frontmatter and `update_voice` (with `agent_file`) for markdown body sections.
 
 ### State Files
 

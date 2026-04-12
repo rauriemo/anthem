@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // RiskLevel classifies how dangerous an action is.
@@ -32,6 +34,7 @@ const (
 	ActionReply              ActionType = "reply"
 	ActionDisplay            ActionType = "display"
 	ActionRequestMaintenance ActionType = "request_maintenance"
+	ActionUpdateAgentMeta    ActionType = "update_agent_meta"
 )
 
 // allActionTypes enumerates every known action type for validation.
@@ -47,6 +50,7 @@ var allActionTypes = []ActionType{
 	ActionReply,
 	ActionDisplay,
 	ActionRequestMaintenance,
+	ActionUpdateAgentMeta,
 }
 
 // SubtaskDef defines a subtask to be created by the create_subtasks action.
@@ -102,7 +106,14 @@ type Action struct {
 	DisplayContent  string       `json:"display_content,omitempty"`
 	DisplayTitle    string       `json:"display_title,omitempty"`
 	DisplayLanguage string       `json:"display_language,omitempty"`
-	DisplayData     any          `json:"display_data,omitempty"`
+	DisplayData       any          `json:"display_data,omitempty"`
+	AgentFile         string       `json:"agent_file,omitempty"`
+	AgentName         string       `json:"agent_name,omitempty"`
+	AgentDescription  string       `json:"agent_description,omitempty"`
+	AgentRole         string       `json:"agent_role,omitempty"`
+	AgentCapabilities []string     `json:"agent_capabilities,omitempty"`
+	AgentIcon         string       `json:"agent_icon,omitempty"`
+	AgentQuotes       []string     `json:"agent_quotes,omitempty"`
 }
 
 // OrchestratorResponse is the full JSON response parsed from the orchestrator agent.
@@ -118,7 +129,7 @@ var ErrNotImplemented = errors.New("action not implemented in this phase")
 // RiskForAction returns the risk level for a given action type.
 func RiskForAction(actionType ActionType) RiskLevel {
 	switch actionType {
-	case ActionDispatch, ActionSkip, ActionComment, ActionUpdateVoice, ActionRequestApproval, ActionReply, ActionDisplay:
+	case ActionDispatch, ActionSkip, ActionComment, ActionUpdateVoice, ActionRequestApproval, ActionReply, ActionDisplay, ActionUpdateAgentMeta:
 		return RiskLow
 	case ActionCloseWave, ActionCreateSubtasks, ActionPromoteKnowledge, ActionRequestMaintenance:
 		return RiskMedium
@@ -165,6 +176,11 @@ func ValidateAction(action Action, validTaskIDs []string) error {
 		if action.SectionContent == "" {
 			return fmt.Errorf("update_voice action requires section_content")
 		}
+		if action.AgentFile != "" {
+			if err := validateAgentFile(action.AgentFile); err != nil {
+				return fmt.Errorf("update_voice agent_file: %w", err)
+			}
+		}
 
 	case ActionRequestApproval:
 		if action.TaskID == "" {
@@ -201,15 +217,40 @@ func ValidateAction(action Action, validTaskIDs []string) error {
 		if action.Reason == "" {
 			return fmt.Errorf("request_maintenance action requires reason")
 		}
+
+	case ActionUpdateAgentMeta:
+		if action.AgentFile == "" {
+			return fmt.Errorf("update_agent_meta action requires agent_file")
+		}
+		if err := validateAgentFile(action.AgentFile); err != nil {
+			return fmt.Errorf("update_agent_meta agent_file: %w", err)
+		}
+		if action.AgentName == "" {
+			return fmt.Errorf("update_agent_meta action requires agent_name")
+		}
 	}
 
+	return nil
+}
+
+// validateAgentFile checks that an agent_file value is a safe basename within agents/.
+func validateAgentFile(name string) error {
+	if strings.ContainsAny(name, "/\\") {
+		return fmt.Errorf("must be a basename with no path separators, got %q", name)
+	}
+	if !strings.HasSuffix(name, ".md") {
+		return fmt.Errorf("must end in .md, got %q", name)
+	}
+	if cleaned := filepath.Base(name); cleaned != name {
+		return fmt.Errorf("must be a simple filename, got %q", name)
+	}
 	return nil
 }
 
 // IsIdempotent reports whether repeating the action produces the same outcome.
 func IsIdempotent(actionType ActionType) bool {
 	switch actionType {
-	case ActionComment, ActionSkip, ActionRequestApproval, ActionUpdateVoice, ActionReply, ActionDisplay:
+	case ActionComment, ActionSkip, ActionRequestApproval, ActionUpdateVoice, ActionReply, ActionDisplay, ActionUpdateAgentMeta:
 		return true
 	default:
 		return false

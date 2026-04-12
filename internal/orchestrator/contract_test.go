@@ -159,6 +159,54 @@ func TestValidateAction(t *testing.T) {
 			wantErr: true,
 			errMsg:  "request_maintenance action requires reason",
 		},
+
+		// update_agent_meta
+		{
+			name:   "update_agent_meta valid",
+			action: Action{Type: ActionUpdateAgentMeta, AgentFile: "miyazaki.md", AgentName: "Miyazaki"},
+		},
+		{
+			name:    "update_agent_meta missing agent_file",
+			action:  Action{Type: ActionUpdateAgentMeta, AgentName: "Miyazaki"},
+			wantErr: true,
+			errMsg:  "update_agent_meta action requires agent_file",
+		},
+		{
+			name:    "update_agent_meta missing agent_name",
+			action:  Action{Type: ActionUpdateAgentMeta, AgentFile: "miyazaki.md"},
+			wantErr: true,
+			errMsg:  "update_agent_meta action requires agent_name",
+		},
+		{
+			name:    "update_agent_meta path traversal",
+			action:  Action{Type: ActionUpdateAgentMeta, AgentFile: "../etc/passwd.md", AgentName: "evil"},
+			wantErr: true,
+			errMsg:  "path separators",
+		},
+		{
+			name:    "update_agent_meta nested path",
+			action:  Action{Type: ActionUpdateAgentMeta, AgentFile: "sub/dir.md", AgentName: "evil"},
+			wantErr: true,
+			errMsg:  "path separators",
+		},
+		{
+			name:    "update_agent_meta no .md extension",
+			action:  Action{Type: ActionUpdateAgentMeta, AgentFile: "miyazaki", AgentName: "Miyazaki"},
+			wantErr: true,
+			errMsg:  "must end in .md",
+		},
+
+		// update_voice with agent_file path safety
+		{
+			name:   "update_voice with valid agent_file",
+			action: Action{Type: ActionUpdateVoice, SectionName: "Identity", SectionContent: "Agent", AgentFile: "miyazaki.md"},
+		},
+		{
+			name:    "update_voice with path traversal agent_file",
+			action:  Action{Type: ActionUpdateVoice, SectionName: "Identity", SectionContent: "Agent", AgentFile: "../secret.md"},
+			wantErr: true,
+			errMsg:  "path separators",
+		},
 	}
 
 	for _, tt := range tests {
@@ -213,6 +261,7 @@ func TestRiskForAction(t *testing.T) {
 		{ActionPromoteKnowledge, RiskMedium},
 		{ActionRequestMaintenance, RiskMedium},
 		{ActionReply, RiskLow},
+		{ActionUpdateAgentMeta, RiskLow},
 		{"unknown", RiskHigh},
 	}
 
@@ -240,6 +289,7 @@ func TestIsIdempotent(t *testing.T) {
 		{ActionCreateSubtasks, false},
 		{ActionPromoteKnowledge, false},
 		{ActionRequestMaintenance, false},
+		{ActionUpdateAgentMeta, true},
 	}
 
 	for _, tt := range tests {

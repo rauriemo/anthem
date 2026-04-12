@@ -437,3 +437,109 @@ description: Empty body test
 		t.Error("frontmatter should be preserved")
 	}
 }
+
+func TestUpdateAgentFrontmatter_MergeExisting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.md")
+	content := "---\nname: Original\nrole: artist\n---\n\n## Identity\nKeep this body\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := UpdateAgentFrontmatter(path, map[string]any{
+		"description": "A new description",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(path)
+	result := string(data)
+	if !strings.Contains(result, "name: Original") {
+		t.Error("existing name field should be preserved")
+	}
+	if !strings.Contains(result, "role: artist") {
+		t.Error("existing role field should be preserved")
+	}
+	if !strings.Contains(result, "description: A new description") {
+		t.Error("new description field should be added")
+	}
+	if !strings.Contains(result, "Keep this body") {
+		t.Error("markdown body should be preserved")
+	}
+}
+
+func TestUpdateAgentFrontmatter_CreateNew(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agents", "new-agent.md")
+
+	err := UpdateAgentFrontmatter(path, map[string]any{
+		"name": "NewAgent",
+		"role": "designer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal("file should have been created")
+	}
+	result := string(data)
+	if !strings.Contains(result, "name: NewAgent") {
+		t.Error("should contain name")
+	}
+	if !strings.Contains(result, "role: designer") {
+		t.Error("should contain role")
+	}
+	if !strings.HasPrefix(result, "---\n") {
+		t.Error("should start with frontmatter delimiter")
+	}
+}
+
+func TestUpdateAgentFrontmatter_SingleField(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.md")
+	content := "---\nname: Agent\ndescription: Desc\nrole: coder\n---\n\n## Identity\nBody\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := UpdateAgentFrontmatter(path, map[string]any{
+		"role": "architect",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(path)
+	result := string(data)
+	if !strings.Contains(result, "role: architect") {
+		t.Error("role should be updated")
+	}
+	if !strings.Contains(result, "name: Agent") {
+		t.Error("name should be preserved")
+	}
+	if !strings.Contains(result, "description: Desc") {
+		t.Error("description should be preserved")
+	}
+}
+
+func TestUpdateAgentFrontmatter_EmptyFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.md")
+	content := "---\nname: Agent\n---\n\n## Identity\nBody\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := UpdateAgentFrontmatter(path, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(path)
+	if string(data) != content {
+		t.Error("empty fields map should be a no-op")
+	}
+}

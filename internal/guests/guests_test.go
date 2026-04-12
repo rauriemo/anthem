@@ -891,3 +891,63 @@ func TestLoadOrchestratorPersona_NoFrontmatter(t *testing.T) {
 		t.Error("expected error for file without frontmatter")
 	}
 }
+
+func TestLoadAgentFrontmatter_Exists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.md")
+	content := "---\nname: TestAgent\nrole: artist\ndescription: A test artist\n---\n\n## Identity\nBody text\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fm, err := LoadAgentFrontmatter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fm["name"] != "TestAgent" {
+		t.Errorf("name = %v, want TestAgent", fm["name"])
+	}
+	if fm["role"] != "artist" {
+		t.Errorf("role = %v, want artist", fm["role"])
+	}
+}
+
+func TestLoadAgentFrontmatter_Missing(t *testing.T) {
+	fm, err := LoadAgentFrontmatter("/nonexistent/path/agent.md")
+	if err != nil {
+		t.Fatal("should not error for missing file")
+	}
+	if len(fm) != 0 {
+		t.Errorf("expected empty map, got %v", fm)
+	}
+}
+
+func TestLoadAgentFrontmatter_NoFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.md")
+	if err := os.WriteFile(path, []byte("Just plain text, no frontmatter"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	fm, err := LoadAgentFrontmatter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fm) != 0 {
+		t.Errorf("expected empty map for no frontmatter, got %v", fm)
+	}
+}
+
+func TestLoadAgentFrontmatter_MalformedYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.md")
+	content := "---\nname: [invalid yaml\n  broken: {{\n---\n\nBody\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadAgentFrontmatter(path)
+	if err == nil {
+		t.Error("expected error for malformed YAML")
+	}
+}

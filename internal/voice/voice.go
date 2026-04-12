@@ -3,7 +3,10 @@ package voice
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Section struct {
@@ -127,4 +130,88 @@ func UpdateAgentSection(filePath, sectionName, content string) error {
 	result.WriteByte('\n')
 
 	return os.WriteFile(filePath, []byte(result.String()), 0644)
+}
+
+// UpdateAgentFrontmatter reads an agent .md file, merges the provided fields
+// into its YAML frontmatter (preserving the markdown body), and writes it back.
+// Creates the file (and parent directories) if it doesn't exist.
+// Only non-zero-value fields in the map are merged; existing fields not
+// present in the map are preserved.
+func UpdateAgentFrontmatter(filePath string, fields map[string]any) error {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	var existing map[string]any
+	var body string
+
+	data, err := os.ReadFile(filePath)
+	if err == nil {
+		existing, body = splitFrontmatterMap(string(data))
+	} else {
+		existing = make(map[string]any)
+		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+			return fmt.Errorf("creating directory for %s: %w", filePath, err)
+		}
+	}
+
+	for k, v := range fields {
+		existing[k] = v
+	}
+
+	yamlBytes, err := yaml.Marshal(existing)
+	if err != nil {
+		return fmt.Errorf("marshaling frontmatter: %w", err)
+	}
+
+	var out strings.Builder
+	out.WriteString("---\n")
+	out.Write(yamlBytes)
+	out.WriteString("---\n")
+	if body != "" {
+		out.WriteString("\n")
+		out.WriteString(body)
+		if !strings.HasSuffix(body, "\n") {
+			out.WriteString("\n")
+		}
+	}
+
+	return os.WriteFile(filePath, []byte(out.String()), 0644)
+}
+
+// splitFrontmatterMap parses a frontmatter+body markdown file. Returns the
+// frontmatter as a map and the body as a string. If there is no frontmatter,
+// returns an empty map and the entire content as body.
+func splitFrontmatterMap(content string) (map[string]any, string) {
+	trimmed := strings.TrimSpace(content)
+	if !strings.HasPrefix(trimmed, "---") {
+		return make(map[string]any), content
+	}
+
+	rest := trimmed[3:]
+	if len(rest) > 0 && rest[0] == '\n' {
+		rest = rest[1:]
+	} else if len(rest) > 1 && rest[0] == '\r' && rest[1] == '\n' {
+		rest = rest[2:]
+	}
+
+	idx := strings.Index(rest, "\n---")
+	if idx < 0 {
+		return make(map[string]any), content
+	}
+
+	yamlPart := rest[:idx]
+	bodyPart := rest[idx+4:]
+	if len(bodyPart) > 0 && bodyPart[0] == '\n' {
+		bodyPart = bodyPart[1:]
+	} else if len(bodyPart) > 1 && bodyPart[0] == '\r' && bodyPart[1] == '\n' {
+		bodyPart = bodyPart[2:]
+	}
+
+	var fm map[string]any
+	if err := yaml.Unmarshal([]byte(yamlPart), &fm); err != nil || fm == nil {
+		fm = make(map[string]any)
+	}
+
+	return fm, strings.TrimSpace(bodyPart)
 }

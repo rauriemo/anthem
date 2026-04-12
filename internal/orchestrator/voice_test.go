@@ -120,6 +120,82 @@ func TestExecuteUpdateVoice_NewSection(t *testing.T) {
 	}
 }
 
+func TestExecuteUpdateVoice_AgentFile(t *testing.T) {
+	home := t.TempDir()
+	anthemDir := filepath.Join(home, ".anthem")
+	if err := os.MkdirAll(anthemDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orch := newVoiceTestOrch(t, home)
+	orch.homeDir = home
+
+	// Create agents directory and a guest agent file
+	agentsDir := filepath.Join(orch.projectRoot(), "agents")
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	guestPath := filepath.Join(agentsDir, "miyazaki.md")
+	guestContent := "---\nname: Miyazaki\ndescription: Artist\nrole: 2d-artist\n---\n\n## Identity\nOriginal identity\n"
+	if err := os.WriteFile(guestPath, []byte(guestContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := orch.executeUpdateVoice(context.Background(), Action{
+		Type:           ActionUpdateVoice,
+		SectionName:    "Personality",
+		SectionContent: "Creative and bold",
+		AgentFile:      "miyazaki.md",
+	})
+	if err != nil {
+		t.Fatalf("executeUpdateVoice() with AgentFile error: %v", err)
+	}
+
+	data, err := os.ReadFile(guestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := string(data)
+	if !strings.Contains(result, "## Personality") {
+		t.Error("guest file should have Personality section")
+	}
+	if !strings.Contains(result, "Creative and bold") {
+		t.Error("guest file should have section content")
+	}
+	if !strings.Contains(result, "Original identity") {
+		t.Error("guest file should preserve existing sections")
+	}
+}
+
+func TestExecuteUpdateVoice_EmptyAgentFileUsesDefaultRouting(t *testing.T) {
+	home := t.TempDir()
+	anthemDir := filepath.Join(home, ".anthem")
+	voicePath := filepath.Join(anthemDir, "VOICE.md")
+	if err := os.MkdirAll(anthemDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	orch := newVoiceTestOrch(t, home)
+	orch.homeDir = home
+
+	err := orch.executeUpdateVoice(context.Background(), Action{
+		Type:           ActionUpdateVoice,
+		SectionName:    "Preferences",
+		SectionContent: "Likes dark mode",
+	})
+	if err != nil {
+		t.Fatalf("executeUpdateVoice() error: %v", err)
+	}
+
+	data, err := os.ReadFile(voicePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "Likes dark mode") {
+		t.Error("with empty AgentFile, user section should go to VOICE.md")
+	}
+}
+
 func TestExecuteUpdateVoice_MergeExisting(t *testing.T) {
 	home := t.TempDir()
 	anthemDir := filepath.Join(home, ".anthem")
