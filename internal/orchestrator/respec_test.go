@@ -221,6 +221,71 @@ func TestHandleRespecMessage_NewAgentFile(t *testing.T) {
 	}
 }
 
+func TestHandleRespecMessage_StreamKindChat(t *testing.T) {
+	tmp := t.TempDir()
+
+	ch := &testChannel{in: make(chan channel.IncomingMessage, 16)}
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchRunner := newNoopRunner()
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		if opts.OnStream != nil {
+			opts.OnStream("hello from respec")
+		}
+		return &types.RunResult{
+			SessionID: "respec-sk",
+			ExitCode:  0,
+			Output:    `{"reasoning": "done", "actions": []}`,
+		}, nil
+	}
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = tmp
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "",
+		Tracker:        newNoopTracker(),
+		Runner:         newNoopRunner(),
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		ChannelManager: mgr,
+		OrchAgent:      orchAgent,
+	})
+
+	orch.handleRespecMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		SenderID:    "user-1",
+		Text:        "[system:respec] Start respec",
+	}, "")
+
+	msgs := ch.sentMessages()
+	var foundDelta, foundDone bool
+	for _, m := range msgs {
+		if m.StreamDelta != "" {
+			if m.StreamKind != "chat" {
+				t.Errorf("stream delta should have StreamKind=chat, got %q", m.StreamKind)
+			}
+			foundDelta = true
+		}
+		if m.StreamDone {
+			if m.StreamKind != "chat" {
+				t.Errorf("stream done should have StreamKind=chat, got %q", m.StreamKind)
+			}
+			foundDone = true
+		}
+	}
+	if !foundDelta {
+		t.Error("expected at least one stream delta message")
+	}
+	if !foundDone {
+		t.Error("expected a stream done message")
+	}
+}
+
 func TestHandleRespecMessage_ExistingAgentFile(t *testing.T) {
 	tmp := t.TempDir()
 	agentsDir := filepath.Join(tmp, "agents")

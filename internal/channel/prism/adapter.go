@@ -71,6 +71,7 @@ type frame struct {
 	DisplayIDs      []string            `json:"display_ids,omitempty"`
 	SuggestGuest    *suggestGuestFrame  `json:"suggest_guest,omitempty"`
 	ActivateGuest   *activateGuestFrame `json:"activate_guest,omitempty"`
+	Kind            string              `json:"kind,omitempty"`
 }
 
 type frameFile struct {
@@ -495,7 +496,7 @@ func (a *Adapter) sendDisplay(msg channel.OutgoingMessage) error {
 }
 
 func (a *Adapter) sendStream(msg channel.OutgoingMessage) error {
-	f := frame{Type: "stream", Text: msg.StreamDelta, Thread: msg.ThreadID, Done: msg.StreamDone, GuestID: msg.GuestID}
+	f := frame{Type: "stream", Text: msg.StreamDelta, Thread: msg.ThreadID, Done: msg.StreamDone, GuestID: msg.GuestID, Kind: msg.StreamKind}
 
 	if msg.ThreadID != "" {
 		a.mu.RLock()

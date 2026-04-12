@@ -44,6 +44,7 @@ type OutgoingMessage struct {
 	DisplayIDs    []string       `json:"display_ids,omitempty"`
 	StreamDelta   string         `json:"stream_delta,omitempty"`
 	StreamDone    bool           `json:"stream_done,omitempty"`
+	StreamKind    string         `json:"stream_kind,omitempty"`
 	GuestID       string         `json:"guest_id,omitempty"`
 	SuggestGuest  *SuggestGuest  `json:"suggest_guest,omitempty"`
 	ActivateGuest *ActivateGuest `json:"activate_guest,omitempty"`

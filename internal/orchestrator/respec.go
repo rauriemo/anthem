@@ -148,6 +148,7 @@ func (o *Orchestrator) handleRespecMessage(ctx context.Context, msg channel.Inco
 			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
 				StreamDelta: delta,
 				ThreadID:    msg.ThreadID,
+				StreamKind:  "chat",
 			})
 		}
 	}
@@ -175,6 +176,7 @@ func (o *Orchestrator) handleRespecMessage(ctx context.Context, msg channel.Inco
 		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
 			StreamDone: true,
 			ThreadID:   msg.ThreadID,
+			StreamKind: "chat",
 		})
 	}
 
@@ -196,6 +198,7 @@ func (o *Orchestrator) continueRespec(ctx context.Context, msg channel.IncomingM
 			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
 				StreamDelta: delta,
 				ThreadID:    msg.ThreadID,
+				StreamKind:  "chat",
 			})
 		}
 	}
@@ -220,6 +223,7 @@ func (o *Orchestrator) continueRespec(ctx context.Context, msg channel.IncomingM
 		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
 			StreamDone: true,
 			ThreadID:   msg.ThreadID,
+			StreamKind: "chat",
 		})
 	}
 

@@ -683,3 +683,85 @@ func TestActivateGuestWithTextContinues(t *testing.T) {
 		t.Errorf("res text = %q", resFrame.Text)
 	}
 }
+
+func TestSendStream_KindFieldSerializes(t *testing.T) {
+	msg := channel.OutgoingMessage{
+		StreamDelta: "hello",
+		ThreadID:    "t-1",
+		StreamKind:  "chat",
+	}
+
+	f := frame{
+		Type:   "stream",
+		Text:   msg.StreamDelta,
+		Thread: msg.ThreadID,
+		Done:   msg.StreamDone,
+		Kind:   msg.StreamKind,
+	}
+
+	data, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("failed to marshal frame: %v", err)
+	}
+
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("failed to unmarshal frame: %v", err)
+	}
+
+	kind, ok := decoded["kind"]
+	if !ok {
+		t.Fatal("expected 'kind' field in serialized frame")
+	}
+	if kind != "chat" {
+		t.Errorf("expected kind=chat, got %v", kind)
+	}
+}
+
+func TestSendStream_KindOmittedWhenEmpty(t *testing.T) {
+	f := frame{
+		Type: "stream",
+		Text: "hello",
+	}
+
+	data, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("failed to marshal frame: %v", err)
+	}
+
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("failed to unmarshal frame: %v", err)
+	}
+
+	if _, ok := decoded["kind"]; ok {
+		t.Error("kind field should be omitted when empty")
+	}
+}
+
+func TestStreamFrameKindPropagation(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	err := a.Send(context.Background(), channel.OutgoingMessage{
+		StreamDelta: "respec data",
+		StreamKind:  "chat",
+	})
+	if err != nil {
+		t.Fatalf("send stream: %v", err)
+	}
+
+	sf := readFrame(t, conn)
+	if sf.Type != "stream" {
+		t.Fatalf("expected stream frame, got %s", sf.Type)
+	}
+	if sf.Kind != "chat" {
+		t.Errorf("expected kind=chat, got %q", sf.Kind)
+	}
+}
