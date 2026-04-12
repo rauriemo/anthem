@@ -138,8 +138,8 @@ func TestScanDirectory(t *testing.T) {
 			setup: func(t *testing.T) string {
 				return fixtureDir(t)
 			},
-			wantCount: 4, // game-designer, code-reviewer, no-body, tooled-agent (incomplete + malformed + bad-auth-scheme skipped)
-			wantSlugs: []string{"game-designer", "code-reviewer", "no-body", "tooled-agent"},
+			wantCount: 5, // game-designer, code-reviewer, no-body, tooled-agent, async-agent (incomplete + malformed + bad-auth-scheme skipped)
+			wantSlugs: []string{"game-designer", "code-reviewer", "no-body", "tooled-agent", "async-agent"},
 		},
 		{
 			name: "empty directory",
@@ -949,5 +949,86 @@ func TestLoadAgentFrontmatter_MalformedYAML(t *testing.T) {
 	_, err := LoadAgentFrontmatter(path)
 	if err == nil {
 		t.Error("expected error for malformed YAML")
+	}
+}
+
+func TestParseFrontmatter_AsyncPolling(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		check func(t *testing.T, agent GuestAgent)
+	}{
+		{
+			name:  "parses async_polling from fixture",
+			input: readFixture(t, "async-agent.md"),
+			check: func(t *testing.T, agent GuestAgent) {
+				if agent.Name != "Async Agent" {
+					t.Errorf("Name = %q, want %q", agent.Name, "Async Agent")
+				}
+				if len(agent.HTTPTools) != 1 {
+					t.Fatalf("HTTPTools count = %d, want 1", len(agent.HTTPTools))
+				}
+				ht := agent.HTTPTools["veo"]
+				if ht.AsyncPolling == nil {
+					t.Fatal("AsyncPolling is nil")
+				}
+				ap := ht.AsyncPolling
+				if !ap.Enabled {
+					t.Error("Enabled should be true")
+				}
+				if ap.PollIntervalMS != 10000 {
+					t.Errorf("PollIntervalMS = %d, want 10000", ap.PollIntervalMS)
+				}
+				if ap.MaxWaitMS != 300000 {
+					t.Errorf("MaxWaitMS = %d, want 300000", ap.MaxWaitMS)
+				}
+				if ap.OperationNamePath != "name" {
+					t.Errorf("OperationNamePath = %q, want %q", ap.OperationNamePath, "name")
+				}
+				if ap.DonePath != "done" {
+					t.Errorf("DonePath = %q, want %q", ap.DonePath, "done")
+				}
+				if ap.ResultPath != "response.generateVideoResponse.generatedSamples[0].video.uri" {
+					t.Errorf("ResultPath = %q", ap.ResultPath)
+				}
+				if ap.DownloadAuth != "inherit" {
+					t.Errorf("DownloadAuth = %q, want %q", ap.DownloadAuth, "inherit")
+				}
+			},
+		},
+		{
+			name:  "omitted download_auth defaults to empty string",
+			input: "---\nname: NoAuth\ndescription: test\nhttp_tools:\n  t:\n    url: http://x\n    method: POST\n    async_polling:\n      enabled: true\n      poll_interval_ms: 5000\n      max_wait_ms: 60000\n      operation_name_path: name\n      done_path: done\n      result_path: result.uri\n---\n",
+			check: func(t *testing.T, agent GuestAgent) {
+				ap := agent.HTTPTools["t"].AsyncPolling
+				if ap == nil {
+					t.Fatal("AsyncPolling is nil")
+				}
+				if ap.DownloadAuth != "" {
+					t.Errorf("DownloadAuth = %q, want empty string", ap.DownloadAuth)
+				}
+			},
+		},
+		{
+			name:  "nil async_polling when not specified",
+			input: "---\nname: Plain\ndescription: test\nhttp_tools:\n  t:\n    url: http://x\n    method: POST\n---\n",
+			check: func(t *testing.T, agent GuestAgent) {
+				if agent.HTTPTools["t"].AsyncPolling != nil {
+					t.Error("AsyncPolling should be nil when not specified")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent, err := ParseFrontmatter([]byte(tt.input))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.check != nil {
+				tt.check(t, agent)
+			}
+		})
 	}
 }

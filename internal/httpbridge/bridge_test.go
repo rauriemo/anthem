@@ -754,3 +754,521 @@ func TestLoadConfigFromEnv_NotSet(t *testing.T) {
 		t.Fatal("expected error when env not set")
 	}
 }
+
+func TestValidateArtifactFilename(t *testing.T) {
+	tests := []struct {
+		name     string
+		filename string
+		mimeType string
+		want     string
+		wantErr  bool
+		errMsg   string
+	}{
+		{
+			name:     "valid mp4",
+			filename: "goblin-walk.mp4",
+			mimeType: "video/mp4",
+			want:     "goblin-walk.mp4",
+		},
+		{
+			name:     "valid png",
+			filename: "sprite.png",
+			mimeType: "image/png",
+			want:     "sprite.png",
+		},
+		{
+			name:     "missing extension gets appended",
+			filename: "goblin-walk",
+			mimeType: "video/mp4",
+			want:     "goblin-walk.mp4",
+		},
+		{
+			name:     "mismatched extension",
+			filename: "goblin-walk.gif",
+			mimeType: "video/mp4",
+			wantErr:  true,
+			errMsg:   "does not match",
+		},
+		{
+			name:     "unknown mime type with extension passes through",
+			filename: "data.bin",
+			mimeType: "application/octet-stream",
+			want:     "data.bin",
+		},
+		{
+			name:     "unknown mime type without extension passes through",
+			filename: "data",
+			mimeType: "application/octet-stream",
+			want:     "data",
+		},
+		{
+			name:     "case insensitive extension match",
+			filename: "video.MP4",
+			mimeType: "video/mp4",
+			want:     "video.MP4",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := validateArtifactFilename(tt.filename, tt.mimeType)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tt.errMsg != "" && !strings.Contains(err.Error(), tt.errMsg) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.errMsg)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeriveBaseURL(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{
+			"https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview:predictLongRunning",
+			"https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview",
+		},
+		{
+			"https://example.com/api",
+			"https://example.com/api",
+		},
+		{
+			"http://localhost:8080/v1/models/m:generate",
+			"http://localhost:8080/v1/models/m",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := deriveBaseURL(tt.input)
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAsyncPolling_HappyPath(t *testing.T) {
+	pollCount := 0
+	videoData := []byte("fake-mp4-video-data")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, ":predictLongRunning"):
+			json.NewEncoder(w).Encode(map[string]any{
+				"name": "operations/op-test-123",
+			})
+
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "operations/op-test-123"):
+			pollCount++
+			if pollCount < 2 {
+				json.NewEncoder(w).Encode(map[string]any{
+					"name": "operations/op-test-123",
+					"done": false,
+				})
+			} else {
+				json.NewEncoder(w).Encode(map[string]any{
+					"name": "operations/op-test-123",
+					"done": true,
+					"response": map[string]any{
+						"generateVideoResponse": map[string]any{
+							"generatedSamples": []any{
+								map[string]any{
+									"video": map[string]any{
+										"uri": fmt.Sprintf("http://%s/download/video.mp4", r.Host),
+									},
+								},
+							},
+						},
+					},
+				})
+			}
+
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/download/"):
+			w.Header().Set("Content-Type", "video/mp4")
+			w.Write(videoData)
+
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	outDir := t.TempDir()
+	saveTo := filepath.Join(outDir, "${input.filename}")
+
+	t.Setenv("TEST_GEMINI_KEY", "test-key-789")
+
+	tools := []ToolConfig{{
+		ID: "veo",
+		Config: guests.HTTPToolConfig{
+			URL:          srv.URL + "/models/veo:predictLongRunning",
+			Method:       "POST",
+			AuthTokenEnv: "TEST_GEMINI_KEY",
+			AuthScheme:   "api-key",
+			AsyncPolling: &guests.AsyncPollingConfig{
+				Enabled:           true,
+				PollIntervalMS:    100,
+				MaxWaitMS:         10000,
+				OperationNamePath: "name",
+				DonePath:          "done",
+				ResultPath:        "response.generateVideoResponse.generatedSamples[0].video.uri",
+				DownloadAuth:      "inherit",
+			},
+			RequestTemplate: map[string]any{
+				"instances": []any{map[string]any{"prompt": "${input.prompt}"}},
+			},
+			ResponseArtifact: &guests.ArtifactTemplate{
+				Type:   "video/mp4",
+				SaveTo: saveTo,
+			},
+			TimeoutMS: 30000,
+		},
+	}}
+
+	call := map[string]any{
+		"name":      "http__veo__call",
+		"arguments": map[string]string{"prompt": "animate a goblin", "filename": "goblin-walk.mp4"},
+	}
+	callJSON, _ := json.Marshal(call)
+	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
+
+	var out bytes.Buffer
+	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
+	if result["isError"] == true {
+		t.Fatalf("expected success, got error: %s", contentText(t, result))
+	}
+
+	text := contentText(t, result)
+	if !strings.Contains(text, "goblin-walk.mp4") {
+		t.Errorf("result text should mention filename: %s", text)
+	}
+	if !strings.Contains(text, "video/mp4") {
+		t.Errorf("result text should mention type: %s", text)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "goblin-walk.mp4"))
+	if err != nil {
+		t.Fatalf("artifact not written: %v", err)
+	}
+	if string(data) != string(videoData) {
+		t.Errorf("artifact content = %q, want %q", string(data), string(videoData))
+	}
+
+	if pollCount < 2 {
+		t.Errorf("expected at least 2 polls, got %d", pollCount)
+	}
+}
+
+func TestAsyncPolling_Timeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST":
+			json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-never"})
+		case r.Method == "GET":
+			json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-never", "done": false})
+		}
+	}))
+	defer srv.Close()
+
+	tools := []ToolConfig{{
+		ID: "veo-timeout",
+		Config: guests.HTTPToolConfig{
+			URL:          srv.URL + "/models/veo:predictLongRunning",
+			Method:       "POST",
+			AuthTokenEnv: "",
+			AsyncPolling: &guests.AsyncPollingConfig{
+				Enabled:           true,
+				PollIntervalMS:    50,
+				MaxWaitMS:         200,
+				OperationNamePath: "name",
+				DonePath:          "done",
+				ResultPath:        "result.uri",
+			},
+			RequestTemplate: map[string]any{"prompt": "${input.prompt}"},
+			TimeoutMS:       5000,
+		},
+	}}
+
+	call := map[string]any{
+		"name":      "http__veo-timeout__call",
+		"arguments": map[string]string{"prompt": "never finishes"},
+	}
+	callJSON, _ := json.Marshal(call)
+	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
+
+	var out bytes.Buffer
+	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
+	if result["isError"] != true {
+		t.Fatal("expected isError=true for timeout")
+	}
+	text := contentText(t, result)
+	if !strings.Contains(text, "timed out") {
+		t.Errorf("error should mention timeout: %s", text)
+	}
+}
+
+func TestAsyncPolling_DownloadAuthNone(t *testing.T) {
+	var downloadAuth string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST":
+			json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-dl"})
+		case strings.Contains(r.URL.Path, "operations/"):
+			json.NewEncoder(w).Encode(map[string]any{
+				"name": "operations/op-dl",
+				"done": true,
+				"response": map[string]any{
+					"result": map[string]any{
+						"uri": fmt.Sprintf("http://%s/download/file.mp4", r.Host),
+					},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/download/"):
+			downloadAuth = r.Header.Get("x-goog-api-key")
+			w.Write([]byte("video-bytes"))
+		}
+	}))
+	defer srv.Close()
+
+	outDir := t.TempDir()
+	t.Setenv("DL_TEST_KEY", "should-not-appear")
+
+	tools := []ToolConfig{{
+		ID: "veo-noauth-dl",
+		Config: guests.HTTPToolConfig{
+			URL:          srv.URL + "/api:predictLongRunning",
+			Method:       "POST",
+			AuthTokenEnv: "DL_TEST_KEY",
+			AuthScheme:   "api-key",
+			AsyncPolling: &guests.AsyncPollingConfig{
+				Enabled:           true,
+				PollIntervalMS:    50,
+				MaxWaitMS:         5000,
+				OperationNamePath: "name",
+				DonePath:          "done",
+				ResultPath:        "response.result.uri",
+				DownloadAuth:      "none",
+			},
+			RequestTemplate: map[string]any{"prompt": "${input.prompt}"},
+			ResponseArtifact: &guests.ArtifactTemplate{
+				Type:   "video/mp4",
+				SaveTo: filepath.Join(outDir, "${input.filename}"),
+			},
+			TimeoutMS: 10000,
+		},
+	}}
+
+	call := map[string]any{
+		"name":      "http__veo-noauth-dl__call",
+		"arguments": map[string]string{"prompt": "test", "filename": "test.mp4"},
+	}
+	callJSON, _ := json.Marshal(call)
+	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
+
+	var out bytes.Buffer
+	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
+	if result["isError"] == true {
+		t.Fatalf("expected success, got error: %s", contentText(t, result))
+	}
+
+	if downloadAuth != "" {
+		t.Errorf("download_auth=none should not send api key, got %q", downloadAuth)
+	}
+}
+
+func TestAsyncPolling_DownloadAuthInherit(t *testing.T) {
+	var downloadKey string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST":
+			json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-inh"})
+		case strings.Contains(r.URL.Path, "operations/"):
+			json.NewEncoder(w).Encode(map[string]any{
+				"name": "operations/op-inh",
+				"done": true,
+				"response": map[string]any{
+					"result": map[string]any{
+						"uri": fmt.Sprintf("http://%s/download/file.mp4", r.Host),
+					},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/download/"):
+			downloadKey = r.Header.Get("x-goog-api-key")
+			w.Write([]byte("video-bytes"))
+		}
+	}))
+	defer srv.Close()
+
+	outDir := t.TempDir()
+	t.Setenv("INH_TEST_KEY", "inherited-key-value")
+
+	tools := []ToolConfig{{
+		ID: "veo-inherit-dl",
+		Config: guests.HTTPToolConfig{
+			URL:          srv.URL + "/api:predictLongRunning",
+			Method:       "POST",
+			AuthTokenEnv: "INH_TEST_KEY",
+			AuthScheme:   "api-key",
+			AsyncPolling: &guests.AsyncPollingConfig{
+				Enabled:           true,
+				PollIntervalMS:    50,
+				MaxWaitMS:         5000,
+				OperationNamePath: "name",
+				DonePath:          "done",
+				ResultPath:        "response.result.uri",
+				DownloadAuth:      "inherit",
+			},
+			RequestTemplate: map[string]any{"prompt": "${input.prompt}"},
+			ResponseArtifact: &guests.ArtifactTemplate{
+				Type:   "video/mp4",
+				SaveTo: filepath.Join(outDir, "${input.filename}"),
+			},
+			TimeoutMS: 10000,
+		},
+	}}
+
+	call := map[string]any{
+		"name":      "http__veo-inherit-dl__call",
+		"arguments": map[string]string{"prompt": "test", "filename": "test.mp4"},
+	}
+	callJSON, _ := json.Marshal(call)
+	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
+
+	var out bytes.Buffer
+	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
+	if result["isError"] == true {
+		t.Fatalf("expected success, got error: %s", contentText(t, result))
+	}
+
+	if downloadKey != "inherited-key-value" {
+		t.Errorf("download_auth=inherit should send api key, got %q", downloadKey)
+	}
+}
+
+func TestAsyncPolling_FilenameValidation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST":
+			json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-fn"})
+		case strings.Contains(r.URL.Path, "operations/"):
+			json.NewEncoder(w).Encode(map[string]any{
+				"name": "operations/op-fn",
+				"done": true,
+				"response": map[string]any{
+					"result": map[string]any{
+						"uri": fmt.Sprintf("http://%s/download/file.mp4", r.Host),
+					},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/download/"):
+			w.Write([]byte("video"))
+		}
+	}))
+	defer srv.Close()
+
+	outDir := t.TempDir()
+
+	baseCfg := guests.HTTPToolConfig{
+		URL:    srv.URL + "/api:predictLongRunning",
+		Method: "POST",
+		AsyncPolling: &guests.AsyncPollingConfig{
+			Enabled:           true,
+			PollIntervalMS:    50,
+			MaxWaitMS:         5000,
+			OperationNamePath: "name",
+			DonePath:          "done",
+			ResultPath:        "response.result.uri",
+		},
+		RequestTemplate: map[string]any{"prompt": "${input.prompt}"},
+		ResponseArtifact: &guests.ArtifactTemplate{
+			Type:   "video/mp4",
+			SaveTo: filepath.Join(outDir, "${input.filename}"),
+		},
+		TimeoutMS: 10000,
+	}
+
+	t.Run("missing extension gets appended", func(t *testing.T) {
+		tools := []ToolConfig{{ID: "veo-fn", Config: baseCfg}}
+		call := map[string]any{
+			"name":      "http__veo-fn__call",
+			"arguments": map[string]string{"prompt": "test", "filename": "no-ext"},
+		}
+		callJSON, _ := json.Marshal(call)
+		input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
+
+		var out bytes.Buffer
+		if err := Run(tools, strings.NewReader(input), &out); err != nil {
+			t.Fatal(err)
+		}
+
+		resp := parseResponse(t, out.Bytes())
+		result := resultMap(t, resp)
+		if result["isError"] == true {
+			t.Fatalf("expected success: %s", contentText(t, result))
+		}
+		text := contentText(t, result)
+		if !strings.Contains(text, "no-ext.mp4") {
+			t.Errorf("should append .mp4 extension: %s", text)
+		}
+	})
+
+	t.Run("mismatched extension errors", func(t *testing.T) {
+		tools := []ToolConfig{{ID: "veo-fn2", Config: baseCfg}}
+		call := map[string]any{
+			"name":      "http__veo-fn2__call",
+			"arguments": map[string]string{"prompt": "test", "filename": "bad.gif"},
+		}
+		callJSON, _ := json.Marshal(call)
+		input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
+
+		var out bytes.Buffer
+		if err := Run(tools, strings.NewReader(input), &out); err != nil {
+			t.Fatal(err)
+		}
+
+		resp := parseResponse(t, out.Bytes())
+		result := resultMap(t, resp)
+		if result["isError"] != true {
+			t.Fatal("expected error for mismatched extension")
+		}
+		text := contentText(t, result)
+		if !strings.Contains(text, "does not match") {
+			t.Errorf("error should mention mismatch: %s", text)
+		}
+	})
+}

@@ -260,6 +260,10 @@ func executeHTTPTool(cfg guests.HTTPToolConfig, args map[string]string) (string,
 		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 500))
 	}
 
+	if cfg.AsyncPolling != nil && cfg.AsyncPolling.Enabled {
+		return executeAsyncPolling(cfg, respBody, args)
+	}
+
 	if cfg.ResponseArtifact != nil {
 		return handleArtifactResponse(cfg.ResponseArtifact, respBody, args)
 	}
@@ -320,6 +324,244 @@ func extractInlineData(body []byte) (b64 string, mimeType string, err error) {
 		}
 	}
 	return "", "", fmt.Errorf("no inlineData found in response")
+}
+
+// mimeToExt maps MIME types to canonical file extensions.
+var mimeToExt = map[string]string{
+	"video/mp4":  ".mp4",
+	"video/webm": ".webm",
+	"image/png":  ".png",
+	"image/jpeg": ".jpg",
+	"image/gif":  ".gif",
+	"image/webp": ".webp",
+	"audio/mpeg": ".mp3",
+	"audio/wav":  ".wav",
+}
+
+// validateArtifactFilename ensures the filename has an extension consistent with
+// the artifact MIME type. Missing extensions are appended; mismatched extensions
+// produce an error.
+func validateArtifactFilename(filename, mimeType string) (string, error) {
+	expected, known := mimeToExt[mimeType]
+	ext := filepath.Ext(filename)
+
+	if ext == "" {
+		if !known {
+			return filename, nil
+		}
+		return filename + expected, nil
+	}
+
+	if known && !strings.EqualFold(ext, expected) {
+		return "", fmt.Errorf("filename extension %q does not match artifact type %s (expected %s)", ext, mimeType, expected)
+	}
+	return filename, nil
+}
+
+// buildAuthHeaders constructs the auth headers for the given tool config.
+func buildAuthHeaders(cfg guests.HTTPToolConfig) http.Header {
+	h := make(http.Header)
+	if cfg.AuthTokenEnv == "" {
+		return h
+	}
+	token := os.Getenv(cfg.AuthTokenEnv)
+	if token == "" {
+		return h
+	}
+	switch cfg.AuthScheme {
+	case "bearer":
+		h.Set("Authorization", "Bearer "+token)
+	case "api-key":
+		h.Set("x-goog-api-key", token)
+	default:
+		h.Set("Authorization", "Bearer "+token)
+	}
+	return h
+}
+
+// resolveDownloadAuth returns the headers to use for artifact downloads based on
+// the async_polling.download_auth setting.
+//   - "inherit" or "" (default): reuse the initial auth headers
+//   - "none": no auth headers on download
+func resolveDownloadAuth(cfg guests.HTTPToolConfig) http.Header {
+	if cfg.AsyncPolling == nil {
+		return buildAuthHeaders(cfg)
+	}
+	switch cfg.AsyncPolling.DownloadAuth {
+	case "none":
+		return make(http.Header)
+	default:
+		return buildAuthHeaders(cfg)
+	}
+}
+
+// deriveBaseURL strips the method suffix (e.g. ":predictLongRunning") from a URL
+// to get the API base for polling.
+func deriveBaseURL(rawURL string) string {
+	idx := strings.LastIndex(rawURL, ":")
+	// Only strip if the colon is after the scheme (past ://)
+	schemeEnd := strings.Index(rawURL, "://")
+	if idx > schemeEnd+3 {
+		return rawURL[:idx]
+	}
+	return rawURL
+}
+
+// executeAsyncPolling handles the long-running operation pattern: extract the
+// operation name from the initial response, poll until done, then download and
+// save the artifact.
+func executeAsyncPolling(cfg guests.HTTPToolConfig, initialResp []byte, args map[string]string) (string, error) {
+	polling := cfg.AsyncPolling
+
+	var parsed map[string]any
+	if err := json.Unmarshal(initialResp, &parsed); err != nil {
+		return "", fmt.Errorf("parsing initial async response: %w", err)
+	}
+
+	opNameRaw, err := extractByPath(parsed, polling.OperationNamePath)
+	if err != nil {
+		return "", fmt.Errorf("extracting operation name: %w", err)
+	}
+	opName, ok := opNameRaw.(string)
+	if !ok {
+		return "", fmt.Errorf("operation name is %T, expected string", opNameRaw)
+	}
+
+	baseURL := deriveBaseURL(cfg.URL)
+	pollURL := baseURL + "/" + opName
+
+	authHeaders := buildAuthHeaders(cfg)
+	pollInterval := time.Duration(polling.PollIntervalMS) * time.Millisecond
+	if pollInterval <= 0 {
+		pollInterval = 10 * time.Second
+	}
+	maxWait := time.Duration(polling.MaxWaitMS) * time.Millisecond
+	if maxWait <= 0 {
+		maxWait = 5 * time.Minute
+	}
+
+	deadline := time.Now().Add(maxWait)
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	var finalResp map[string]any
+	for {
+		time.Sleep(pollInterval)
+
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("operation timed out after %dms (max: %dms)", polling.MaxWaitMS, polling.MaxWaitMS)
+		}
+
+		req, err := http.NewRequest("GET", pollURL, nil)
+		if err != nil {
+			return "", fmt.Errorf("creating poll request: %w", err)
+		}
+		for k, vals := range authHeaders {
+			for _, v := range vals {
+				req.Header.Set(k, v)
+			}
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("polling failed: %w", err)
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("reading poll response: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			retryAfter := resp.Header.Get("Retry-After")
+			return "", fmt.Errorf("polling rate-limited (Retry-After: %s): %s", retryAfter, truncate(string(body), 500))
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return "", fmt.Errorf("polling failed: HTTP %d: %s", resp.StatusCode, truncate(string(body), 500))
+		}
+
+		if err := json.Unmarshal(body, &finalResp); err != nil {
+			return "", fmt.Errorf("malformed poll response: %w", err)
+		}
+
+		doneRaw, err := extractByPath(finalResp, polling.DonePath)
+		if err != nil {
+			continue
+		}
+		done, ok := doneRaw.(bool)
+		if !ok || !done {
+			continue
+		}
+
+		break
+	}
+
+	resultURIRaw, err := extractByPath(finalResp, polling.ResultPath)
+	if err != nil {
+		return "", fmt.Errorf("operation completed but result path not found (%s): %s", polling.ResultPath, truncate(fmt.Sprintf("%v", finalResp), 2000))
+	}
+	resultURI, ok := resultURIRaw.(string)
+	if !ok {
+		return "", fmt.Errorf("result path value is %T, expected string", resultURIRaw)
+	}
+
+	if cfg.ResponseArtifact == nil {
+		return fmt.Sprintf("Async operation completed. Result URI: %s", resultURI), nil
+	}
+
+	return handleAsyncArtifactDownload(cfg, resultURI, args)
+}
+
+// handleAsyncArtifactDownload downloads a binary artifact from the given URI and
+// saves it to the configured path.
+func handleAsyncArtifactDownload(cfg guests.HTTPToolConfig, artifactURI string, args map[string]string) (string, error) {
+	savePath, err := resolveString(cfg.ResponseArtifact.SaveTo, args)
+	if err != nil {
+		return "", fmt.Errorf("resolving save_to path: %w", err)
+	}
+
+	savePath, err = validateArtifactFilename(savePath, cfg.ResponseArtifact.Type)
+	if err != nil {
+		return "", err
+	}
+
+	dlHeaders := resolveDownloadAuth(cfg)
+
+	req, err := http.NewRequest("GET", artifactURI, nil)
+	if err != nil {
+		return "", fmt.Errorf("creating download request: %w", err)
+	}
+	for k, vals := range dlHeaders {
+		for _, v := range vals {
+			req.Header.Set(k, v)
+		}
+	}
+
+	client := &http.Client{Timeout: 2 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("artifact download failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("artifact download failed: HTTP %d: %s", resp.StatusCode, truncate(string(body), 500))
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("reading artifact data: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(savePath), 0755); err != nil {
+		return "", fmt.Errorf("creating output directory: %w", err)
+	}
+	if err := os.WriteFile(savePath, data, 0644); err != nil {
+		return "", fmt.Errorf("writing artifact: %w", err)
+	}
+
+	return fmt.Sprintf("Saved %s (%d bytes) to %s", cfg.ResponseArtifact.Type, len(data), savePath), nil
 }
 
 func truncate(s string, max int) string {
