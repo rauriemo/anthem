@@ -57,7 +57,7 @@ Press `Ctrl+C` to stop. Anthem drains active agents (up to 10s), releases all cl
 
 ```mermaid
 flowchart LR
-  U["You\n(Voice / Slack / GitHub)"] -->|describe feature| OA["Orchestrator agent\n(Claude + VOICE.md)"]
+  U["You\n(Voice / Slack / GitHub)"] -->|describe feature| OA["Orchestrator agent\n(Claude + orchestrator.md\n+ VOICE.md)"]
   OA -->|create issues| GH["GitHub Issues"]
   GH -->|poll| D["Anthem daemon\n(Go)"]
   D -->|dispatch| W[Workspace per task]
@@ -125,7 +125,7 @@ On Windows, if Smart App Control blocks `go run`, build and run the binary direc
 - **Per-task workspaces**: isolated directories with lifecycle hooks
 - **SQLite audit log**: append-only event log for dispatches, retries, wave transitions, orchestrator actions, voice updates
 - **Maintenance scanner**: detects repeated failures, stale tasks, budget anomalies, and drift -- notifies via channel
-- **Self-evolving personality**: orchestrator updates VOICE.md as it learns preferences, with changelog
+- **Two-file identity model**: orchestrator character lives in project-specific `agents/orchestrator.md`; shared user knowledge in `~/.anthem/VOICE.md`. `update_voice` routes character sections (Identity, Personality, Your Focus, Coordination) to the orchestrator file and user sections to VOICE.md. Changes logged to `~/.anthem/voice-changelog.md`
 - **Retry with backoff**: failed tasks retry with exponential delays
 - **State persistence**: retry queue and cost data survive restarts
 - **Config hot-reload**: edit WORKFLOW.md while running
@@ -142,7 +142,7 @@ On Windows, if Smart App Control blocks `go run`, build and run the binary direc
 
 | Command | Description |
 |---------|-------------|
-| `anthem init` | Create starter WORKFLOW.md + bootstrap `~/.anthem/` |
+| `anthem init` | Create starter WORKFLOW.md, `agents/orchestrator.md`, and bootstrap `~/.anthem/` |
 | `anthem run` | Start the orchestrator |
 | `anthem run -w path/to/WORKFLOW.md` | Use a specific workflow file |
 | `anthem run --log-level debug` | Verbose logging |
@@ -421,11 +421,21 @@ system:
 
 Both levels combine into a `## Constraints (non-negotiable)` block in the prompt. Anthem appends a meta-constraint preventing agents from editing constraint definitions.
 
-### VOICE.md
+### Agent Identity (Two-File Model)
 
-Global personality at `~/.anthem/VOICE.md`. Used exclusively by the orchestrator agent (not executors) for task management and user communication:
+Anthem uses a two-file identity model:
+
+- **`agents/orchestrator.md`** -- Project-specific orchestrator character (Identity, Personality, Your Focus, Coordination). Lives alongside guest agent files in the project's `agents/` directory. Each project's orchestrator develops a unique personality over time. Created by `anthem init` or Forge scaffolding.
+- **`~/.anthem/VOICE.md`** -- Global user knowledge shared across all projects. Contains facts and stable preferences about the user (communication style, working habits, expertise) -- not project state and not agent self-description. Acts as an onboarding brief so new agents don't start blind.
 
 ```markdown
+# agents/orchestrator.md
+---
+name: "MyProject"
+description: "Orchestrator for the MyProject workspace"
+role: orchestrator
+---
+
 ## Identity
 Name: Aria
 Role: Senior engineer
@@ -435,13 +445,27 @@ Role: Senior engineer
 - Prefer shipping over perfection.
 ```
 
-The orchestrator evolves VOICE.md via the `update_voice` action as it learns preferences. Changes are logged to `~/.anthem/voice-changelog.md`. See [VOICE.md.example](VOICE.md.example).
+```markdown
+# ~/.anthem/VOICE.md
+## Communication Style
+- Prefers concise responses with code examples over walls of text.
+
+## Working Habits
+- Likes to review plans before implementation.
+```
+
+The orchestrator evolves both files via the `update_voice` action. Character sections (Identity, Personality, Your Focus, Coordination) route to `agents/orchestrator.md`; user-knowledge sections route to `~/.anthem/VOICE.md`. All routing decisions are logged. Changes to VOICE.md are also logged to `~/.anthem/voice-changelog.md`.
+
+**Migration**: On first run after upgrading, Anthem automatically migrates existing Identity/Personality sections from `~/.anthem/VOICE.md` to `agents/orchestrator.md`. If `orchestrator.md` already exists, migration is a no-op (a warning is logged if stale personality sections remain in VOICE.md).
+
+> **Note**: `orchestrator.md` is not a guest agent. It lives in `agents/` for authoring consistency but is explicitly excluded from the `GuestIndex` and never appears in Prism's guest roster.
 
 ### State Files
 
 | File | Purpose |
 |------|---------|
-| `~/.anthem/VOICE.md` | Orchestrator personality |
+| `agents/orchestrator.md` | Project-specific orchestrator character (Identity, Personality, Focus, Coordination) |
+| `~/.anthem/VOICE.md` | Shared user knowledge (communication style, habits, expertise) |
 | `~/.anthem/constraints.yaml` | User-level safety rules |
 | `~/.anthem/channels.yaml` | Channel credentials (Slack tokens, Dispatch shared secret) |
 | `~/.anthem/state.json` | Persisted retry queue and cost data |

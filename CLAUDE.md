@@ -2,7 +2,7 @@
 
 ## What Is Anthem
 
-Anthem is an open-source agent orchestrator for Claude Code -- an alternative to OpenAI Symphony with a key differentiator: a hybrid architecture where a Go daemon handles mechanical reliability (polling, process management, workspace isolation, retry, state) and an AI orchestrator agent (Phase 3) sits on top for intelligence (user communication, task decomposition, parallel planning). The orchestrator agent uses VOICE.md for personality and learns the user over time. Executor agents are headless coding workers that get harnesses (WORKFLOW.md, skills, MCP tools, constraints), not personality.
+Anthem is an open-source agent orchestrator for Claude Code -- an alternative to OpenAI Symphony with a key differentiator: a hybrid architecture where a Go daemon handles mechanical reliability (polling, process management, workspace isolation, retry, state) and an AI orchestrator agent (Phase 3) sits on top for intelligence (user communication, task decomposition, parallel planning). The orchestrator agent uses a two-file identity model: project-specific character from `agents/orchestrator.md` and shared user knowledge from `~/.anthem/VOICE.md`. Executor agents are headless coding workers that get harnesses (WORKFLOW.md, skills, MCP tools, constraints), not personality. All agents (orchestrator and guests) receive `VOICE.md` user context so they benefit from shared learning about the user.
 
 ## Plans and Architecture Docs
 
@@ -18,10 +18,12 @@ These are the source of truth for what to build and how.
 - **Language**: Go (latest stable)
 - **Module path**: `github.com/rauriemo/anthem`
 - **Cross-platform**: Windows-first, all three OS from day 1. Build tags for platform-specific process management.
-- **Hybrid architecture**: Go daemon = reliability (polling, process mgmt, workspace isolation, retry, state). Orchestrator agent = intelligence (Claude session with VOICE.md, task decomposition, wave planning). Executors = headless Claude Code workers with harnesses.
-- **VOICE.md**: `~/.anthem/VOICE.md`. Orchestrator agent only, NOT executors.
+- **Hybrid architecture**: Go daemon = reliability (polling, process mgmt, workspace isolation, retry, state). Orchestrator agent = intelligence (Claude session with orchestrator persona + user context, task decomposition, wave planning). Executors = headless Claude Code workers with harnesses.
+- **Two-file identity model**: `agents/orchestrator.md` holds the project-specific orchestrator character (Identity, Personality, Your Focus, Coordination). `~/.anthem/VOICE.md` holds shared user knowledge (communication style, habits, expertise) -- facts and stable preferences, not project state or agent self-description. Both are injected into orchestrator prompts. Guest agents receive `VOICE.md` user context. `orchestrator.md` lives in `agents/` for authoring consistency but is **not** a guest -- it's excluded from GuestIndex and never appears in Prism's roster.
+- **Section routing**: `update_voice` uses explicit allowlists. Agent-owned sections (Identity, Personality, Your Focus, Coordination) route to `agents/orchestrator.md`. All other sections default to `~/.anthem/VOICE.md`. Routing decisions are logged.
+- **Migration**: On startup, `voice.MigrateVoiceToOrchestrator()` moves Identity/Personality from VOICE.md to `agents/orchestrator.md` if orchestrator.md doesn't exist. If both exist, orchestrator.md wins and VOICE.md is not auto-pruned (warning logged).
 - **Constraints**: Two-tier (`~/.anthem/constraints.yaml` + `system.constraints` in WORKFLOW.md) with meta-constraint protection.
-- **Global state root**: `~/.anthem/` (VOICE.md, constraints.yaml, state.json, audit.db, plans/, voice-changelog.md)
+- **Global state root**: `~/.anthem/` (VOICE.md, constraints.yaml, state.json, audit.db, plans/, voice-changelog.md). Project-level: `agents/orchestrator.md`
 - **GitHub auth**: `GITHUB_TOKEN` env var, fallback to `gh auth token`.
 - **Dashboard**: Fulfilled by Prism (separate repo).
 - **Testing**: Interface-based mocks, table-driven tests, `//go:build integration` tagged tests, `testdata/` fixtures.
@@ -75,7 +77,7 @@ See `docs/plans/architecture.md` and `docs/plans/implementation.md` for implemen
 
 **Unity Editor MCP:** Prefer **Unity’s official MCP** with `com.unity.ai.assistant` **2.x**: the stdio entrypoint is the **relay** binary with `--mcp` (installed under `~/.unity/relay/`, on Windows `%USERPROFILE%\.unity\relay\relay_win.exe`). User must approve external clients in **Edit → Project Settings → AI → Unity MCP**. Docs: [Unity MCP overview](https://docs.unity3d.com/Packages/com.unity.ai.assistant@2.0/manual/unity-mcp-overview.html), [Get started](https://docs.unity3d.com/Packages/com.unity.ai.assistant@2.0/manual/unity-mcp-get-started.html). Tool names vary by package version (e.g. `Unity_GetConsoleLogs`, `Unity_RunCommand`); do not assume older doc examples like `Unity_ManageScene` exist.
 
-**Primary code paths:** `internal/orchestrator/orchestrator.go` (guest mention + MCP write), `internal/orchestrator/guestdispatch.go` (parallel guests + MCP merge), `internal/orchestrator/featurewriter.go`, `internal/harness/harness.go` (`WriteMCPConfig`, `MergeGuestServers`), `internal/guests/guests.go`.
+**Primary code paths:** `internal/orchestrator/orchestrator.go` (guest mention + MCP write + `executeUpdateVoice` routing), `internal/orchestrator/orchagent.go` (`buildSystemPrompt` with `orchPersona` + `userContext`), `internal/orchestrator/guestdispatch.go` (parallel guests + MCP merge + `userContext` injection), `internal/orchestrator/featurewriter.go`, `internal/harness/harness.go` (`WriteMCPConfig`, `MergeGuestServers`), `internal/guests/guests.go` (`LoadOrchestratorPersona`, `ScanDirectory` with orchestrator exclusion), `internal/voice/voice.go` (`IsAgentSection`, `UpdateAgentSection`), `internal/voice/migrate.go` (`MigrateVoiceToOrchestrator`).
 
 **Security (unchanged intent):** `auth_scheme` for HTTP tools: bearer-only at parse time where enforced; never persist auth tokens in YAML or `.mcp.json` — only env var names. Deny-by-default allowlists when `allowed_tools` is empty but tools are declared.
 
@@ -83,7 +85,7 @@ See `docs/plans/architecture.md` and `docs/plans/implementation.md` for implemen
 
 ## Guest Agents (Shipped)
 
-Guest agents are lightweight persona definitions (markdown files with YAML frontmatter) in a project's `agents/` directory. Anthem scans this directory on boot, generates `.agents-index.json`, and advertises the roster to Prism via `guest_agents` on `auth_ok`.
+Guest agents are lightweight persona definitions (markdown files with YAML frontmatter) in a project's `agents/` directory. Anthem scans this directory on boot (explicitly skipping `orchestrator.md`), generates `.agents-index.json`, and advertises the roster to Prism via `guest_agents` on `auth_ok`. `orchestrator.md` is loaded separately via `guests.LoadOrchestratorPersona()` and injected into orchestrator prompts only.
 
 Full spec: `docs/plans/guest-agents.md`
 
@@ -96,9 +98,10 @@ Full spec: `docs/plans/guest-agents.md`
 - **StateSnapshot extensions**: `ActiveGuestsSummary`, `SharedContext`, `ConversationHistory` injected when guests are active. System prompt gains "Active Specialists" awareness section. `OrchestratorResponse.ContextUpdate` extracted and applied to SharedContext.
 
 Key Anthem responsibilities:
-- `internal/guests/` package: scan `agents/`, parse frontmatter, generate index, load persona on demand
+- `internal/guests/` package: scan `agents/` (skip `orchestrator.md`), parse frontmatter, generate index, load persona on demand, `LoadOrchestratorPersona()` for orchestrator identity
+- `internal/voice/` package: section routing (`IsAgentSection`), `UpdateAgentSection()` for writing to agent .md files, `MigrateVoiceToOrchestrator()` for first-run migration
 - WebSocket protocol: `guest_agents` in auth, `active_guests`/`mention` in req, `guest_id`/`suggest_guest` in res
-- Orchestrator: compressed context injection (roster summary for all active guests, full persona only for the responding guest), capability-matching suggestions
+- Orchestrator: compressed context injection (roster summary for all active guests, full persona only for the responding guest), capability-matching suggestions. Orchestrator prompts receive `orchPersona` (from `orchestrator.md`) + `userContext` (from `VOICE.md`). Guest prompts receive `userContext`.
 - Config: `guests` allowlist and `max_active_guests` in WORKFLOW.md frontmatter
 - Fallback: `~/.anthem/agents/` for projects without an `agents/` directory
 
