@@ -1643,6 +1643,22 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		}
 	}
 
+	// --- Server-driven guest activation on invite intent ---
+	if result := detectInviteIntent(msg.Text, msg.ActiveGuests, o.guestIndex); result != nil {
+		if o.channelMgr != nil {
+			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+				ActivateGuest: &channel.ActivateGuest{
+					ID:     result.GuestID,
+					Reason: result.Reason,
+				},
+			})
+		}
+		msg.ActiveGuests = append(msg.ActiveGuests, result.GuestID)
+		msg.Mention = result.GuestID
+		o.handleGuestMention(ctx, msg)
+		return
+	}
+
 	// --- Guest dispatch for ALL modes (runs in parallel with mode handler) ---
 	var guestWg *sync.WaitGroup
 	var includeOrchestrator bool

@@ -872,3 +872,91 @@ func TestDispatchSelectedGuests_StreamDoneOnError(t *testing.T) {
 		t.Errorf("expected StreamDone even on error, got %d", doneCount)
 	}
 }
+
+func buildTestGuestIndex(ids ...string) *guests.GuestIndex {
+	agents := make(map[string]guests.GuestAgent, len(ids))
+	for _, id := range ids {
+		name := strings.ToUpper(id[:1]) + id[1:]
+		agents[id] = guests.GuestAgent{
+			ID:   id,
+			Name: name,
+		}
+	}
+	return &guests.GuestIndex{Agents: agents}
+}
+
+func TestDetectInviteIntent_MatchesInactiveGuest(t *testing.T) {
+	idx := buildTestGuestIndex("tolkien", "shigeru")
+	result := detectInviteIntent("invite tolkien to the chat", nil, idx)
+	if result == nil {
+		t.Fatal("expected match, got nil")
+	}
+	if result.GuestID != "tolkien" {
+		t.Errorf("guest_id = %q, want %q", result.GuestID, "tolkien")
+	}
+	if result.Reason == "" {
+		t.Error("expected non-empty reason")
+	}
+}
+
+func TestDetectInviteIntent_IgnoresActiveGuest(t *testing.T) {
+	idx := buildTestGuestIndex("tolkien", "shigeru")
+	result := detectInviteIntent("invite tolkien to the chat", []string{"tolkien"}, idx)
+	if result != nil {
+		t.Errorf("expected nil for already-active guest, got %+v", result)
+	}
+}
+
+func TestDetectInviteIntent_NoMatchForUnrelatedMessage(t *testing.T) {
+	idx := buildTestGuestIndex("tolkien", "shigeru")
+	result := detectInviteIntent("tell me about tolkien's writing style", nil, idx)
+	if result != nil {
+		t.Errorf("expected nil for message without invite verb, got %+v", result)
+	}
+}
+
+func TestDetectInviteIntent_CaseInsensitive(t *testing.T) {
+	idx := buildTestGuestIndex("tolkien")
+	result := detectInviteIntent("INVITE TOLKIEN", nil, idx)
+	if result == nil {
+		t.Fatal("expected case-insensitive match, got nil")
+	}
+	if result.GuestID != "tolkien" {
+		t.Errorf("guest_id = %q, want %q", result.GuestID, "tolkien")
+	}
+}
+
+func TestDetectInviteIntent_MatchesByName(t *testing.T) {
+	agents := map[string]guests.GuestAgent{
+		"narrative-writer": {ID: "narrative-writer", Name: "Tolkien"},
+	}
+	idx := &guests.GuestIndex{Agents: agents}
+	result := detectInviteIntent("add Tolkien please", nil, idx)
+	if result == nil {
+		t.Fatal("expected match by name, got nil")
+	}
+	if result.GuestID != "narrative-writer" {
+		t.Errorf("guest_id = %q, want %q", result.GuestID, "narrative-writer")
+	}
+}
+
+func TestDetectInviteIntent_NilIndex(t *testing.T) {
+	result := detectInviteIntent("invite tolkien", nil, nil)
+	if result != nil {
+		t.Errorf("expected nil for nil index, got %+v", result)
+	}
+}
+
+func TestDetectInviteIntent_AlternateVerbs(t *testing.T) {
+	idx := buildTestGuestIndex("tolkien")
+	for _, text := range []string{
+		"bring in tolkien",
+		"pull in tolkien",
+		"add tolkien to the chat",
+	} {
+		result := detectInviteIntent(text, nil, idx)
+		if result == nil {
+			t.Errorf("expected match for %q, got nil", text)
+		}
+	}
+}

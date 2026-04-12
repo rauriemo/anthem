@@ -45,26 +45,32 @@ type suggestGuestFrame struct {
 	Reason string `json:"reason"`
 }
 
+type activateGuestFrame struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+}
+
 type frame struct {
-	Type            string             `json:"type"`
-	Token           string             `json:"token,omitempty"`
-	Client          string             `json:"client,omitempty"`
-	ID              string             `json:"id,omitempty"`
-	Text            string             `json:"text,omitempty"`
-	Event           string             `json:"event,omitempty"`
-	Error           string             `json:"error,omitempty"`
-	Ack             bool               `json:"ack,omitempty"`
-	Thread          string             `json:"thread,omitempty"`
-	Component       any                `json:"component,omitempty"`
-	Done            bool               `json:"done,omitempty"`
-	Files           []frameFile        `json:"files,omitempty"`
-	GuestAgents     []guestAgentInfo   `json:"guest_agents,omitempty"`
-	MaxActiveGuests int                `json:"max_active_guests,omitempty"`
-	ActiveGuests    []string           `json:"active_guests,omitempty"`
-	Mention         string             `json:"mention,omitempty"`
-	GuestID         string             `json:"guest_id,omitempty"`
-	DisplayIDs      []string           `json:"display_ids,omitempty"`
-	SuggestGuest    *suggestGuestFrame `json:"suggest_guest,omitempty"`
+	Type            string              `json:"type"`
+	Token           string              `json:"token,omitempty"`
+	Client          string              `json:"client,omitempty"`
+	ID              string              `json:"id,omitempty"`
+	Text            string              `json:"text,omitempty"`
+	Event           string              `json:"event,omitempty"`
+	Error           string              `json:"error,omitempty"`
+	Ack             bool                `json:"ack,omitempty"`
+	Thread          string              `json:"thread,omitempty"`
+	Component       any                 `json:"component,omitempty"`
+	Done            bool                `json:"done,omitempty"`
+	Files           []frameFile         `json:"files,omitempty"`
+	GuestAgents     []guestAgentInfo    `json:"guest_agents,omitempty"`
+	MaxActiveGuests int                 `json:"max_active_guests,omitempty"`
+	ActiveGuests    []string            `json:"active_guests,omitempty"`
+	Mention         string              `json:"mention,omitempty"`
+	GuestID         string              `json:"guest_id,omitempty"`
+	DisplayIDs      []string            `json:"display_ids,omitempty"`
+	SuggestGuest    *suggestGuestFrame  `json:"suggest_guest,omitempty"`
+	ActivateGuest   *activateGuestFrame `json:"activate_guest,omitempty"`
 }
 
 type frameFile struct {
@@ -340,6 +346,20 @@ func (a *Adapter) Send(_ context.Context, msg channel.OutgoingMessage) error {
 		return a.sendStream(msg)
 	}
 
+	if msg.ActivateGuest != nil {
+		f := frame{
+			Type:    "activate_guest",
+			GuestID: msg.ActivateGuest.ID,
+			ActivateGuest: &activateGuestFrame{
+				ID:     msg.ActivateGuest.ID,
+				Reason: msg.ActivateGuest.Reason,
+			},
+		}
+		if err := a.broadcastFrame(f); err != nil {
+			a.logger.Warn("prism activate_guest broadcast failed", "error", err)
+		}
+	}
+
 	if msg.Display != nil {
 		if err := a.sendDisplay(msg); err != nil {
 			a.logger.Warn("prism display send failed", "error", err)
@@ -388,6 +408,23 @@ func (a *Adapter) sendReply(msg channel.OutgoingMessage) error {
 	}
 
 	return entry.writeJSON(a.buildResFrame(msg))
+}
+
+func (a *Adapter) broadcastFrame(f frame) error {
+	a.mu.RLock()
+	entries := make([]*connEntry, 0, len(a.conns))
+	for e := range a.conns {
+		entries = append(entries, e)
+	}
+	a.mu.RUnlock()
+
+	var firstErr error
+	for _, e := range entries {
+		if err := e.writeJSON(f); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("prism broadcast frame: %w", err)
+		}
+	}
+	return firstErr
 }
 
 func (a *Adapter) broadcastRes(msg channel.OutgoingMessage) error {

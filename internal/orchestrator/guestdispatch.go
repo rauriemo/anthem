@@ -787,3 +787,38 @@ func suggestGuestToInvite(
 	}
 	return &suggest
 }
+
+type ActivateResult struct {
+	GuestID string
+	Reason  string
+}
+
+var inviteVerbs = regexp.MustCompile(`(?i)\b(?:invite|add|bring\s+in|pull\s+in)\b`)
+
+func detectInviteIntent(text string, activeGuests []string, guestIndex *guests.GuestIndex) *ActivateResult {
+	if guestIndex == nil || !inviteVerbs.MatchString(text) {
+		return nil
+	}
+
+	activeSet := make(map[string]struct{}, len(activeGuests))
+	for _, id := range activeGuests {
+		activeSet[id] = struct{}{}
+	}
+
+	lower := strings.ToLower(text)
+	for id, ag := range guestIndex.Agents {
+		if _, active := activeSet[id]; active {
+			continue
+		}
+		nameMatch := strings.Contains(lower, strings.ToLower(ag.Name))
+		idMatch := strings.Contains(lower, strings.ToLower(id))
+		if nameMatch || idMatch {
+			return &ActivateResult{
+				GuestID: id,
+				Reason:  fmt.Sprintf("User asked to invite %s", ag.Name),
+			}
+		}
+	}
+
+	return nil
+}

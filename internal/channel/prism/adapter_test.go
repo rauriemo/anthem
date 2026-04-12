@@ -603,3 +603,83 @@ func TestGuestAgentsBroadcastOnUpdate(t *testing.T) {
 		}
 	}
 }
+
+func TestActivateGuestFrame(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	err := a.Send(context.Background(), channel.OutgoingMessage{
+		ActivateGuest: &channel.ActivateGuest{
+			ID:     "tolkien",
+			Reason: "User asked to invite Tolkien",
+		},
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	resFrame := readFrame(t, conn)
+	if resFrame.Type != "activate_guest" {
+		t.Errorf("type = %q, want %q", resFrame.Type, "activate_guest")
+	}
+	if resFrame.GuestID != "tolkien" {
+		t.Errorf("guest_id = %q, want %q", resFrame.GuestID, "tolkien")
+	}
+	if resFrame.ActivateGuest == nil {
+		t.Fatal("expected activate_guest payload, got nil")
+	}
+	if resFrame.ActivateGuest.ID != "tolkien" {
+		t.Errorf("activate_guest.id = %q, want %q", resFrame.ActivateGuest.ID, "tolkien")
+	}
+	if resFrame.ActivateGuest.Reason != "User asked to invite Tolkien" {
+		t.Errorf("activate_guest.reason = %q", resFrame.ActivateGuest.Reason)
+	}
+}
+
+func TestActivateGuestWithTextContinues(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	reqFrame := frame{Type: "req", ID: "req-act1", Text: "invite tolkien"}
+	data, _ := json.Marshal(reqFrame)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	err := a.Send(context.Background(), channel.OutgoingMessage{
+		ThreadID: "req-act1",
+		Text:     "Tolkien is joining the chat.",
+		ActivateGuest: &channel.ActivateGuest{
+			ID:     "tolkien",
+			Reason: "User asked to invite Tolkien",
+		},
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	activateFrame := readFrame(t, conn)
+	if activateFrame.Type != "activate_guest" {
+		t.Errorf("first frame type = %q, want activate_guest", activateFrame.Type)
+	}
+
+	resFrame := readFrame(t, conn)
+	if resFrame.Type != "res" {
+		t.Errorf("second frame type = %q, want res", resFrame.Type)
+	}
+	if resFrame.Text != "Tolkien is joining the chat." {
+		t.Errorf("res text = %q", resFrame.Text)
+	}
+}
