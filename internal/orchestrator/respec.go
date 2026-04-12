@@ -239,6 +239,8 @@ func (o *Orchestrator) executeRespecActions(ctx context.Context, msg channel.Inc
 		return
 	}
 
+	var metaUpdated bool
+	var lastMetaAction Action
 	for _, action := range actions {
 		switch action.Type {
 		case ActionUpdateAgentMeta:
@@ -247,6 +249,9 @@ func (o *Orchestrator) executeRespecActions(ctx context.Context, msg channel.Inc
 			}
 			if err := o.executeUpdateAgentMeta(ctx, action); err != nil {
 				o.logger.Warn("respec: update_agent_meta failed", "error", err)
+			} else {
+				metaUpdated = true
+				lastMetaAction = action
 			}
 		case ActionUpdateVoice:
 			if action.AgentFile == "" {
@@ -255,6 +260,22 @@ func (o *Orchestrator) executeRespecActions(ctx context.Context, msg channel.Inc
 			if err := o.executeUpdateVoice(ctx, action); err != nil {
 				o.logger.Warn("respec: update_voice failed", "error", err)
 			}
+		}
+	}
+
+	if metaUpdated {
+		o.scanGuests()
+
+		if o.channelMgr != nil && lastMetaAction.AgentName != "" {
+			guestID := ""
+			if lastMetaAction.AgentFile != "orchestrator.md" {
+				guestID = strings.TrimSuffix(lastMetaAction.AgentFile, ".md")
+			}
+			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+				EventType: "agent_meta_updated",
+				Text:      lastMetaAction.AgentName,
+				GuestID:   guestID,
+			})
 		}
 	}
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/config"
+	"github.com/rauriemo/anthem/internal/guests"
 	"github.com/rauriemo/anthem/internal/types"
 	"github.com/rauriemo/anthem/internal/workspace"
 )
@@ -336,6 +337,123 @@ func TestHandleRespecMessage_ExistingAgentFile(t *testing.T) {
 		if strings.Contains(m.Text, "Agent file not found") {
 			t.Error("should not get 'Agent file not found' error for existing agent")
 		}
+	}
+}
+
+func TestRespecActions_TriggersGuestRescan(t *testing.T) {
+	tmp := t.TempDir()
+	agentsDir := filepath.Join(tmp, "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentsDir, "miyazaki.md"), []byte("---\nname: OldName\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ch := &testChannel{in: make(chan channel.IncomingMessage, 16)}
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchRunner := newNoopRunner()
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{
+			SessionID: "respec-rescan",
+			ExitCode:  0,
+			Output:    `{"reasoning": "renaming", "actions": [{"type": "update_agent_meta", "agent_file": "miyazaki.md", "agent_name": "NewMiyazaki"}]}`,
+		}, nil
+	}
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = tmp
+
+	var guestUpdateCalled bool
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "",
+		Tracker:        newNoopTracker(),
+		Runner:         newNoopRunner(),
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		ChannelManager: mgr,
+		OrchAgent:      orchAgent,
+	})
+	orch.SetGuestUpdateCallback(func(_ guests.GuestIndex) {
+		guestUpdateCalled = true
+	})
+
+	orch.handleRespecMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		SenderID:    "user-1",
+		Text:        "[system:respec:miyazaki] Start respec for miyazaki",
+	}, "")
+
+	if !guestUpdateCalled {
+		t.Error("expected onGuestUpdate callback to fire after respec meta update")
+	}
+}
+
+func TestRespecActions_BroadcastsAgentMetaUpdated(t *testing.T) {
+	tmp := t.TempDir()
+	agentsDir := filepath.Join(tmp, "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentsDir, "miyazaki.md"), []byte("---\nname: OldName\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ch := &testChannel{in: make(chan channel.IncomingMessage, 16)}
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchRunner := newNoopRunner()
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{
+			SessionID: "respec-meta",
+			ExitCode:  0,
+			Output:    `{"reasoning": "renaming", "actions": [{"type": "update_agent_meta", "agent_file": "miyazaki.md", "agent_name": "NewMiyazaki"}]}`,
+		}, nil
+	}
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = tmp
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "",
+		Tracker:        newNoopTracker(),
+		Runner:         newNoopRunner(),
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		ChannelManager: mgr,
+		OrchAgent:      orchAgent,
+	})
+
+	orch.handleRespecMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		SenderID:    "user-1",
+		Text:        "[system:respec:miyazaki] Start respec for miyazaki",
+	}, "")
+
+	msgs := ch.sentMessages()
+	var found bool
+	for _, m := range msgs {
+		if m.EventType == "agent_meta_updated" {
+			if m.Text != "NewMiyazaki" {
+				t.Errorf("agent_meta_updated text = %q, want %q", m.Text, "NewMiyazaki")
+			}
+			if m.GuestID != "miyazaki" {
+				t.Errorf("agent_meta_updated GuestID = %q, want %q", m.GuestID, "miyazaki")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected agent_meta_updated broadcast after name change")
 	}
 }
 
