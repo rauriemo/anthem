@@ -52,7 +52,7 @@ func (o *Orchestrator) handleRespecMessage(ctx context.Context, msg channel.Inco
 		o.mu.Lock()
 		delete(o.activeRespecs, channelKey)
 		o.mu.Unlock()
-		o.sendFollowUp(ctx, msg, "Respec cancelled. Changes so far have been saved.")
+		o.sendFollowUp(ctx, msg, "Respec canceled. Changes so far have been saved.")
 		return
 	}
 

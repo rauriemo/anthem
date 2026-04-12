@@ -90,22 +90,22 @@ func (f *FlexStringSlice) UnmarshalJSON(data []byte) error {
 
 // Action is a single proposal from the orchestrator agent to the daemon.
 type Action struct {
-	Type            ActionType   `json:"type"`
-	TaskID          string       `json:"task_id,omitempty"`
-	Profile         string       `json:"profile,omitempty"`
-	Reason          string       `json:"reason,omitempty"`
-	Body            string       `json:"body,omitempty"`
-	SectionName     string       `json:"section_name,omitempty"`
-	SectionContent  string       `json:"section_content,omitempty"`
-	Subtasks        []SubtaskDef `json:"subtasks,omitempty"`
-	Summary         string       `json:"summary,omitempty"`
-	ArtifactPath    string       `json:"artifact_path,omitempty"`
-	MaintenanceType string       `json:"maintenance_type,omitempty"`
-	AutoApprovable  bool         `json:"auto_approvable,omitempty"`
-	DisplayKind     string       `json:"display_kind,omitempty"`
-	DisplayContent  string       `json:"display_content,omitempty"`
-	DisplayTitle    string       `json:"display_title,omitempty"`
-	DisplayLanguage string       `json:"display_language,omitempty"`
+	Type              ActionType   `json:"type"`
+	TaskID            string       `json:"task_id,omitempty"`
+	Profile           string       `json:"profile,omitempty"`
+	Reason            string       `json:"reason,omitempty"`
+	Body              string       `json:"body,omitempty"`
+	SectionName       string       `json:"section_name,omitempty"`
+	SectionContent    string       `json:"section_content,omitempty"`
+	Subtasks          []SubtaskDef `json:"subtasks,omitempty"`
+	Summary           string       `json:"summary,omitempty"`
+	ArtifactPath      string       `json:"artifact_path,omitempty"`
+	MaintenanceType   string       `json:"maintenance_type,omitempty"`
+	AutoApprovable    bool         `json:"auto_approvable,omitempty"`
+	DisplayKind       string       `json:"display_kind,omitempty"`
+	DisplayContent    string       `json:"display_content,omitempty"`
+	DisplayTitle      string       `json:"display_title,omitempty"`
+	DisplayLanguage   string       `json:"display_language,omitempty"`
 	DisplayData       any          `json:"display_data,omitempty"`
 	AgentFile         string       `json:"agent_file,omitempty"`
 	AgentName         string       `json:"agent_name,omitempty"`
