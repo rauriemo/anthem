@@ -85,7 +85,7 @@ func (o *Orchestrator) handleRespecMessage(ctx context.Context, msg channel.Inco
 	}
 
 	var agentName, targetFile string
-	if target == "" {
+	if target == "" || target == "orchestrator" {
 		agentName = "orchestrator"
 		targetFile = filepath.Join(o.projectRoot(), "agents", "orchestrator.md")
 	} else {

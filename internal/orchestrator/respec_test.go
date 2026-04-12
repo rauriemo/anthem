@@ -1,9 +1,15 @@
 package orchestrator
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/config"
+	"github.com/rauriemo/anthem/internal/types"
 	"github.com/rauriemo/anthem/internal/workspace"
 )
 
@@ -113,6 +119,158 @@ func TestDetectMode_Respec(t *testing.T) {
 				t.Errorf("detectMode(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestHandleRespecMessage_ExplicitOrchestrator(t *testing.T) {
+	tmp := t.TempDir()
+
+	ch := &testChannel{in: make(chan channel.IncomingMessage, 16)}
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchRunner := newNoopRunner()
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{
+			SessionID: "respec-sess",
+			ExitCode:  0,
+			Output:    `{"reasoning": "starting orchestrator respec", "actions": []}`,
+		}, nil
+	}
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = tmp
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "",
+		Tracker:        newNoopTracker(),
+		Runner:         newNoopRunner(),
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		ChannelManager: mgr,
+		OrchAgent:      orchAgent,
+	})
+
+	orch.handleRespecMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		SenderID:    "user-1",
+		Text:        "[system:respec:orchestrator] Start respec for orchestrator",
+	}, "")
+
+	msgs := ch.sentMessages()
+	for _, m := range msgs {
+		if strings.Contains(m.Text, "not found") || strings.Contains(m.Text, "No agents/") {
+			t.Errorf("explicit /respec orchestrator should work without agents/ dir, got: %s", m.Text)
+		}
+	}
+}
+
+func TestHandleRespecMessage_NewAgentFile(t *testing.T) {
+	tmp := t.TempDir()
+	agentsDir := filepath.Join(tmp, "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ch := &testChannel{in: make(chan channel.IncomingMessage, 16)}
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchRunner := newNoopRunner()
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		if !strings.Contains(opts.Prompt, "newagent") {
+			t.Errorf("prompt should reference agent name 'newagent', got prompt length %d", len(opts.Prompt))
+		}
+		return &types.RunResult{
+			SessionID: "respec-new",
+			ExitCode:  0,
+			Output:    `{"reasoning": "creating new agent", "actions": []}`,
+		}, nil
+	}
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = tmp
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "",
+		Tracker:        newNoopTracker(),
+		Runner:         newNoopRunner(),
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		ChannelManager: mgr,
+		OrchAgent:      orchAgent,
+	})
+
+	orch.handleRespecMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		SenderID:    "user-1",
+		Text:        "[system:respec:newagent] Start respec for newagent",
+	}, "")
+
+	msgs := ch.sentMessages()
+	for _, m := range msgs {
+		if strings.Contains(m.Text, "not found") || strings.Contains(m.Text, "No agents/") {
+			t.Errorf("new agent respec should proceed when agents/ dir exists, got: %s", m.Text)
+		}
+	}
+}
+
+func TestHandleRespecMessage_ExistingAgentFile(t *testing.T) {
+	tmp := t.TempDir()
+	agentsDir := filepath.Join(tmp, "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentsDir, "miyazaki.md"), []byte("---\nname: Miyazaki\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ch := &testChannel{in: make(chan channel.IncomingMessage, 16)}
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchRunner := newNoopRunner()
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{
+			SessionID: "respec-sess",
+			ExitCode:  0,
+			Output:    `{"reasoning": "starting respec", "actions": []}`,
+		}, nil
+	}
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = tmp
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "",
+		Tracker:        newNoopTracker(),
+		Runner:         newNoopRunner(),
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		ChannelManager: mgr,
+		OrchAgent:      orchAgent,
+	})
+
+	orch.handleRespecMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		SenderID:    "user-1",
+		Text:        "[system:respec:miyazaki] Start respec for miyazaki",
+	}, "")
+
+	msgs := ch.sentMessages()
+	for _, m := range msgs {
+		if strings.Contains(m.Text, "Agent file not found") {
+			t.Error("should not get 'Agent file not found' error for existing agent")
+		}
 	}
 }
 
