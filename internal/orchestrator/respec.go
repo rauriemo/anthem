@@ -20,6 +20,47 @@ type respecSession struct {
 	SessionID  string // Claude session ID for multi-turn continuity
 }
 
+// respecStreamFilter suppresses JSON action blocks and fenced code blocks from
+// the stream so the user only sees conversational text. It tracks brace depth
+// across incremental deltas -- when depth > 0 the content is swallowed.
+type respecStreamFilter struct {
+	depth  int
+	inCode bool // inside a ``` fence
+	emit   func(string)
+}
+
+func newRespecStreamFilter(emit func(string)) *respecStreamFilter {
+	return &respecStreamFilter{emit: emit}
+}
+
+func (f *respecStreamFilter) Write(delta string) {
+	var out strings.Builder
+	for _, ch := range delta {
+		if ch == '`' {
+			f.inCode = !f.inCode
+			if f.depth == 0 {
+				out.WriteRune(ch)
+			}
+			continue
+		}
+		if ch == '{' && !f.inCode {
+			f.depth++
+			continue
+		}
+		if ch == '}' && !f.inCode && f.depth > 0 {
+			f.depth--
+			continue
+		}
+		if f.depth > 0 {
+			continue
+		}
+		out.WriteRune(ch)
+	}
+	if out.Len() > 0 {
+		f.emit(out.String())
+	}
+}
+
 // parseRespecTarget extracts the target from a [system:respec] tagged message.
 // Returns "cancel" for [system:respec:cancel], a name for [system:respec:NAME],
 // or "" for bare [system:respec] (meaning orchestrator).
@@ -143,7 +184,7 @@ func (o *Orchestrator) handleRespecMessage(ctx context.Context, msg channel.Inco
 		cleanText = "Begin the respec."
 	}
 
-	onStream := func(delta string) {
+	streamFilter := newRespecStreamFilter(func(delta string) {
 		if o.channelMgr != nil {
 			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
 				StreamDelta: delta,
@@ -151,14 +192,14 @@ func (o *Orchestrator) handleRespecMessage(ctx context.Context, msg channel.Inco
 				StreamKind:  "chat",
 			})
 		}
-	}
+	})
 
 	result, err := o.orchAgent.runner.Run(ctx, types.RunOpts{
 		Prompt:         systemPrompt + "\n\nUser: " + cleanText,
 		Model:          model,
 		PermissionMode: "bypassPermissions",
 		MaxTurns:       o.orchAgent.planMaxTurns,
-		OnStream:       onStream,
+		OnStream:       streamFilter.Write,
 	})
 	if err != nil {
 		o.logger.Warn("respec: initial LLM call failed", "error", err)
@@ -193,7 +234,7 @@ func (o *Orchestrator) continueRespec(ctx context.Context, msg channel.IncomingM
 		return
 	}
 
-	onStream := func(delta string) {
+	streamFilter := newRespecStreamFilter(func(delta string) {
 		if o.channelMgr != nil {
 			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
 				StreamDelta: delta,
@@ -201,11 +242,11 @@ func (o *Orchestrator) continueRespec(ctx context.Context, msg channel.IncomingM
 				StreamKind:  "chat",
 			})
 		}
-	}
+	})
 
 	result, err := o.orchAgent.runner.Continue(ctx, sess.SessionID, msg.Text, types.ContinueOpts{
 		PermissionMode: "bypassPermissions",
-		OnStream:       onStream,
+		OnStream:       streamFilter.Write,
 	})
 	if err != nil {
 		o.logger.Warn("respec: continue failed", "error", err)

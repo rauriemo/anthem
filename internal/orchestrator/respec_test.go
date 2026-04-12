@@ -457,6 +457,73 @@ func TestRespecActions_BroadcastsAgentMetaUpdated(t *testing.T) {
 	}
 }
 
+func TestRespecStreamFilter_StripsJSON(t *testing.T) {
+	var got strings.Builder
+	f := newRespecStreamFilter(func(s string) { got.WriteString(s) })
+
+	f.Write(`Hello! Let me write that up.`)
+	f.Write("\n\n")
+	f.Write(`{"reasoning": "creating agent", "actions": [{"type": "update_agent_meta", "agent_name": "Tower"}]}`)
+	f.Write("\n\n**Phase 2**\nHow should this agent feel?")
+
+	result := got.String()
+	if strings.Contains(result, "reasoning") {
+		t.Errorf("JSON block should be stripped, got: %s", result)
+	}
+	if !strings.Contains(result, "Hello! Let me write that up.") {
+		t.Error("conversational text before JSON should be preserved")
+	}
+	if !strings.Contains(result, "**Phase 2**") {
+		t.Error("conversational text after JSON should be preserved")
+	}
+}
+
+func TestRespecStreamFilter_StripsNestedJSON(t *testing.T) {
+	var got strings.Builder
+	f := newRespecStreamFilter(func(s string) { got.WriteString(s) })
+
+	f.Write(`Before `)
+	f.Write(`{"actions": [{"type": "update", "data": {"nested": true}}]}`)
+	f.Write(` After`)
+
+	result := got.String()
+	if strings.Contains(result, "actions") || strings.Contains(result, "nested") {
+		t.Errorf("nested JSON should be stripped, got: %s", result)
+	}
+	if !strings.Contains(result, "Before") || !strings.Contains(result, "After") {
+		t.Errorf("surrounding text should be preserved, got: %s", result)
+	}
+}
+
+func TestRespecStreamFilter_PreservesCurlyInCodeFence(t *testing.T) {
+	var got strings.Builder
+	f := newRespecStreamFilter(func(s string) { got.WriteString(s) })
+
+	f.Write("Here is code:\n```\n{hello}\n```\nDone")
+
+	result := got.String()
+	if !strings.Contains(result, "{hello}") {
+		t.Errorf("braces inside code fences should pass through, got: %s", result)
+	}
+}
+
+func TestRespecStreamFilter_IncrementalDeltas(t *testing.T) {
+	var got strings.Builder
+	f := newRespecStreamFilter(func(s string) { got.WriteString(s) })
+
+	for _, ch := range `Hi {"reasoning": "x"} Bye` {
+		f.Write(string(ch))
+	}
+
+	result := got.String()
+	if strings.Contains(result, "reasoning") {
+		t.Errorf("JSON should be stripped even with char-by-char deltas, got: %s", result)
+	}
+	if !strings.Contains(result, "Hi") || !strings.Contains(result, "Bye") {
+		t.Errorf("surrounding text should be preserved, got: %s", result)
+	}
+}
+
 func containsAll(s string, subs ...string) bool {
 	for _, sub := range subs {
 		if !contains(s, sub) {
