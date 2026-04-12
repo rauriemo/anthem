@@ -149,7 +149,7 @@ func TestParseContextReport_NestedJSON(t *testing.T) {
 		},
 		{
 			name: "fenced_decoy_skipped",
-			raw: "intro\n```json\n{\"context_report\":{\"action\":\"bad\",\"summary\":\"in_fence\"}}\n```\n{\"context_report\":{\"action\":\"good\",\"summary\":\"out\"}}",
+			raw:  "intro\n```json\n{\"context_report\":{\"action\":\"bad\",\"summary\":\"in_fence\"}}\n```\n{\"context_report\":{\"action\":\"good\",\"summary\":\"out\"}}",
 			want: &ContextReport{
 				Action:  "good",
 				Summary: "out",

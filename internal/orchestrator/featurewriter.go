@@ -34,9 +34,9 @@ func featureDir(projectRoot, feature string) string {
 
 // TaskStateUpdate holds optional rich fields for UpdateTaskState.
 type TaskStateUpdate struct {
-	Progress string
+	Progress  string
 	BlockedOn string
-	Produces []string
+	Produces  []string
 }
 
 // UpdateTaskState sets an agent's status and last_output in task-state.yaml.
