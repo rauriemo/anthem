@@ -867,19 +867,19 @@ func TestAsyncPolling_HappyPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, ":predictLongRunning"):
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"name": "operations/op-test-123",
 			})
 
 		case r.Method == "GET" && strings.Contains(r.URL.Path, "operations/op-test-123"):
 			pollCount++
 			if pollCount < 2 {
-				json.NewEncoder(w).Encode(map[string]any{
+				_ = json.NewEncoder(w).Encode(map[string]any{
 					"name": "operations/op-test-123",
 					"done": false,
 				})
 			} else {
-				json.NewEncoder(w).Encode(map[string]any{
+				_ = json.NewEncoder(w).Encode(map[string]any{
 					"name": "operations/op-test-123",
 					"done": true,
 					"response": map[string]any{
@@ -898,7 +898,7 @@ func TestAsyncPolling_HappyPath(t *testing.T) {
 
 		case r.Method == "GET" && strings.Contains(r.URL.Path, "/download/"):
 			w.Header().Set("Content-Type", "video/mp4")
-			w.Write(videoData)
+			_, _ = w.Write(videoData)
 
 		default:
 			w.WriteHeader(404)
@@ -1036,9 +1036,9 @@ func TestAsyncPolling_DownloadAuthNone(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST":
-			json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-dl"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-dl"})
 		case strings.Contains(r.URL.Path, "operations/"):
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"name": "operations/op-dl",
 				"done": true,
 				"response": map[string]any{
@@ -1049,7 +1049,7 @@ func TestAsyncPolling_DownloadAuthNone(t *testing.T) {
 			})
 		case strings.Contains(r.URL.Path, "/download/"):
 			downloadAuth = r.Header.Get("x-goog-api-key")
-			w.Write([]byte("video-bytes"))
+			_, _ = w.Write([]byte("video-bytes"))
 		}
 	}))
 	defer srv.Close()
@@ -1111,9 +1111,9 @@ func TestAsyncPolling_DownloadAuthInherit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "POST":
-			json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-inh"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "operations/op-inh"})
 		case strings.Contains(r.URL.Path, "operations/"):
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"name": "operations/op-inh",
 				"done": true,
 				"response": map[string]any{
@@ -1124,7 +1124,7 @@ func TestAsyncPolling_DownloadAuthInherit(t *testing.T) {
 			})
 		case strings.Contains(r.URL.Path, "/download/"):
 			downloadKey = r.Header.Get("x-goog-api-key")
-			w.Write([]byte("video-bytes"))
+			_, _ = w.Write([]byte("video-bytes"))
 		}
 	}))
 	defer srv.Close()

@@ -140,10 +140,10 @@ func TestSplitPath(t *testing.T) {
 
 func TestParseSegment(t *testing.T) {
 	tests := []struct {
-		input    string
-		wantKey  string
-		wantIdx  int
-		wantHas  bool
+		input   string
+		wantKey string
+		wantIdx int
+		wantHas bool
 	}{
 		{"name", "name", 0, false},
 		{"items[0]", "items", 0, true},
