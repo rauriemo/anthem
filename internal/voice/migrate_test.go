@@ -30,7 +30,9 @@ Role: Senior engineer
 ## Preferences
 - Likes dark mode
 `
-	os.WriteFile(voicePath, []byte(voiceContent), 0644)
+	if err := os.WriteFile(voicePath, []byte(voiceContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	err := MigrateVoiceToOrchestrator(voicePath, agentsDir, "Test Project", testMigrateLogger())
 	if err != nil {
@@ -80,14 +82,20 @@ Role: Senior engineer
 func TestMigrate_AlreadyMigrated(t *testing.T) {
 	dir := t.TempDir()
 	agentsDir := filepath.Join(dir, "agents")
-	os.MkdirAll(agentsDir, 0755)
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 	voicePath := filepath.Join(dir, "VOICE.md")
 
 	orchContent := "---\nname: Existing\ndescription: Already here\nrole: orchestrator\n---\n\n## Identity\nExisting agent\n"
-	os.WriteFile(filepath.Join(agentsDir, "orchestrator.md"), []byte(orchContent), 0644)
+	if err := os.WriteFile(filepath.Join(agentsDir, "orchestrator.md"), []byte(orchContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	voiceContent := "## Communication Style\n- Concise\n"
-	os.WriteFile(voicePath, []byte(voiceContent), 0644)
+	if err := os.WriteFile(voicePath, []byte(voiceContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	err := MigrateVoiceToOrchestrator(voicePath, agentsDir, "Test", testMigrateLogger())
 	if err != nil {
@@ -108,15 +116,20 @@ func TestMigrate_AlreadyMigrated(t *testing.T) {
 func TestMigrate_ConflictStalePersonality(t *testing.T) {
 	dir := t.TempDir()
 	agentsDir := filepath.Join(dir, "agents")
-	os.MkdirAll(agentsDir, 0755)
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 	voicePath := filepath.Join(dir, "VOICE.md")
 
 	orchContent := "---\nname: Project\ndescription: Orch\nrole: orchestrator\n---\n\n## Identity\nCanonical identity\n"
-	os.WriteFile(filepath.Join(agentsDir, "orchestrator.md"), []byte(orchContent), 0644)
+	if err := os.WriteFile(filepath.Join(agentsDir, "orchestrator.md"), []byte(orchContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 
-	// VOICE.md has stale personality sections
 	voiceContent := "## Identity\nStale identity\n\n## Communication Style\n- Direct\n"
-	os.WriteFile(voicePath, []byte(voiceContent), 0644)
+	if err := os.WriteFile(voicePath, []byte(voiceContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	err := MigrateVoiceToOrchestrator(voicePath, agentsDir, "Test", testMigrateLogger())
 	if err != nil {
@@ -142,7 +155,9 @@ func TestMigrate_OnlyUserSections(t *testing.T) {
 	voicePath := filepath.Join(dir, "VOICE.md")
 
 	voiceContent := "## Communication Style\n- Direct\n\n## Preferences\n- Dark mode\n"
-	os.WriteFile(voicePath, []byte(voiceContent), 0644)
+	if err := os.WriteFile(voicePath, []byte(voiceContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	err := MigrateVoiceToOrchestrator(voicePath, agentsDir, "Test", testMigrateLogger())
 	if err != nil {
@@ -172,7 +187,9 @@ func TestMigrate_AgentsDirCreated(t *testing.T) {
 	voicePath := filepath.Join(dir, "VOICE.md")
 
 	voiceContent := "## Identity\nI am an agent\n"
-	os.WriteFile(voicePath, []byte(voiceContent), 0644)
+	if err := os.WriteFile(voicePath, []byte(voiceContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	err := MigrateVoiceToOrchestrator(voicePath, agentsDir, "Test", testMigrateLogger())
 	if err != nil {
@@ -190,7 +207,9 @@ func TestMigrate_Idempotent(t *testing.T) {
 	voicePath := filepath.Join(dir, "VOICE.md")
 
 	voiceContent := "## Identity\nAgent identity\n\n## Communication Style\n- Brief\n"
-	os.WriteFile(voicePath, []byte(voiceContent), 0644)
+	if err := os.WriteFile(voicePath, []byte(voiceContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	// First run
 	err := MigrateVoiceToOrchestrator(voicePath, agentsDir, "Test", testMigrateLogger())
