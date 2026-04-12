@@ -909,7 +909,7 @@ type ActivateResult struct {
 
 var inviteVerbs = regexp.MustCompile(`(?i)\b(?:invite|add|bring\s+in|pull\s+in)\b`)
 
-func detectInviteIntent(text string, activeGuests []string, guestIndex *guests.GuestIndex) *ActivateResult {
+func detectInviteIntent(text string, activeGuests []string, guestIndex *guests.GuestIndex) []ActivateResult {
 	if guestIndex == nil || !inviteVerbs.MatchString(text) {
 		return nil
 	}
@@ -920,6 +920,7 @@ func detectInviteIntent(text string, activeGuests []string, guestIndex *guests.G
 	}
 
 	lower := strings.ToLower(text)
+	var results []ActivateResult
 	for id, ag := range guestIndex.Agents {
 		if _, active := activeSet[id]; active {
 			continue
@@ -927,12 +928,14 @@ func detectInviteIntent(text string, activeGuests []string, guestIndex *guests.G
 		nameMatch := strings.Contains(lower, strings.ToLower(ag.Name))
 		idMatch := strings.Contains(lower, strings.ToLower(id))
 		if nameMatch || idMatch {
-			return &ActivateResult{
+			results = append(results, ActivateResult{
 				GuestID: id,
 				Reason:  fmt.Sprintf("User asked to invite %s", ag.Name),
-			}
+			})
 		}
 	}
-
-	return nil
+	if len(results) == 0 {
+		return nil
+	}
+	return results
 }
