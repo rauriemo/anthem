@@ -271,7 +271,9 @@ Old identity
 ## Personality
 Keep this unchanged
 `
-	os.WriteFile(path, []byte(content), 0644)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	err := UpdateAgentSection(path, "Identity", "New identity text")
 	if err != nil {
@@ -304,7 +306,9 @@ role: orchestrator
 ## Identity
 Existing identity
 `
-	os.WriteFile(path, []byte(content), 0644)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	err := UpdateAgentSection(path, "Your Focus", "Build and ship fast")
 	if err != nil {
@@ -340,7 +344,9 @@ capabilities:
 ## Identity
 Old text
 `
-	os.WriteFile(path, []byte(content), 0644)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	err := UpdateAgentSection(path, "Identity", "Updated text")
 	if err != nil {
@@ -378,7 +384,9 @@ First section
 ## Personality
 Last section content
 `
-	os.WriteFile(path, []byte(content), 0644)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	err := UpdateAgentSection(path, "Personality", "Completely new personality")
 	if err != nil {
@@ -407,7 +415,9 @@ name: Test
 description: Empty body test
 ---
 `
-	os.WriteFile(path, []byte(content), 0644)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	err := UpdateAgentSection(path, "Identity", "Brand new section")
 	if err != nil {

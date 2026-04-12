@@ -783,8 +783,12 @@ description: Game designer
 
 You are a game designer.
 `
-	os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte(orchContent), 0644)
-	os.WriteFile(filepath.Join(dir, "miyazaki.md"), []byte(guestContent), 0644)
+	if err := os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte(orchContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "miyazaki.md"), []byte(guestContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	index, err := ScanDirectory(dir, nil)
 	if err != nil {
@@ -814,7 +818,9 @@ role: orchestrator
 ## Identity
 Alone.
 `
-	os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte(orchContent), 0644)
+	if err := os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte(orchContent), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	index, err := ScanDirectory(dir, nil)
 	if err != nil {
@@ -841,7 +847,9 @@ I am the test orchestrator.
 ## Personality
 - Direct and clear.
 `
-	os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte(content), 0644)
+	if err := os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	body, err := LoadOrchestratorPersona(dir)
 	if err != nil {
@@ -873,7 +881,9 @@ func TestLoadOrchestratorPersona_Missing(t *testing.T) {
 func TestLoadOrchestratorPersona_NoFrontmatter(t *testing.T) {
 	dir := t.TempDir()
 	// File without frontmatter -- LoadPersona will return error, LoadOrchestratorPersona wraps it
-	os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte("Just plain text"), 0644)
+	if err := os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte("Just plain text"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	_, err := LoadOrchestratorPersona(dir)
 	// This should return an error since the file exists but has no frontmatter

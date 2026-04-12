@@ -212,7 +212,7 @@ func TestWatcherDeleteAndRecreate(t *testing.T) {
 
 	// Simulate editor save: delete + recreate
 	time.Sleep(50 * time.Millisecond)
-	os.Remove(path)
+	_ = os.Remove(path)
 	time.Sleep(20 * time.Millisecond)
 	writeFile(t, path, validWorkflowUpdated)
 
