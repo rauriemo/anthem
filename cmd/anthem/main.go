@@ -537,7 +537,11 @@ func httpBridgeCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("loading http-bridge config: %w", err)
 			}
-			return httpbridge.Run(tools, os.Stdin, os.Stdout)
+			root, err := httpbridge.LoadRootFromEnv()
+			if err != nil {
+				return fmt.Errorf("loading http-bridge root: %w", err)
+			}
+			return httpbridge.Run(tools, root, os.Stdin, os.Stdout)
 		},
 	}
 }

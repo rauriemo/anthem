@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -910,8 +911,8 @@ func TestHTTPToolsToMCPServers(t *testing.T) {
 			wantKeys: []string{"http__nano-banana"},
 			checkFunc: func(t *testing.T, result map[string]config.MCPServerConfig) {
 				srv := result["http__nano-banana"]
-				if srv.Command != "anthem" {
-					t.Errorf("Command = %q, want %q", srv.Command, "anthem")
+				if srv.Command == "" {
+					t.Error("Command is empty")
 				}
 				if len(srv.Args) != 1 || srv.Args[0] != "http-bridge" {
 					t.Errorf("Args = %v, want [http-bridge]", srv.Args)
@@ -933,7 +934,7 @@ func TestHTTPToolsToMCPServers(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := HTTPToolsToMCPServers(tt.tools)
+			result := HTTPToolsToMCPServers(tt.tools, "")
 			if tt.wantNil {
 				if result != nil {
 					t.Fatalf("expected nil, got %v", result)
@@ -949,6 +950,65 @@ func TestHTTPToolsToMCPServers(t *testing.T) {
 				tt.checkFunc(t, result)
 			}
 		})
+	}
+}
+
+func TestHTTPToolsToMCPServers_WithInputTypes(t *testing.T) {
+	t.Parallel()
+	tools := map[string]guests.HTTPToolConfig{
+		"veo": {
+			URL:    "https://api.example.com/v1/generate",
+			Method: "POST",
+			InputTypes: map[string]guests.InputTypeSpec{
+				"img": {Type: "file", Encoding: "base64", MaxSizeMB: 5},
+			},
+			RequestTemplate: map[string]any{
+				"data": "${input.img}",
+			},
+		},
+	}
+
+	result := HTTPToolsToMCPServers(tools, "/fake/project/root")
+
+	srv, ok := result["http__veo"]
+	if !ok {
+		t.Fatal("missing http__veo server")
+	}
+
+	rootEnv := srv.Env["ANTHEM_HTTP_BRIDGE_ROOT"]
+	if rootEnv != "/fake/project/root" {
+		t.Errorf("ANTHEM_HTTP_BRIDGE_ROOT = %q, want %q", rootEnv, "/fake/project/root")
+	}
+
+	encoded := srv.Env["ANTHEM_HTTP_BRIDGE_CONFIG"]
+	if encoded == "" {
+		t.Fatal("missing ANTHEM_HTTP_BRIDGE_CONFIG")
+	}
+
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decoding config: %v", err)
+	}
+	var decoded map[string]guests.HTTPToolConfig
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshaling config: %v", err)
+	}
+	veoCfg, ok := decoded["veo"]
+	if !ok {
+		t.Fatal("veo not found in decoded config")
+	}
+	spec, ok := veoCfg.InputTypes["img"]
+	if !ok {
+		t.Fatal("input_types[img] not found after round-trip")
+	}
+	if spec.Type != "file" {
+		t.Errorf("Type = %q, want file", spec.Type)
+	}
+	if spec.Encoding != "base64" {
+		t.Errorf("Encoding = %q, want base64", spec.Encoding)
+	}
+	if spec.MaxSizeMB != 5 {
+		t.Errorf("MaxSizeMB = %d, want 5", spec.MaxSizeMB)
 	}
 }
 

@@ -64,7 +64,8 @@ func guestInvocationMaxTurns(mcpActive bool, configured int) int {
 
 // mergeMCPServersForSelectedGuests merges anthem global mcp_servers with every
 // selected guest's frontmatter mcp_servers (guest keys override global on collision).
-func mergeMCPServersForSelectedGuests(global map[string]mcpconfig.MCPServerRef, guestIndex *guests.GuestIndex, selectedIDs []string) map[string]mcpconfig.MCPServerRef {
+// projectRoot is forwarded to HTTPToolsToMCPServers so the bridge can sandbox file reads.
+func mergeMCPServersForSelectedGuests(global map[string]mcpconfig.MCPServerRef, guestIndex *guests.GuestIndex, selectedIDs []string, projectRoot string) map[string]mcpconfig.MCPServerRef {
 	if guestIndex == nil {
 		if len(global) == 0 {
 			return nil
@@ -87,7 +88,7 @@ func mergeMCPServersForSelectedGuests(global map[string]mcpconfig.MCPServerRef, 
 		for k, v := range ag.MCPServers {
 			merged[k] = v
 		}
-		for k, v := range harness.HTTPToolsToMCPServers(ag.HTTPTools) {
+		for k, v := range harness.HTTPToolsToMCPServers(ag.HTTPTools, projectRoot) {
 			merged[k] = v
 		}
 	}
@@ -389,7 +390,7 @@ var planEditMu sync.Mutex
 func dispatchSelectedGuests(p guestDispatchParams) {
 	mcpRoundActive := false
 	if p.guestIndex != nil {
-		mergedMCP := mergeMCPServersForSelectedGuests(p.globalMCPServers, p.guestIndex, p.selectedIDs)
+		mergedMCP := mergeMCPServersForSelectedGuests(p.globalMCPServers, p.guestIndex, p.selectedIDs, p.projectRoot)
 		mcpRoundActive = len(mergedMCP) > 0
 		if mcpRoundActive && p.projectRoot != "" {
 			if err := harness.WriteMCPConfig(p.projectRoot, mergedMCP); err != nil {

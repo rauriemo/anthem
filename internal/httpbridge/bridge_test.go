@@ -215,7 +215,7 @@ func TestMCPProtocol_Initialize(t *testing.T) {
 
 	input := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n"
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -249,7 +249,7 @@ func TestMCPProtocol_ToolsList(t *testing.T) {
 
 	input := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}` + "\n"
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -322,7 +322,7 @@ func TestMCPProtocol_ToolCall_Success(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -360,7 +360,7 @@ func TestMCPProtocol_ToolCall_AuthBearer(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -395,7 +395,7 @@ func TestMCPProtocol_ToolCall_AuthAPIKey(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -451,7 +451,7 @@ func TestMCPProtocol_ToolCall_ArtifactSave(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -475,7 +475,7 @@ func TestMCPProtocol_ToolCall_ArtifactSave(t *testing.T) {
 func TestMCPProtocol_UnknownMethod(t *testing.T) {
 	input := `{"jsonrpc":"2.0","id":1,"method":"unknown/method","params":{}}` + "\n"
 	var out bytes.Buffer
-	if err := Run(nil, strings.NewReader(input), &out); err != nil {
+	if err := Run(nil, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -509,7 +509,7 @@ func TestMCPProtocol_ToolCall_HTTPError(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -538,7 +538,7 @@ func TestMCPProtocol_ToolCall_UnknownTool(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -554,7 +554,7 @@ func TestMCPProtocol_ToolCall_UnknownTool(t *testing.T) {
 func TestMCPProtocol_MalformedJSON(t *testing.T) {
 	input := "this is not json\n"
 	var out bytes.Buffer
-	if err := Run(nil, strings.NewReader(input), &out); err != nil {
+	if err := Run(nil, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -570,7 +570,7 @@ func TestMCPProtocol_MalformedJSON(t *testing.T) {
 func TestMCPProtocol_NotificationsInitialized(t *testing.T) {
 	input := `{"jsonrpc":"2.0","method":"notifications/initialized"}` + "\n"
 	var out bytes.Buffer
-	if err := Run(nil, strings.NewReader(input), &out); err != nil {
+	if err := Run(nil, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -595,7 +595,7 @@ func TestMCPProtocol_ToolsList_FilenameInjection(t *testing.T) {
 
 	input := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}` + "\n"
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -658,7 +658,7 @@ func TestMCPProtocol_ToolCall_DefaultAuthScheme(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -676,7 +676,7 @@ func TestMCPProtocol_MultipleRequests(t *testing.T) {
 		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}` + "\n"
 
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -838,7 +838,7 @@ func TestDeriveBaseURL(t *testing.T) {
 	}{
 		{
 			"https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview:predictLongRunning",
-			"https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview",
+			"https://generativelanguage.googleapis.com/v1beta",
 		},
 		{
 			"https://example.com/api",
@@ -846,7 +846,7 @@ func TestDeriveBaseURL(t *testing.T) {
 		},
 		{
 			"http://localhost:8080/v1/models/m:generate",
-			"http://localhost:8080/v1/models/m",
+			"http://localhost:8080/v1",
 		},
 	}
 
@@ -946,7 +946,7 @@ func TestAsyncPolling_HappyPath(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1015,7 +1015,7 @@ func TestAsyncPolling_Timeout(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1090,7 +1090,7 @@ func TestAsyncPolling_DownloadAuthNone(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1165,7 +1165,7 @@ func TestAsyncPolling_DownloadAuthInherit(t *testing.T) {
 	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 	var out bytes.Buffer
-	if err := Run(tools, strings.NewReader(input), &out); err != nil {
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1232,7 +1232,7 @@ func TestAsyncPolling_FilenameValidation(t *testing.T) {
 		input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 		var out bytes.Buffer
-		if err := Run(tools, strings.NewReader(input), &out); err != nil {
+		if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1257,7 +1257,7 @@ func TestAsyncPolling_FilenameValidation(t *testing.T) {
 		input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
 
 		var out bytes.Buffer
-		if err := Run(tools, strings.NewReader(input), &out); err != nil {
+		if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1271,4 +1271,582 @@ func TestAsyncPolling_FilenameValidation(t *testing.T) {
 			t.Errorf("error should mention mismatch: %s", text)
 		}
 	})
+}
+
+func writeTestFile(t *testing.T, dir, name string, data []byte) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("writing test file %s: %v", path, err)
+	}
+	return path
+}
+
+func TestResolveInputs(t *testing.T) {
+	t.Parallel()
+	smallPNG := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00}
+
+	t.Run("happy_path", func(t *testing.T) {
+		root := t.TempDir()
+		writeTestFile(t, root, "small.png", smallPNG)
+
+		result, err := ResolveInputs(
+			map[string]string{"img": "small.png", "prompt": "bounce"},
+			map[string]guests.InputTypeSpec{"img": {Type: "file", Encoding: "base64", MaxSizeMB: 10}},
+			root,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := base64.StdEncoding.EncodeToString(smallPNG)
+		if result["img"] != want {
+			t.Errorf("img = %q, want base64 of file", result["img"][:20])
+		}
+		if result["prompt"] != "bounce" {
+			t.Errorf("prompt should be unchanged, got %q", result["prompt"])
+		}
+	})
+
+	t.Run("path_traversal_dotdot", func(t *testing.T) {
+		root := t.TempDir()
+		_, err := ResolveInputs(
+			map[string]string{"img": "../../etc/passwd"},
+			map[string]guests.InputTypeSpec{"img": {Type: "file", Encoding: "base64", MaxSizeMB: 10}},
+			root,
+		)
+		if err == nil || !strings.Contains(err.Error(), "escapes sandbox") {
+			t.Fatalf("expected sandbox escape error, got: %v", err)
+		}
+	})
+
+	t.Run("path_traversal_absolute", func(t *testing.T) {
+		root := t.TempDir()
+		absPath := filepath.Join(filepath.VolumeName(root), string(filepath.Separator), "Windows", "system32", "config", "SAM")
+		_, err := ResolveInputs(
+			map[string]string{"img": absPath},
+			map[string]guests.InputTypeSpec{"img": {Type: "file", Encoding: "base64", MaxSizeMB: 10}},
+			root,
+		)
+		if err == nil || !strings.Contains(err.Error(), "escapes sandbox") {
+			t.Fatalf("expected sandbox escape error, got: %v", err)
+		}
+	})
+
+	t.Run("path_traversal_sibling", func(t *testing.T) {
+		parent := t.TempDir()
+		root := filepath.Join(parent, "project")
+		sibling := filepath.Join(parent, "project-old")
+		os.MkdirAll(root, 0755)
+		os.MkdirAll(sibling, 0755)
+		writeTestFile(t, sibling, "secret.txt", []byte("secret"))
+
+		_, err := ResolveInputs(
+			map[string]string{"img": "../project-old/secret.txt"},
+			map[string]guests.InputTypeSpec{"img": {Type: "file", Encoding: "base64", MaxSizeMB: 10}},
+			root,
+		)
+		if err == nil || !strings.Contains(err.Error(), "escapes sandbox") {
+			t.Fatalf("expected sandbox escape error, got: %v", err)
+		}
+	})
+
+	t.Run("file_not_found", func(t *testing.T) {
+		root := t.TempDir()
+		_, err := ResolveInputs(
+			map[string]string{"img": "nonexistent.png"},
+			map[string]guests.InputTypeSpec{"img": {Type: "file", Encoding: "base64", MaxSizeMB: 10}},
+			root,
+		)
+		if err == nil {
+			t.Fatal("expected error for missing file")
+		}
+	})
+
+	t.Run("exceeds_max_size", func(t *testing.T) {
+		root := t.TempDir()
+		big := make([]byte, 2*1024*1024)
+		writeTestFile(t, root, "big.bin", big)
+
+		_, err := ResolveInputs(
+			map[string]string{"img": "big.bin"},
+			map[string]guests.InputTypeSpec{"img": {Type: "file", Encoding: "base64", MaxSizeMB: 1}},
+			root,
+		)
+		if err == nil || !strings.Contains(err.Error(), "exceeds maximum") {
+			t.Fatalf("expected size error, got: %v", err)
+		}
+	})
+
+	t.Run("default_encoding_and_size", func(t *testing.T) {
+		root := t.TempDir()
+		writeTestFile(t, root, "small.png", smallPNG)
+
+		result, err := ResolveInputs(
+			map[string]string{"img": "small.png"},
+			map[string]guests.InputTypeSpec{"img": {Type: "file"}},
+			root,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := base64.StdEncoding.EncodeToString(smallPNG)
+		if result["img"] != want {
+			t.Error("default encoding should be base64")
+		}
+	})
+
+	t.Run("mixed_file_and_string", func(t *testing.T) {
+		root := t.TempDir()
+		writeTestFile(t, root, "small.png", smallPNG)
+
+		result, err := ResolveInputs(
+			map[string]string{"img": "small.png", "prompt": "hello"},
+			map[string]guests.InputTypeSpec{
+				"img":    {Type: "file", Encoding: "base64", MaxSizeMB: 10},
+				"prompt": {Type: "string"},
+			},
+			root,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result["prompt"] != "hello" {
+			t.Errorf("string var should pass through, got %q", result["prompt"])
+		}
+		want := base64.StdEncoding.EncodeToString(smallPNG)
+		if result["img"] != want {
+			t.Error("file var should be base64-encoded")
+		}
+	})
+
+	t.Run("nil_input_types", func(t *testing.T) {
+		root := t.TempDir()
+		vars := map[string]string{"img": "anything"}
+		result, err := ResolveInputs(vars, nil, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result["img"] != "anything" {
+			t.Error("nil input_types should return vars unchanged")
+		}
+	})
+
+	t.Run("unsupported_type", func(t *testing.T) {
+		root := t.TempDir()
+		_, err := ResolveInputs(
+			map[string]string{"img": "x"},
+			map[string]guests.InputTypeSpec{"img": {Type: "webhook"}},
+			root,
+		)
+		if err == nil || !strings.Contains(err.Error(), "unsupported input type") {
+			t.Fatalf("expected unsupported type error, got: %v", err)
+		}
+	})
+}
+
+func TestMCPProtocol_ToolCall_FileInput_Integration(t *testing.T) {
+	root := t.TempDir()
+	smallPNG := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00}
+	writeTestFile(t, root, "sprite.png", smallPNG)
+
+	var capturedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := os.ReadFile(r.Body.(*os.File).Name())
+		if body == nil {
+			var buf bytes.Buffer
+			buf.ReadFrom(r.Body)
+			body = buf.Bytes()
+		}
+		capturedBody = make([]byte, 0)
+		var buf bytes.Buffer
+		buf.ReadFrom(r.Body)
+		capturedBody = buf.Bytes()
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	// Re-do: capture body properly
+	capturedBody = nil
+	srv.Close()
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var buf bytes.Buffer
+		buf.ReadFrom(r.Body)
+		capturedBody = buf.Bytes()
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	tools := []ToolConfig{{
+		ID: "test-file",
+		Config: guests.HTTPToolConfig{
+			URL:    srv.URL,
+			Method: "POST",
+			InputTypes: map[string]guests.InputTypeSpec{
+				"image": {Type: "file", Encoding: "base64", MaxSizeMB: 10},
+			},
+			RequestTemplate: map[string]any{
+				"data":   "${input.image}",
+				"prompt": "${input.prompt}",
+			},
+		},
+	}}
+
+	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"http__test-file__call","arguments":{"image":"sprite.png","prompt":"bounce"}}}
+`)
+
+	var out bytes.Buffer
+	if err := Run(tools, root, strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected at least 2 response lines, got %d", len(lines))
+	}
+
+	resp := parseResponse(t, []byte(lines[1]))
+	result := resultMap(t, resp)
+	if result["isError"] == true {
+		t.Fatalf("tool call failed: %s", contentText(t, result))
+	}
+
+	if capturedBody == nil {
+		t.Fatal("server never received request body")
+	}
+	var body map[string]any
+	if err := json.Unmarshal(capturedBody, &body); err != nil {
+		t.Fatalf("parsing captured body: %v", err)
+	}
+	wantB64 := base64.StdEncoding.EncodeToString(smallPNG)
+	if body["data"] != wantB64 {
+		t.Errorf("body.data = %q, want base64 of file", body["data"])
+	}
+	if body["prompt"] != "bounce" {
+		t.Errorf("body.prompt = %q, want %q", body["prompt"], "bounce")
+	}
+}
+
+func TestMCPProtocol_ToolsList_FileInputDescription(t *testing.T) {
+	tools := []ToolConfig{{
+		ID: "file-tool",
+		Config: guests.HTTPToolConfig{
+			URL:    "http://example.com",
+			Method: "POST",
+			InputTypes: map[string]guests.InputTypeSpec{
+				"img": {Type: "file", Encoding: "base64", MaxSizeMB: 5},
+			},
+			RequestTemplate: map[string]any{
+				"data": "${input.img}",
+			},
+		},
+	}}
+
+	input := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+`
+	var out bytes.Buffer
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected at least 2 lines, got %d", len(lines))
+	}
+	resp := parseResponse(t, []byte(lines[1]))
+	result := resultMap(t, resp)
+	toolList, ok := result["tools"].([]any)
+	if !ok || len(toolList) == 0 {
+		t.Fatal("no tools in list")
+	}
+	tool := toolList[0].(map[string]any)
+	schema := tool["inputSchema"].(map[string]any)
+	props := schema["properties"].(map[string]any)
+	imgProp := props["img"].(map[string]any)
+	desc, ok := imgProp["description"].(string)
+	if !ok {
+		t.Fatal("img property missing description")
+	}
+	if !strings.Contains(desc, "file path") || !strings.Contains(desc, "5MB") {
+		t.Errorf("description should mention file path and 5MB, got: %s", desc)
+	}
+}
+
+func TestMCPProtocol_ToolCall_ArtifactSave_WithPostProcess(t *testing.T) {
+	imageData := []byte("fake-png-data")
+	b64Image := base64.StdEncoding.EncodeToString(imageData)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiResp := map[string]any{
+			"candidates": []map[string]any{{
+				"content": map[string]any{
+					"parts": []map[string]any{{
+						"inlineData": map[string]any{
+							"mimeType": "image/png",
+							"data":     b64Image,
+						},
+					}},
+				},
+			}},
+		}
+		json.NewEncoder(w).Encode(apiResp)
+	}))
+	defer srv.Close()
+
+	outDir := t.TempDir()
+	saveTo := filepath.Join(outDir, "generated", "${input.filename}")
+
+	tools := []ToolConfig{{
+		ID: "img-gen-pp",
+		Config: guests.HTTPToolConfig{
+			URL:             srv.URL,
+			Method:          "POST",
+			RequestTemplate: map[string]any{"prompt": "${input.prompt}"},
+			ResponseArtifact: &guests.ArtifactTemplate{
+				Type:   "image/png",
+				SaveTo: saveTo,
+				PostProcess: []guests.PostProcessOp{
+					{Op: "remove_background", Config: map[string]string{"model": "u2net"}},
+				},
+			},
+		},
+	}}
+
+	call := map[string]any{
+		"name":      "http__img-gen-pp__call",
+		"arguments": map[string]string{"prompt": "a goblin", "filename": "goblin.png"},
+	}
+	callJSON, _ := json.Marshal(call)
+	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
+
+	var out bytes.Buffer
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
+	text := contentText(t, result)
+
+	if !strings.Contains(text, "goblin.png") {
+		t.Errorf("result should mention filename: %s", text)
+	}
+	// Post-process runs but rembg is not installed in CI, so expect "skipped"
+	if !strings.Contains(text, "remove_background") {
+		t.Errorf("result should mention post-process op: %s", text)
+	}
+
+	expectedPath := filepath.Join(outDir, "generated", "goblin.png")
+	if _, err := os.Stat(expectedPath); err != nil {
+		t.Fatalf("artifact not written: %v", err)
+	}
+}
+
+func TestMCPProtocol_ToolCall_ArtifactSave_NoPostProcess(t *testing.T) {
+	imageData := []byte("fake-png-data")
+	b64Image := base64.StdEncoding.EncodeToString(imageData)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiResp := map[string]any{
+			"candidates": []map[string]any{{
+				"content": map[string]any{
+					"parts": []map[string]any{{
+						"inlineData": map[string]any{
+							"mimeType": "image/png",
+							"data":     b64Image,
+						},
+					}},
+				},
+			}},
+		}
+		json.NewEncoder(w).Encode(apiResp)
+	}))
+	defer srv.Close()
+
+	outDir := t.TempDir()
+	saveTo := filepath.Join(outDir, "${input.filename}")
+
+	tools := []ToolConfig{{
+		ID: "img-gen-npp",
+		Config: guests.HTTPToolConfig{
+			URL:             srv.URL,
+			Method:          "POST",
+			RequestTemplate: map[string]any{"prompt": "${input.prompt}"},
+			ResponseArtifact: &guests.ArtifactTemplate{
+				Type:   "image/png",
+				SaveTo: saveTo,
+			},
+		},
+	}}
+
+	call := map[string]any{
+		"name":      "http__img-gen-npp__call",
+		"arguments": map[string]string{"prompt": "a cat", "filename": "cat.png"},
+	}
+	callJSON, _ := json.Marshal(call)
+	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
+
+	var out bytes.Buffer
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
+	text := contentText(t, result)
+
+	if strings.Contains(text, "->") {
+		t.Errorf("result should not contain post-process lines when none configured: %s", text)
+	}
+	if !strings.Contains(text, "cat.png") {
+		t.Errorf("result should mention filename: %s", text)
+	}
+}
+
+func TestMCPProtocol_ToolCall_ArtifactSave_UnknownPostProcessOp(t *testing.T) {
+	imageData := []byte("fake-png-data")
+	b64Image := base64.StdEncoding.EncodeToString(imageData)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiResp := map[string]any{
+			"candidates": []map[string]any{{
+				"content": map[string]any{
+					"parts": []map[string]any{{
+						"inlineData": map[string]any{
+							"mimeType": "image/png",
+							"data":     b64Image,
+						},
+					}},
+				},
+			}},
+		}
+		json.NewEncoder(w).Encode(apiResp)
+	}))
+	defer srv.Close()
+
+	outDir := t.TempDir()
+	saveTo := filepath.Join(outDir, "${input.filename}")
+
+	tools := []ToolConfig{{
+		ID: "img-gen-unk",
+		Config: guests.HTTPToolConfig{
+			URL:             srv.URL,
+			Method:          "POST",
+			RequestTemplate: map[string]any{"prompt": "${input.prompt}"},
+			ResponseArtifact: &guests.ArtifactTemplate{
+				Type:   "image/png",
+				SaveTo: saveTo,
+				PostProcess: []guests.PostProcessOp{
+					{Op: "totally_fake_op"},
+				},
+			},
+		},
+	}}
+
+	call := map[string]any{
+		"name":      "http__img-gen-unk__call",
+		"arguments": map[string]string{"prompt": "test", "filename": "test.png"},
+	}
+	callJSON, _ := json.Marshal(call)
+	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
+
+	var out bytes.Buffer
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
+	text := contentText(t, result)
+
+	if !strings.Contains(text, "totally_fake_op: skipped") {
+		t.Errorf("result should show unknown op as skipped: %s", text)
+	}
+
+	expectedPath := filepath.Join(outDir, "test.png")
+	data, err := os.ReadFile(expectedPath)
+	if err != nil {
+		t.Fatalf("artifact should still be written despite unknown op: %v", err)
+	}
+	if string(data) != "fake-png-data" {
+		t.Errorf("artifact content should be unchanged: %q", string(data))
+	}
+}
+
+func TestMCPProtocol_ToolCall_ArtifactSave_VideoPipelineOps(t *testing.T) {
+	imageData := []byte("fake-video-data")
+	b64Data := base64.StdEncoding.EncodeToString(imageData)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiResp := map[string]any{
+			"candidates": []map[string]any{{
+				"content": map[string]any{
+					"parts": []map[string]any{{
+						"inlineData": map[string]any{
+							"mimeType": "video/mp4",
+							"data":     b64Data,
+						},
+					}},
+				},
+			}},
+		}
+		json.NewEncoder(w).Encode(apiResp)
+	}))
+	defer srv.Close()
+
+	outDir := t.TempDir()
+	saveTo := filepath.Join(outDir, "generated", "${input.filename}")
+
+	tools := []ToolConfig{{
+		ID: "veo-pipeline",
+		Config: guests.HTTPToolConfig{
+			URL:             srv.URL,
+			Method:          "POST",
+			RequestTemplate: map[string]any{"prompt": "${input.prompt}"},
+			ResponseArtifact: &guests.ArtifactTemplate{
+				Type:   "video/mp4",
+				SaveTo: saveTo,
+				PostProcess: []guests.PostProcessOp{
+					{Op: "extract_video_frames", Config: map[string]string{"fps": "8"}},
+					{Op: "remove_background", Config: map[string]string{"model": "isnet-anime"}},
+					{Op: "normalize_frames", Config: map[string]string{"padding": "4"}},
+					{Op: "stitch_spritesheet", Config: map[string]string{"columns": "4"}},
+				},
+			},
+		},
+	}}
+
+	call := map[string]any{
+		"name":      "http__veo-pipeline__call",
+		"arguments": map[string]string{"prompt": "goblin walk", "filename": "goblin.mp4"},
+	}
+	callJSON, _ := json.Marshal(call)
+	input := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, callJSON) + "\n"
+
+	var out bytes.Buffer
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
+	text := contentText(t, result)
+
+	// Without ffmpeg installed in CI, extract_video_frames will skip,
+	// causing downstream ops to also skip (no frame_dir in state).
+	// The important thing: all 4 ops appear in the response and none crash.
+	if !strings.Contains(text, "extract_video_frames") {
+		t.Errorf("result should mention extract_video_frames: %s", text)
+	}
+	if !strings.Contains(text, "stitch_spritesheet") {
+		t.Errorf("result should mention stitch_spritesheet: %s", text)
+	}
+
+	expectedPath := filepath.Join(outDir, "generated", "goblin.mp4")
+	if _, err := os.Stat(expectedPath); err != nil {
+		t.Fatalf("artifact should still be written to disk: %v", err)
+	}
 }

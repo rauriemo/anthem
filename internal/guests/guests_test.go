@@ -1032,3 +1032,351 @@ func TestParseFrontmatter_AsyncPolling(t *testing.T) {
 		})
 	}
 }
+
+func TestParseFrontmatter_PostProcess(t *testing.T) {
+	t.Run("parses post_process with config nesting", func(t *testing.T) {
+		input := `---
+name: Artist
+description: Makes art
+http_tools:
+  img-gen:
+    url: http://example.com/generate
+    method: POST
+    request_template:
+      prompt: "${input.prompt}"
+    response_artifact:
+      type: image/png
+      save_to: "out/${input.filename}"
+      post_process:
+        - op: remove_background
+          config:
+            model: isnet-anime
+---
+
+Body.`
+		agent, err := ParseFrontmatter([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ht := agent.HTTPTools["img-gen"]
+		if ht.ResponseArtifact == nil {
+			t.Fatal("ResponseArtifact is nil")
+		}
+		pp := ht.ResponseArtifact.PostProcess
+		if len(pp) != 1 {
+			t.Fatalf("PostProcess count = %d, want 1", len(pp))
+		}
+		if pp[0].Op != "remove_background" {
+			t.Errorf("Op = %q, want %q", pp[0].Op, "remove_background")
+		}
+		if pp[0].Config["model"] != "isnet-anime" {
+			t.Errorf("Config[model] = %q, want %q", pp[0].Config["model"], "isnet-anime")
+		}
+	})
+
+	t.Run("nil post_process when omitted", func(t *testing.T) {
+		input := `---
+name: Agent
+description: test
+http_tools:
+  t:
+    url: http://x
+    method: POST
+    request_template:
+      q: "${input.q}"
+    response_artifact:
+      type: image/png
+      save_to: "out/${input.filename}"
+---
+`
+		agent, err := ParseFrontmatter([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if agent.HTTPTools["t"].ResponseArtifact.PostProcess != nil {
+			t.Errorf("PostProcess should be nil when omitted, got %v",
+				agent.HTTPTools["t"].ResponseArtifact.PostProcess)
+		}
+	})
+
+	t.Run("multiple post_process ops", func(t *testing.T) {
+		input := `---
+name: Agent
+description: test
+http_tools:
+  t:
+    url: http://x
+    method: POST
+    request_template:
+      q: "${input.q}"
+    response_artifact:
+      type: image/png
+      save_to: "out/${input.filename}"
+      post_process:
+        - op: remove_background
+          config:
+            model: u2net
+        - op: remove_background
+          config:
+            model: isnet-anime
+---
+`
+		agent, err := ParseFrontmatter([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pp := agent.HTTPTools["t"].ResponseArtifact.PostProcess
+		if len(pp) != 2 {
+			t.Fatalf("PostProcess count = %d, want 2", len(pp))
+		}
+		if pp[0].Config["model"] != "u2net" {
+			t.Errorf("first op model = %q", pp[0].Config["model"])
+		}
+		if pp[1].Config["model"] != "isnet-anime" {
+			t.Errorf("second op model = %q", pp[1].Config["model"])
+		}
+	})
+
+	t.Run("op without config", func(t *testing.T) {
+		input := `---
+name: Agent
+description: test
+http_tools:
+  t:
+    url: http://x
+    method: POST
+    request_template:
+      q: "${input.q}"
+    response_artifact:
+      type: image/png
+      save_to: "out/${input.filename}"
+      post_process:
+        - op: remove_background
+---
+`
+		agent, err := ParseFrontmatter([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pp := agent.HTTPTools["t"].ResponseArtifact.PostProcess
+		if len(pp) != 1 {
+			t.Fatalf("PostProcess count = %d, want 1", len(pp))
+		}
+		if pp[0].Op != "remove_background" {
+			t.Errorf("Op = %q", pp[0].Op)
+		}
+		if pp[0].Config != nil && len(pp[0].Config) > 0 {
+			t.Errorf("Config should be nil/empty, got %v", pp[0].Config)
+		}
+	})
+}
+
+func TestValidatePostProcess(t *testing.T) {
+	t.Run("known op returns no errors", func(t *testing.T) {
+		errs := ValidatePostProcess([]PostProcessOp{
+			{Op: "remove_background", Config: map[string]string{"model": "u2net"}},
+		})
+		if len(errs) != 0 {
+			t.Errorf("expected no errors, got %v", errs)
+		}
+	})
+
+	t.Run("all video pipeline ops are known", func(t *testing.T) {
+		errs := ValidatePostProcess([]PostProcessOp{
+			{Op: "extract_video_frames", Config: map[string]string{"fps": "8"}},
+			{Op: "remove_background", Config: map[string]string{"model": "isnet-anime"}},
+			{Op: "normalize_frames", Config: map[string]string{"padding": "4"}},
+			{Op: "stitch_spritesheet", Config: map[string]string{"columns": "4"}},
+		})
+		if len(errs) != 0 {
+			t.Errorf("expected no errors for full pipeline, got %v", errs)
+		}
+	})
+
+	t.Run("unknown op returns error", func(t *testing.T) {
+		errs := ValidatePostProcess([]PostProcessOp{
+			{Op: "nonexistent_op"},
+		})
+		if len(errs) != 1 {
+			t.Fatalf("expected 1 error, got %d", len(errs))
+		}
+		if !strings.Contains(errs[0].Error(), "unknown op") {
+			t.Errorf("error = %q, want mention of 'unknown op'", errs[0])
+		}
+		if !strings.Contains(errs[0].Error(), "nonexistent_op") {
+			t.Errorf("error = %q, want mention of op name", errs[0])
+		}
+	})
+
+	t.Run("missing op field returns error", func(t *testing.T) {
+		errs := ValidatePostProcess([]PostProcessOp{
+			{Op: ""},
+		})
+		if len(errs) != 1 {
+			t.Fatalf("expected 1 error, got %d", len(errs))
+		}
+		if !strings.Contains(errs[0].Error(), "missing op") {
+			t.Errorf("error = %q, want mention of 'missing op'", errs[0])
+		}
+	})
+
+	t.Run("nil/empty list returns no errors", func(t *testing.T) {
+		if errs := ValidatePostProcess(nil); len(errs) != 0 {
+			t.Errorf("nil: expected no errors, got %v", errs)
+		}
+		if errs := ValidatePostProcess([]PostProcessOp{}); len(errs) != 0 {
+			t.Errorf("empty: expected no errors, got %v", errs)
+		}
+	})
+
+	t.Run("mixed known and unknown ops", func(t *testing.T) {
+		errs := ValidatePostProcess([]PostProcessOp{
+			{Op: "remove_background"},
+			{Op: "bad_op"},
+			{Op: ""},
+		})
+		if len(errs) != 2 {
+			t.Fatalf("expected 2 errors, got %d: %v", len(errs), errs)
+		}
+	})
+}
+
+func TestParseFrontmatter_InputTypes(t *testing.T) {
+	t.Parallel()
+	mkYAML := func(httpToolsBlock string) string {
+		return "---\nname: Test\ndescription: Test agent\nhttp_tools:\n  t:\n    url: http://x\n    method: POST\n" + httpToolsBlock + "\n---\nBody."
+	}
+
+	t.Run("valid_file_type", func(t *testing.T) {
+		input := mkYAML(`    request_template:
+      data: "${input.img}"
+    input_types:
+      img:
+        type: file
+        encoding: base64
+        max_size_mb: 10`)
+		agent, err := ParseFrontmatter([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		spec := agent.HTTPTools["t"].InputTypes["img"]
+		if spec.Type != "file" || spec.Encoding != "base64" || spec.MaxSizeMB != 10 {
+			t.Errorf("unexpected spec: %+v", spec)
+		}
+	})
+
+	t.Run("defaults_applied", func(t *testing.T) {
+		input := mkYAML(`    request_template:
+      data: "${input.img}"
+    input_types:
+      img:
+        type: file`)
+		agent, err := ParseFrontmatter([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		spec := agent.HTTPTools["t"].InputTypes["img"]
+		if spec.Encoding != "base64" {
+			t.Errorf("encoding default: got %q, want base64", spec.Encoding)
+		}
+		if spec.MaxSizeMB != 10 {
+			t.Errorf("max_size_mb default: got %d, want 10", spec.MaxSizeMB)
+		}
+	})
+
+	t.Run("string_type_explicit", func(t *testing.T) {
+		input := mkYAML(`    request_template:
+      data: "${input.prompt}"
+    input_types:
+      prompt:
+        type: string`)
+		_, err := ParseFrontmatter([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("unsupported_type", func(t *testing.T) {
+		input := mkYAML(`    request_template:
+      data: "${input.img}"
+    input_types:
+      img:
+        type: url`)
+		_, err := ParseFrontmatter([]byte(input))
+		if err == nil || !strings.Contains(err.Error(), "unsupported input type") {
+			t.Fatalf("expected unsupported type error, got: %v", err)
+		}
+	})
+
+	t.Run("invalid_encoding", func(t *testing.T) {
+		input := mkYAML(`    request_template:
+      data: "${input.img}"
+    input_types:
+      img:
+        type: file
+        encoding: hex`)
+		_, err := ParseFrontmatter([]byte(input))
+		if err == nil || !strings.Contains(err.Error(), "encoding") {
+			t.Fatalf("expected encoding error, got: %v", err)
+		}
+	})
+
+	t.Run("max_size_too_large", func(t *testing.T) {
+		input := mkYAML(`    request_template:
+      data: "${input.img}"
+    input_types:
+      img:
+        type: file
+        max_size_mb: 100`)
+		_, err := ParseFrontmatter([]byte(input))
+		if err == nil || !strings.Contains(err.Error(), "max_size_mb") {
+			t.Fatalf("expected max_size_mb error, got: %v", err)
+		}
+	})
+
+	t.Run("max_size_negative", func(t *testing.T) {
+		input := mkYAML(`    request_template:
+      data: "${input.img}"
+    input_types:
+      img:
+        type: file
+        max_size_mb: -1`)
+		_, err := ParseFrontmatter([]byte(input))
+		if err == nil || !strings.Contains(err.Error(), "max_size_mb") {
+			t.Fatalf("expected max_size_mb error, got: %v", err)
+		}
+	})
+
+	t.Run("key_not_in_template_strict", func(t *testing.T) {
+		input := mkYAML(`    request_template:
+      data: "${input.img}"
+    input_types:
+      typo_img:
+        type: file`)
+		_, err := ParseFrontmatter([]byte(input))
+		if err == nil || !strings.Contains(err.Error(), "not found in request_template") {
+			t.Fatalf("expected template mismatch error, got: %v", err)
+		}
+	})
+
+	t.Run("key_in_template_no_input_type", func(t *testing.T) {
+		input := mkYAML(`    request_template:
+      data: "${input.prompt}"`)
+		_, err := ParseFrontmatter([]byte(input))
+		if err != nil {
+			t.Fatalf("template vars without input_types should be allowed: %v", err)
+		}
+	})
+
+	t.Run("omitted", func(t *testing.T) {
+		input := mkYAML(`    request_template:
+      data: "${input.prompt}"`)
+		agent, err := ParseFrontmatter([]byte(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if agent.HTTPTools["t"].InputTypes != nil {
+			t.Error("InputTypes should be nil when omitted")
+		}
+	})
+}

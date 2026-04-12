@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -16,9 +17,44 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var templateVarRe = regexp.MustCompile(`\$\{input\.([a-zA-Z_][a-zA-Z0-9_]*)\}`)
+
+// PostProcessOp declares a typed post-processing operation to run on an
+// artifact after it is saved to disk. The bridge owns the implementation
+// of each named operation; guest YAML declares intent, not mechanism.
+type PostProcessOp struct {
+	Op     string            `yaml:"op" json:"op"`
+	Config map[string]string `yaml:"config,omitempty" json:"config,omitempty"`
+}
+
 type ArtifactTemplate struct {
-	Type   string `yaml:"type" json:"type"`
-	SaveTo string `yaml:"save_to" json:"save_to"`
+	Type        string          `yaml:"type" json:"type"`
+	SaveTo      string          `yaml:"save_to" json:"save_to"`
+	PostProcess []PostProcessOp `yaml:"post_process,omitempty" json:"post_process,omitempty"`
+}
+
+// knownPostProcessOps is the closed set of operations the bridge implements.
+var knownPostProcessOps = map[string]bool{
+	"remove_background":    true,
+	"extract_video_frames": true,
+	"normalize_frames":     true,
+	"stitch_spritesheet":   true,
+}
+
+// ValidatePostProcess checks that every operation in the list is recognized.
+// Returns a slice of errors (one per problem). Callers should log these as
+// warnings rather than blocking guest registration, so that a stale guest
+// config referencing an op from a newer Anthem version doesn't break loading.
+func ValidatePostProcess(ops []PostProcessOp) []error {
+	var errs []error
+	for i, op := range ops {
+		if op.Op == "" {
+			errs = append(errs, fmt.Errorf("post_process[%d]: missing op field", i))
+		} else if !knownPostProcessOps[op.Op] {
+			errs = append(errs, fmt.Errorf("post_process[%d]: unknown op %q", i, op.Op))
+		}
+	}
+	return errs
 }
 
 type AsyncPollingConfig struct {
@@ -31,16 +67,26 @@ type AsyncPollingConfig struct {
 	DownloadAuth      string `yaml:"download_auth,omitempty" json:"download_auth,omitempty"`
 }
 
+// InputTypeSpec declares how a template variable should be resolved at tool-call
+// time. Type "file" causes the bridge to read the file from disk and encode it;
+// "string" (or empty) passes the value through unchanged.
+type InputTypeSpec struct {
+	Type      string `yaml:"type" json:"type"`
+	Encoding  string `yaml:"encoding,omitempty" json:"encoding,omitempty"`
+	MaxSizeMB int    `yaml:"max_size_mb,omitempty" json:"max_size_mb,omitempty"`
+}
+
 type HTTPToolConfig struct {
-	URL              string              `yaml:"url" json:"url"`
-	Method           string              `yaml:"method" json:"method"`
-	AuthTokenEnv     string              `yaml:"auth_token_env,omitempty" json:"auth_token_env,omitempty"`
-	AuthScheme       string              `yaml:"auth_scheme,omitempty" json:"auth_scheme,omitempty"`
-	AsyncPolling     *AsyncPollingConfig `yaml:"async_polling,omitempty" json:"async_polling,omitempty"`
-	RequestTemplate  map[string]any      `yaml:"request_template,omitempty" json:"request_template,omitempty"`
-	ResponseArtifact *ArtifactTemplate   `yaml:"response_artifact,omitempty" json:"response_artifact,omitempty"`
-	TimeoutMS        int                 `yaml:"timeout_ms,omitempty" json:"timeout_ms,omitempty"`
-	Description      string              `yaml:"description,omitempty" json:"description,omitempty"`
+	URL              string                      `yaml:"url" json:"url"`
+	Method           string                      `yaml:"method" json:"method"`
+	AuthTokenEnv     string                      `yaml:"auth_token_env,omitempty" json:"auth_token_env,omitempty"`
+	AuthScheme       string                      `yaml:"auth_scheme,omitempty" json:"auth_scheme,omitempty"`
+	AsyncPolling     *AsyncPollingConfig         `yaml:"async_polling,omitempty" json:"async_polling,omitempty"`
+	InputTypes       map[string]InputTypeSpec    `yaml:"input_types,omitempty" json:"input_types,omitempty"`
+	RequestTemplate  map[string]any              `yaml:"request_template,omitempty" json:"request_template,omitempty"`
+	ResponseArtifact *ArtifactTemplate           `yaml:"response_artifact,omitempty" json:"response_artifact,omitempty"`
+	TimeoutMS        int                         `yaml:"timeout_ms,omitempty" json:"timeout_ms,omitempty"`
+	Description      string                      `yaml:"description,omitempty" json:"description,omitempty"`
 }
 
 type GuestAgent struct {
@@ -125,6 +171,14 @@ func ScanDirectory(dir string, logger *slog.Logger) (GuestIndex, error) {
 		agent.File = entry.Name()
 		agent.Scope = "project"
 		agent.Source = "local"
+
+		for _, tool := range agent.HTTPTools {
+			if tool.ResponseArtifact != nil {
+				for _, warn := range ValidatePostProcess(tool.ResponseArtifact.PostProcess) {
+					logger.Warn("post_process validation", "agent", slug, "warning", warn)
+				}
+			}
+		}
 
 		index.Agents[slug] = agent
 	}
@@ -247,6 +301,10 @@ func ParseFrontmatter(data []byte) (GuestAgent, error) {
 		if tool.AuthScheme != "" && tool.AuthScheme != "bearer" && tool.AuthScheme != "api-key" {
 			return GuestAgent{}, fmt.Errorf("http_tools[%q]: auth_scheme must be \"bearer\", \"api-key\", or empty, got %q", name, tool.AuthScheme)
 		}
+		if err := validateInputTypes(name, tool); err != nil {
+			return GuestAgent{}, err
+		}
+		applyInputTypeDefaults(fm.HTTPTools, name)
 	}
 
 	return GuestAgent{
@@ -262,6 +320,78 @@ func ParseFrontmatter(data []byte) (GuestAgent, error) {
 		MCPServers:              fm.MCPServers,
 		HTTPTools:               fm.HTTPTools,
 	}, nil
+}
+
+func extractTemplateVars(tmpl map[string]any) map[string]bool {
+	seen := make(map[string]bool)
+	walkTemplateStrings(tmpl, func(s string) {
+		for _, match := range templateVarRe.FindAllStringSubmatch(s, -1) {
+			seen[match[1]] = true
+		}
+	})
+	return seen
+}
+
+func walkTemplateStrings(v any, fn func(string)) {
+	switch val := v.(type) {
+	case string:
+		fn(val)
+	case map[string]any:
+		for _, child := range val {
+			walkTemplateStrings(child, fn)
+		}
+	case []any:
+		for _, child := range val {
+			walkTemplateStrings(child, fn)
+		}
+	}
+}
+
+func validateInputTypes(toolName string, tool HTTPToolConfig) error {
+	if len(tool.InputTypes) == 0 {
+		return nil
+	}
+	templateVars := extractTemplateVars(tool.RequestTemplate)
+	for key, spec := range tool.InputTypes {
+		if !templateVars[key] {
+			return fmt.Errorf("http_tools[%q].input_types[%q]: key not found in request_template (no ${input.%s} reference)", toolName, key, key)
+		}
+		switch spec.Type {
+		case "", "string", "file":
+		default:
+			return fmt.Errorf("http_tools[%q].input_types[%q]: unsupported input type %q", toolName, key, spec.Type)
+		}
+		if spec.Type == "file" {
+			switch spec.Encoding {
+			case "", "base64", "raw":
+			default:
+				return fmt.Errorf("http_tools[%q].input_types[%q]: encoding must be \"base64\", \"raw\", or empty, got %q", toolName, key, spec.Encoding)
+			}
+			if spec.MaxSizeMB < 0 || spec.MaxSizeMB > 50 {
+				return fmt.Errorf("http_tools[%q].input_types[%q]: max_size_mb must be between 0 and 50, got %d", toolName, key, spec.MaxSizeMB)
+			}
+		}
+	}
+	return nil
+}
+
+func applyInputTypeDefaults(tools map[string]HTTPToolConfig, toolName string) {
+	tool := tools[toolName]
+	for key, spec := range tool.InputTypes {
+		if spec.Type == "" {
+			spec.Type = "string"
+		}
+		if spec.Type == "file" {
+			if spec.Encoding == "" {
+				spec.Encoding = "base64"
+			}
+			if spec.MaxSizeMB == 0 {
+				spec.MaxSizeMB = 10
+			}
+		}
+		tool.InputTypes[key] = spec
+	}
+	tools[toolName] = tool
 }
 
 func ComputeRequirementsFingerprint(requirements map[string]any) string {

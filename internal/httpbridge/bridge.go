@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,11 +23,26 @@ type ToolConfig struct {
 	Config guests.HTTPToolConfig
 }
 
+// LoadRootFromEnv reads ANTHEM_HTTP_BRIDGE_ROOT from the environment and
+// canonicalizes it. Falls back to os.Getwd() if unset.
+func LoadRootFromEnv() (string, error) {
+	root := os.Getenv("ANTHEM_HTTP_BRIDGE_ROOT")
+	if root == "" {
+		return os.Getwd()
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolving bridge root: %w", err)
+	}
+	return abs, nil
+}
+
 // Run starts the MCP stdio server loop. It reads JSON-RPC 2.0 requests from
-// r and writes responses to w. The bridge exposes one MCP tool per ToolConfig.
-func Run(tools []ToolConfig, r io.Reader, w io.Writer) error {
+// r and writes responses to w. sandboxRoot is the canonical project root used
+// to sandbox file reads for type:file input_types.
+func Run(tools []ToolConfig, sandboxRoot string, r io.Reader, w io.Writer) error {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 4*1024*1024), 4*1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -48,7 +64,7 @@ func Run(tools []ToolConfig, r io.Reader, w io.Writer) error {
 		case "tools/list":
 			writeResult(w, req.ID, toolsList(tools))
 		case "tools/call":
-			handleToolCall(w, req.ID, req.Params, tools)
+			handleToolCall(w, req.ID, req.Params, tools, sandboxRoot)
 		default:
 			writeError(w, req.ID, -32601, fmt.Sprintf("method not found: %s", req.Method))
 		}
@@ -133,7 +149,19 @@ func toolsList(tools []ToolConfig) map[string]any {
 		properties := make(map[string]any, len(inputVars))
 		required := make([]string, 0, len(inputVars))
 		for _, v := range inputVars {
-			properties[v] = map[string]any{"type": "string"}
+			prop := map[string]any{"type": "string"}
+			if spec, ok := t.Config.InputTypes[v]; ok && spec.Type == "file" {
+				maxMB := spec.MaxSizeMB
+				if maxMB == 0 {
+					maxMB = 10
+				}
+				enc := spec.Encoding
+				if enc == "" {
+					enc = "base64"
+				}
+				prop["description"] = fmt.Sprintf("Relative file path (max %dMB, will be %s-encoded by the bridge)", maxMB, enc)
+			}
+			properties[v] = prop
 			required = append(required, v)
 		}
 
@@ -168,7 +196,7 @@ func toolsList(tools []ToolConfig) map[string]any {
 	return map[string]any{"tools": list}
 }
 
-func handleToolCall(w io.Writer, id json.RawMessage, params json.RawMessage, tools []ToolConfig) {
+func handleToolCall(w io.Writer, id json.RawMessage, params json.RawMessage, tools []ToolConfig, sandboxRoot string) {
 	var call struct {
 		Name      string            `json:"name"`
 		Arguments map[string]string `json:"arguments"`
@@ -190,7 +218,7 @@ func handleToolCall(w io.Writer, id json.RawMessage, params json.RawMessage, too
 		return
 	}
 
-	result, err := executeHTTPTool(tool.Config, call.Arguments)
+	result, err := executeHTTPTool(tool.Config, call.Arguments, sandboxRoot)
 	if err != nil {
 		writeResult(w, id, map[string]any{
 			"content": []map[string]any{
@@ -208,8 +236,12 @@ func handleToolCall(w io.Writer, id json.RawMessage, params json.RawMessage, too
 	})
 }
 
-func executeHTTPTool(cfg guests.HTTPToolConfig, args map[string]string) (string, error) {
-	body, err := ResolveTemplate(cfg.RequestTemplate, args)
+func executeHTTPTool(cfg guests.HTTPToolConfig, args map[string]string, sandboxRoot string) (string, error) {
+	resolved, err := ResolveInputs(args, cfg.InputTypes, sandboxRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolving inputs: %w", err)
+	}
+	body, err := ResolveTemplate(cfg.RequestTemplate, resolved)
 	if err != nil {
 		return "", fmt.Errorf("resolving request template: %w", err)
 	}
@@ -296,7 +328,15 @@ func handleArtifactResponse(artifact *guests.ArtifactTemplate, respBody []byte, 
 		return "", fmt.Errorf("writing artifact: %w", err)
 	}
 
-	return fmt.Sprintf("Saved %s (%s, %d bytes) to %s", artifact.Type, mimeType, len(imageBytes), savePath), nil
+	msg := fmt.Sprintf("Saved %s (%s, %d bytes) to %s", artifact.Type, mimeType, len(imageBytes), savePath)
+	if len(artifact.PostProcess) > 0 {
+		results, state := RunPostProcess(artifact.PostProcess, savePath, slog.Default())
+		if sp := state["spritesheet_path"]; sp != "" {
+			msg = fmt.Sprintf("Saved sprite sheet image/png to %s (from %s)", sp, savePath)
+		}
+		msg = FormatResults(msg, results)
+	}
+	return msg, nil
 }
 
 // extractInlineData finds the first inlineData part in a Gemini API response.
@@ -395,16 +435,52 @@ func resolveDownloadAuth(cfg guests.HTTPToolConfig) http.Header {
 	}
 }
 
-// deriveBaseURL strips the method suffix (e.g. ":predictLongRunning") from a URL
-// to get the API base for polling.
+// deriveBaseURL extracts the API root from a long-running operation URL.
+// For "https://host/v1beta/models/m:predictLongRunning" it returns
+// "https://host/v1beta" — the portion before the first resource path segment.
+// The operation name returned by the API (e.g. "models/m/operations/xyz")
+// is appended to this root to form the polling URL.
 func deriveBaseURL(rawURL string) string {
-	idx := strings.LastIndex(rawURL, ":")
-	// Only strip if the colon is after the scheme (past ://)
 	schemeEnd := strings.Index(rawURL, "://")
-	if idx > schemeEnd+3 {
-		return rawURL[:idx]
+	if schemeEnd < 0 {
+		return rawURL
 	}
-	return rawURL
+
+	// Strip ":method" suffix first (e.g. ":predictLongRunning").
+	methodIdx := strings.LastIndex(rawURL, ":")
+	stripped := rawURL
+	if methodIdx > schemeEnd+3 {
+		stripped = rawURL[:methodIdx]
+	}
+
+	// Find the API version segment (/v1beta, /v1, /v2, etc.) and trim
+	// everything after it so the operation name isn't doubled.
+	pathStart := schemeEnd + 3
+	slashAfterHost := strings.Index(stripped[pathStart:], "/")
+	if slashAfterHost < 0 {
+		return stripped
+	}
+	pathStart += slashAfterHost // now at first "/" of path
+	path := stripped[pathStart:]
+
+	// Match /v followed by a digit and optional suffix up to the next slash.
+	vIdx := -1
+	for i := 0; i < len(path)-2; i++ {
+		if path[i] == '/' && path[i+1] == 'v' && i+2 < len(path) && path[i+2] >= '0' && path[i+2] <= '9' {
+			vIdx = i
+			break
+		}
+	}
+	if vIdx < 0 {
+		return stripped
+	}
+
+	// Find the end of the version segment (next '/' after /vN...).
+	vEnd := strings.Index(path[vIdx+1:], "/")
+	if vEnd < 0 {
+		return stripped
+	}
+	return stripped[:pathStart+vIdx+1+vEnd]
 }
 
 // executeAsyncPolling handles the long-running operation pattern: extract the
@@ -561,7 +637,16 @@ func handleAsyncArtifactDownload(cfg guests.HTTPToolConfig, artifactURI string, 
 		return "", fmt.Errorf("writing artifact: %w", err)
 	}
 
-	return fmt.Sprintf("Saved %s (%d bytes) to %s", cfg.ResponseArtifact.Type, len(data), savePath), nil
+	msg := fmt.Sprintf("Saved %s (%d bytes) to %s", cfg.ResponseArtifact.Type, len(data), savePath)
+	slog.Default().Info("handleAsyncArtifactDownload", "postProcessOps", len(cfg.ResponseArtifact.PostProcess), "savePath", savePath)
+	if len(cfg.ResponseArtifact.PostProcess) > 0 {
+		results, state := RunPostProcess(cfg.ResponseArtifact.PostProcess, savePath, slog.Default())
+		if sp := state["spritesheet_path"]; sp != "" {
+			msg = fmt.Sprintf("Saved sprite sheet image/png to %s (from %s)", sp, savePath)
+		}
+		msg = FormatResults(msg, results)
+	}
+	return msg, nil
 }
 
 func truncate(s string, max int) string {

@@ -112,6 +112,20 @@ On Windows, if Smart App Control blocks `go run`, build and run the binary direc
 
 **Requires:** Go 1.26.1+, Claude Code CLI (`claude --version`), GitHub auth (`gh auth status` or `GITHUB_TOKEN`).
 
+**Optional (for video-to-spritesheet post-processing):**
+
+```bash
+# ffmpeg -- frame extraction from generated videos
+winget install Gyan.FFmpeg          # Windows
+brew install ffmpeg                 # macOS
+
+# rembg -- AI background removal from sprite frames
+pip install "rembg[cli,cpu]"        # CPU inference
+pip install "rembg[cli,gpu]"        # NVIDIA/CUDA GPU (faster)
+```
+
+Both must be on PATH when Anthem starts. The post-process pipeline degrades gracefully: if either tool is missing, the corresponding step is skipped and the raw artifact is kept.
+
 ## Features
 
 - **GitHub issue-driven**: poll by label, claim, dispatch, update status, close on completion
@@ -497,6 +511,7 @@ During a respec session, all messages in the channel are automatically routed to
 | GitHub auth fails | Check `gh auth status` or verify `GITHUB_TOKEN` has `repo` scope |
 | Slack not connecting | Verify Socket Mode is enabled on your Slack app and `app_token` starts with `xapp-` |
 | Dispatch not connecting | Check that Anthem is running first (it's the server), tokens match in both `channels.yaml` files, and the `target` address/port is reachable |
+| Video pipeline skips all steps | `ffmpeg` and/or `rembg` not on PATH. Install them (see Installation) and restart Anthem so the new PATH is inherited |
 
 ## Architecture
 

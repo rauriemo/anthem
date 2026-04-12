@@ -30,12 +30,12 @@ func TestMergeMCPServersForSelectedGuests(t *testing.T) {
 	}
 	global := map[string]mcpconfig.MCPServerRef{"g": {Command: "global"}}
 
-	m := mergeMCPServersForSelectedGuests(global, idx, []string{"a"})
+	m := mergeMCPServersForSelectedGuests(global, idx, []string{"a"}, "")
 	if len(m) != 2 || m["g"].Command != "global" || m["u"].Command != "unity" {
 		t.Fatalf("merge single guest: %#v", m)
 	}
 
-	m2 := mergeMCPServersForSelectedGuests(global, idx, []string{"a", "b"})
+	m2 := mergeMCPServersForSelectedGuests(global, idx, []string{"a", "b"}, "")
 	if len(m2) != 3 {
 		t.Fatalf("merge two guests: want 3 keys, got %d (%#v)", len(m2), m2)
 	}
@@ -46,7 +46,7 @@ func TestMergeMCPServersForSelectedGuests(t *testing.T) {
 			"a": {MCPServers: map[string]mcpconfig.MCPServerRef{"g": {URL: "http://override"}}},
 		},
 	}
-	m3 := mergeMCPServersForSelectedGuests(global, idx2, []string{"a"})
+	m3 := mergeMCPServersForSelectedGuests(global, idx2, []string{"a"}, "")
 	if m3["g"].URL != "http://override" {
 		t.Fatalf("guest should override global: %#v", m3["g"])
 	}

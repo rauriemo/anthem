@@ -131,10 +131,17 @@ func MergeGuestServers(global map[string]mcpconfig.MCPServerRef, guest map[strin
 // HTTPToolsToMCPServers converts a map of http_tools configs into synthetic MCP server
 // refs that point to `anthem http-bridge`. Each tool gets its own bridge process with
 // the config passed via ANTHEM_HTTP_BRIDGE_CONFIG env var (base64-encoded JSON).
-func HTTPToolsToMCPServers(httpTools map[string]guests.HTTPToolConfig) map[string]mcpconfig.MCPServerRef {
+// projectRoot is set as ANTHEM_HTTP_BRIDGE_ROOT so the bridge can sandbox file reads.
+func HTTPToolsToMCPServers(httpTools map[string]guests.HTTPToolConfig, projectRoot string) map[string]mcpconfig.MCPServerRef {
 	if len(httpTools) == 0 {
 		return nil
 	}
+
+	anthemBin, _ := os.Executable()
+	if resolved, err := filepath.EvalSymlinks(anthemBin); err == nil {
+		anthemBin = resolved
+	}
+
 	result := make(map[string]mcpconfig.MCPServerRef, len(httpTools))
 	for id, cfg := range httpTools {
 		toolMap := map[string]guests.HTTPToolConfig{id: cfg}
@@ -147,6 +154,9 @@ func HTTPToolsToMCPServers(httpTools map[string]guests.HTTPToolConfig) map[strin
 		env := map[string]string{
 			"ANTHEM_HTTP_BRIDGE_CONFIG": encoded,
 		}
+		if projectRoot != "" {
+			env["ANTHEM_HTTP_BRIDGE_ROOT"] = projectRoot
+		}
 		if cfg.AuthTokenEnv != "" {
 			env[cfg.AuthTokenEnv] = os.Getenv(cfg.AuthTokenEnv)
 		}
@@ -154,7 +164,7 @@ func HTTPToolsToMCPServers(httpTools map[string]guests.HTTPToolConfig) map[strin
 		serverKey := fmt.Sprintf("http__%s", id)
 		result[serverKey] = mcpconfig.MCPServerRef{
 			Type:    mcpconfig.TransportStdio,
-			Command: "anthem",
+			Command: anthemBin,
 			Args:    []string{"http-bridge"},
 			Env:     env,
 		}
