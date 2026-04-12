@@ -29,7 +29,7 @@ func TestStart_ParsesActions(t *testing.T) {
 	output := `{"reasoning": "task 1 is ready, task 2 blocked", "actions": [{"type": "dispatch", "task_id": "1"}, {"type": "skip", "task_id": "2", "reason": "blocked by 1"}]}`
 	runner := mockRunnerWithOutput(output)
 
-	oa := NewOrchestratorAgent(runner, "", 10000, 0, 0, 0, 0, testLogger())
+	oa := NewOrchestratorAgent(runner, "", "", 10000, 0, 0, 0, 0, testLogger())
 	actions, err := oa.Start(context.Background(), StateSnapshot{
 		Tasks: []TaskSummary{{ID: "1", Title: "T1", Status: "queued"}, {ID: "2", Title: "T2", Status: "queued"}},
 	})
@@ -70,7 +70,7 @@ func TestConsult_ContinuesSession(t *testing.T) {
 		}, nil
 	}
 
-	oa := NewOrchestratorAgent(runner, "", 10000, 0, 0, 0, 0, testLogger())
+	oa := NewOrchestratorAgent(runner, "", "", 10000, 0, 0, 0, 0, testLogger())
 	oa.sessionID = "orch-sess-1"
 	oa.totalTokens = 50
 
@@ -108,7 +108,7 @@ func TestConsult_RefreshesOnTokenLimit(t *testing.T) {
 		}, nil
 	}
 
-	oa := NewOrchestratorAgent(runner, "", 100, 0, 0, 0, 0, testLogger())
+	oa := NewOrchestratorAgent(runner, "", "", 100, 0, 0, 0, 0, testLogger())
 	oa.sessionID = "orch-sess-old"
 	oa.totalTokens = 200 // over the 100 limit
 
@@ -229,7 +229,7 @@ func TestConsultWithRepair_FirstAttemptFails(t *testing.T) {
 		}, nil
 	}
 
-	oa := NewOrchestratorAgent(runner, "", 10000, 0, 0, 0, 0, testLogger())
+	oa := NewOrchestratorAgent(runner, "", "", 10000, 0, 0, 0, 0, testLogger())
 	oa.sessionID = "sess-repair"
 	oa.totalTokens = 50
 
@@ -248,7 +248,7 @@ func TestConsultWithRepair_FirstAttemptFails(t *testing.T) {
 }
 
 func TestBuildSystemPrompt_ContainsNewActions(t *testing.T) {
-	prompt := buildSystemPrompt("")
+	prompt := buildSystemPrompt("", "")
 
 	tests := []struct {
 		name    string
@@ -287,7 +287,7 @@ func TestConsultWithRepair_BothFail(t *testing.T) {
 		}, nil
 	}
 
-	oa := NewOrchestratorAgent(runner, "", 10000, 0, 0, 0, 0, testLogger())
+	oa := NewOrchestratorAgent(runner, "", "", 10000, 0, 0, 0, 0, testLogger())
 	oa.sessionID = "sess-fail"
 	oa.totalTokens = 50
 
@@ -326,7 +326,7 @@ func TestConsultWithRepairStreaming_PassesCallback(t *testing.T) {
 		deltas = append(deltas, delta)
 	}
 
-	oa := NewOrchestratorAgent(runner, "", 10000, 0, 0, 0, 0, testLogger())
+	oa := NewOrchestratorAgent(runner, "", "", 10000, 0, 0, 0, 0, testLogger())
 	actions, err := oa.ConsultWithRepairStreaming(context.Background(), StateSnapshot{
 		Tasks: []TaskSummary{{ID: "1", Title: "T1", Status: "queued"}},
 	}, onStream)
@@ -366,7 +366,7 @@ func TestConsultStreaming_ContinuesSession(t *testing.T) {
 
 	onStream := func(_ string) {}
 
-	oa := NewOrchestratorAgent(runner, "", 10000, 0, 0, 0, 0, testLogger())
+	oa := NewOrchestratorAgent(runner, "", "", 10000, 0, 0, 0, 0, testLogger())
 	oa.sessionID = "orch-sess-1"
 	oa.totalTokens = 50
 
@@ -381,5 +381,113 @@ func TestConsultStreaming_ContinuesSession(t *testing.T) {
 	}
 	if len(actions) != 1 || actions[0].TaskID != "3" {
 		t.Errorf("unexpected actions: %+v", actions)
+	}
+}
+
+// --- CRITICAL: buildSystemPrompt / buildPlanSystemPrompt tests ---
+
+func TestBuildSystemPrompt_PersonaAndUserContext(t *testing.T) {
+	prompt := buildSystemPrompt("## Identity\nI am the orchestrator", "Prefers direct communication")
+
+	if !strings.Contains(prompt, "## Identity\nI am the orchestrator") {
+		t.Error("persona not found in prompt")
+	}
+	if !strings.Contains(prompt, "## User Context\n\nPrefers direct communication") {
+		t.Error("user context not found in prompt")
+	}
+	if !strings.Contains(prompt, "orchestrator.md") {
+		t.Error("self-evolution instruction missing orchestrator.md mention")
+	}
+	if !strings.Contains(prompt, "VOICE.md") {
+		t.Error("self-evolution instruction missing VOICE.md mention")
+	}
+	if !strings.Contains(prompt, "## Role") {
+		t.Error("## Role section missing")
+	}
+}
+
+func TestBuildSystemPrompt_PersonaOnly(t *testing.T) {
+	prompt := buildSystemPrompt("## Identity\nI am X", "")
+
+	if !strings.Contains(prompt, "## Identity\nI am X") {
+		t.Error("persona not found in prompt")
+	}
+	if strings.Contains(prompt, "## User Context") {
+		t.Error("should not have User Context header when userContext is empty")
+	}
+	if !strings.Contains(prompt, "orchestrator.md") {
+		t.Error("self-evolution instruction should be present")
+	}
+}
+
+func TestBuildSystemPrompt_UserContextOnly(t *testing.T) {
+	prompt := buildSystemPrompt("", "User likes visuals")
+
+	if !strings.Contains(prompt, "## User Context\n\nUser likes visuals") {
+		t.Error("user context not found in prompt")
+	}
+	if !strings.Contains(prompt, "VOICE.md") {
+		t.Error("self-evolution instruction should be present")
+	}
+}
+
+func TestBuildSystemPrompt_BothEmpty(t *testing.T) {
+	prompt := buildSystemPrompt("", "")
+
+	if strings.Contains(prompt, "orchestrator.md") {
+		t.Error("self-evolution instruction should NOT be present when both empty")
+	}
+	if !strings.Contains(prompt, "## Role") {
+		t.Error("## Role should still be present")
+	}
+}
+
+func TestBuildSystemPrompt_OrderingInvariant(t *testing.T) {
+	prompt := buildSystemPrompt("PERSONA_MARKER", "USERCTX_MARKER")
+
+	personaIdx := strings.Index(prompt, "PERSONA_MARKER")
+	userCtxIdx := strings.Index(prompt, "USERCTX_MARKER")
+	selfEvoIdx := strings.Index(prompt, "orchestrator.md")
+	roleIdx := strings.Index(prompt, "## Role")
+
+	if personaIdx < 0 || userCtxIdx < 0 || selfEvoIdx < 0 || roleIdx < 0 {
+		t.Fatal("one or more markers not found in prompt")
+	}
+	if personaIdx >= userCtxIdx {
+		t.Error("persona must appear before userContext")
+	}
+	if userCtxIdx >= selfEvoIdx {
+		t.Error("userContext must appear before self-evolution instruction")
+	}
+	if selfEvoIdx >= roleIdx {
+		t.Error("self-evolution must appear before ## Role")
+	}
+}
+
+func TestBuildPlanSystemPrompt_PersonaAndUserContext(t *testing.T) {
+	prompt := buildPlanSystemPrompt("PLAN_PERSONA", "PLAN_USERCTX")
+
+	if !strings.Contains(prompt, "PLAN_PERSONA") {
+		t.Error("persona not found in plan prompt")
+	}
+	if !strings.Contains(prompt, "## User Context\n\nPLAN_USERCTX") {
+		t.Error("user context not found in plan prompt")
+	}
+	if !strings.Contains(prompt, "## Role") {
+		t.Error("## Role missing in plan prompt")
+	}
+	if strings.Contains(prompt, "## Actions") {
+		t.Error("plan prompt should NOT contain ## Actions (that's the action prompt)")
+	}
+}
+
+func TestBuildPlanSystemPrompt_BothEmpty(t *testing.T) {
+	prompt := buildPlanSystemPrompt("", "")
+
+	if strings.Contains(prompt, "orchestrator.md") {
+		t.Error("self-evolution should not be present when both empty")
+	}
+	if !strings.Contains(prompt, "## Role") {
+		t.Error("## Role should still be present")
 	}
 }

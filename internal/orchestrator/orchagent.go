@@ -122,7 +122,8 @@ type scoutResponse struct {
 
 type OrchestratorAgent struct {
 	runner           agent.AgentRunner
-	voiceContent     string
+	orchPersona      string // body from agents/orchestrator.md
+	userContext      string // user sections from ~/.anthem/VOICE.md
 	logger           *slog.Logger
 	sessionID        string
 	totalTokens      int
@@ -140,7 +141,7 @@ func (oa *OrchestratorAgent) LastResponse() *OrchestratorResponse {
 	return oa.lastResp
 }
 
-func NewOrchestratorAgent(runner agent.AgentRunner, voiceContent string, maxContextTokens int, maxTurns int, planMaxTurns int, explorerMaxTurns int, maxExplorers int, logger *slog.Logger) *OrchestratorAgent {
+func NewOrchestratorAgent(runner agent.AgentRunner, orchPersona, userContext string, maxContextTokens int, maxTurns int, planMaxTurns int, explorerMaxTurns int, maxExplorers int, logger *slog.Logger) *OrchestratorAgent {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -158,7 +159,8 @@ func NewOrchestratorAgent(runner agent.AgentRunner, voiceContent string, maxCont
 	}
 	return &OrchestratorAgent{
 		runner:           runner,
-		voiceContent:     voiceContent,
+		orchPersona:      orchPersona,
+		userContext:      userContext,
 		logger:           logger,
 		maxContextTokens: maxContextTokens,
 		maxTurns:         maxTurns,
@@ -168,15 +170,19 @@ func NewOrchestratorAgent(runner agent.AgentRunner, voiceContent string, maxCont
 	}
 }
 
-func (o *OrchestratorAgent) SetVoiceContent(content string) {
-	o.voiceContent = content
-}
+func (o *OrchestratorAgent) SetOrchPersona(s string) { o.orchPersona = s }
+func (o *OrchestratorAgent) SetUserContext(s string) { o.userContext = s }
 
-func buildSystemPrompt(voiceContent string) string {
+func buildSystemPrompt(orchPersona, userContext string) string {
 	var sections []string
 
-	if voiceContent != "" {
-		sections = append(sections, voiceContent)
+	if orchPersona != "" {
+		sections = append(sections, orchPersona)
+	}
+	if userContext != "" {
+		sections = append(sections, "## User Context\n\n"+userContext)
+	}
+	if orchPersona != "" || userContext != "" {
 		sections = append(sections, voice.SelfEvolutionInstruction())
 	}
 
@@ -299,11 +305,16 @@ When the state snapshot includes "active_guests_summary", specialist agents are 
 // buildPlanSystemPrompt builds a system prompt for plan/synthesis modes that
 // omits all display/HTML instructions. This prevents the LLM from defaulting
 // to HTML output when it should produce structured anthem-plan markdown.
-func buildPlanSystemPrompt(voiceContent string) string {
+func buildPlanSystemPrompt(orchPersona, userContext string) string {
 	var sections []string
 
-	if voiceContent != "" {
-		sections = append(sections, voiceContent)
+	if orchPersona != "" {
+		sections = append(sections, orchPersona)
+	}
+	if userContext != "" {
+		sections = append(sections, "## User Context\n\n"+userContext)
+	}
+	if orchPersona != "" || userContext != "" {
 		sections = append(sections, voice.SelfEvolutionInstruction())
 	}
 
@@ -332,7 +343,7 @@ The "knowledge" field (if present) contains summaries from previous runs — arc
 }
 
 func (o *OrchestratorAgent) Start(ctx context.Context, state StateSnapshot) ([]Action, error) {
-	prompt := buildSystemPrompt(o.voiceContent) + "\n\n## Current State\n\n" + state.Serialize()
+	prompt := buildSystemPrompt(o.orchPersona, o.userContext) + "\n\n## Current State\n\n" + state.Serialize()
 
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		Prompt:         prompt,
@@ -466,7 +477,7 @@ func parseActions(output string) ([]Action, *OrchestratorResponse, error) {
 const repairPrompt = `Your previous response was not valid JSON. Respond with ONLY a JSON object: {"reasoning": "...", "actions": [...]}`
 
 func (o *OrchestratorAgent) StartStreaming(ctx context.Context, state StateSnapshot, onStream func(string)) ([]Action, error) {
-	prompt := buildSystemPrompt(o.voiceContent) + "\n\n## Current State\n\n" + state.Serialize()
+	prompt := buildSystemPrompt(o.orchPersona, o.userContext) + "\n\n## Current State\n\n" + state.Serialize()
 
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		Prompt:         prompt,
@@ -660,7 +671,7 @@ The create_subtasks action is the ONLY way work gets dispatched to executors. If
 
 // ConsultPlan runs a plan-mode consultation.
 func (o *OrchestratorAgent) ConsultPlan(ctx context.Context, state StateSnapshot, model string, onStream func(string)) (string, error) {
-	prompt := buildPlanSystemPrompt(o.voiceContent) + planModePromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
+	prompt := buildPlanSystemPrompt(o.orchPersona, o.userContext) + planModePromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
 
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		Prompt:         prompt,
@@ -681,7 +692,7 @@ func (o *OrchestratorAgent) ConsultPlan(ctx context.Context, state StateSnapshot
 
 // ConsultBuild runs a build-mode consultation with the approved plan injected.
 func (o *OrchestratorAgent) ConsultBuild(ctx context.Context, state StateSnapshot, model string, onStream func(string)) ([]Action, error) {
-	prompt := buildSystemPrompt(o.voiceContent) + buildModePromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
+	prompt := buildSystemPrompt(o.orchPersona, o.userContext) + buildModePromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
 
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		Prompt:         prompt,
@@ -881,7 +892,7 @@ func truncateForSummary(s string, maxLen int) string {
 
 // ScoutPlan runs the scout phase: identifies areas needing deep research.
 func (o *OrchestratorAgent) ScoutPlan(ctx context.Context, state StateSnapshot, model string, onStream func(string)) ([]ExploreRequest, string, error) {
-	prompt := buildPlanSystemPrompt(o.voiceContent) + scoutPromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
+	prompt := buildPlanSystemPrompt(o.orchPersona, o.userContext) + scoutPromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
 
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		Prompt:         prompt,
@@ -935,7 +946,7 @@ func (o *OrchestratorAgent) SynthesizePlan(ctx context.Context, state StateSnaps
 		}
 	}
 
-	prompt := buildPlanSystemPrompt(o.voiceContent) + synthesisPromptSuffix + findingsText.String() + "\n\n## Current State\n\n" + state.Serialize()
+	prompt := buildPlanSystemPrompt(o.orchPersona, o.userContext) + synthesisPromptSuffix + findingsText.String() + "\n\n## Current State\n\n" + state.Serialize()
 
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		Prompt:         prompt,

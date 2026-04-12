@@ -960,3 +960,46 @@ func TestDetectInviteIntent_AlternateVerbs(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildGuestPrompt_UserContextInjected(t *testing.T) {
+	prompt := buildGuestPrompt("You are a designer.", "Project", "", "", "Hello", GuestPromptOpts{
+		UserContext: "Prefers visual explanations\nLikes dark mode",
+	})
+
+	if !strings.Contains(prompt, "## User Context") {
+		t.Error("prompt should contain ## User Context header")
+	}
+	if !strings.Contains(prompt, "Prefers visual explanations") {
+		t.Error("prompt should contain user context content")
+	}
+}
+
+func TestBuildGuestPrompt_UserContextEmpty(t *testing.T) {
+	prompt := buildGuestPrompt("You are a designer.", "Project", "", "", "Hello", GuestPromptOpts{
+		UserContext: "",
+	})
+
+	if strings.Contains(prompt, "## User Context") {
+		t.Error("prompt should NOT contain ## User Context when empty")
+	}
+}
+
+func TestBuildGuestPrompt_UserContextOrdering(t *testing.T) {
+	prompt := buildGuestPrompt("You are a designer.", "Project summary", "", "", "Hello", GuestPromptOpts{
+		UserContext: "USER_CONTEXT_MARKER",
+	})
+
+	commitIdx := strings.Index(prompt, "## Character Commitment")
+	userCtxIdx := strings.Index(prompt, "## User Context")
+	projectIdx := strings.Index(prompt, "## Project Context")
+
+	if commitIdx < 0 || userCtxIdx < 0 || projectIdx < 0 {
+		t.Fatal("one or more expected sections not found")
+	}
+	if commitIdx >= userCtxIdx {
+		t.Error("Character Commitment should appear before User Context")
+	}
+	if userCtxIdx >= projectIdx {
+		t.Error("User Context should appear before Project Context")
+	}
+}

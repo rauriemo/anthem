@@ -92,6 +92,9 @@ func ScanDirectory(dir string, logger *slog.Logger) (GuestIndex, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
 		}
+		if entry.Name() == "orchestrator.md" {
+			continue
+		}
 
 		path := filepath.Join(dir, entry.Name())
 		data, err := os.ReadFile(path)
@@ -163,6 +166,24 @@ func LoadPersona(dir string, slug string) (string, error) {
 		return "", fmt.Errorf("parsing persona for %q: %w", slug, err)
 	}
 
+	return body, nil
+}
+
+// LoadOrchestratorPersona loads agents/orchestrator.md body, returning empty
+// string if the file doesn't exist. Separate from ScanDirectory so the guest
+// index stays clean.
+func LoadOrchestratorPersona(dir string) (string, error) {
+	body, err := LoadPersona(dir, "orchestrator")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		// LoadPersona wraps the error; check the underlying cause
+		if strings.Contains(err.Error(), "no such file") || strings.Contains(err.Error(), "cannot find") {
+			return "", nil
+		}
+		return "", err
+	}
 	return body, nil
 }
 

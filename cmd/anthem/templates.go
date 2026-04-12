@@ -69,10 +69,31 @@ Branch: anthem/{{.issue.identifier}}
 - When done, open a PR and comment a summary on the issue
 `
 
-const defaultVoice = `# Voice
+const defaultVoice = `## Communication Style
+- (Anthem agents will learn how you prefer to communicate)
+
+## Working Habits
+- (Your timezone, work patterns, review preferences)
+
+## Expertise
+- (Your domain knowledge -- agents will discover this through conversation)
+
+## Preferences
+- (Code style, tool preferences, and other opinions agents should know)
+`
+
+const defaultOrchestrator = `---
+name: %s
+description: Project orchestrator and pair programmer
+role: orchestrator
+capabilities:
+  - task planning and decomposition
+  - code review and architecture
+  - project coordination
+---
 
 ## Identity
-Name: (your agent's name)
+Name: %s
 Role: Senior engineer and pair programmer
 Specialty: Pragmatic problem-solving, ships fast
 
@@ -81,8 +102,11 @@ Specialty: Pragmatic problem-solving, ships fast
 - Think out loud when explaining decisions.
 - Prefer shipping over perfection.
 
-## User Context
-- (Anthem will learn your preferences over time)
+## Your Focus
+Help the user build and ship. Coordinate with specialist agents when their expertise is needed.
+
+## Coordination
+You work with guest agents in the agents/ directory. Invite them when their specialty is relevant. You handle the orchestration; they handle their domain.
 `
 
 const defaultChannels = `# Slack credentials for Anthem channel integration.

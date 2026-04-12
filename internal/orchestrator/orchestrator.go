@@ -50,7 +50,7 @@ type Orchestrator struct {
 	rules           *rules.Engine
 	costTracker     *cost.Tracker
 	logger          *slog.Logger
-	voiceContent    string
+	voiceContent    string // raw VOICE.md content (user knowledge)
 	userConstraints []string
 	statePath       string
 	orchAgent       *OrchestratorAgent
@@ -1078,30 +1078,57 @@ func (o *Orchestrator) executeUpdateVoice(ctx context.Context, action Action) er
 	voicePath := filepath.Join(home, ".anthem", "VOICE.md")
 	changelogPath := filepath.Join(home, ".anthem", "voice-changelog.md")
 
-	current, err := voice.LoadFile(voicePath)
-	if err != nil {
-		current = &voice.VoiceConfig{}
-	}
+	// Route based on explicit section allowlists
+	var diff string
+	if voice.IsAgentSection(action.SectionName) {
+		// Agent character section -> agents/orchestrator.md
+		orchPath := filepath.Join(o.projectRoot(), "agents", "orchestrator.md")
+		o.logger.Info("voice section routed", "section", action.SectionName, "target", "orchestrator.md")
 
-	proposed := &voice.VoiceConfig{
-		Sections: []voice.Section{{Name: action.SectionName, Content: action.SectionContent}},
-	}
+		if err := voice.UpdateAgentSection(orchPath, action.SectionName, action.SectionContent); err != nil {
+			return fmt.Errorf("updating orchestrator.md: %w", err)
+		}
 
-	merged := voice.Merge(current, proposed)
+		// Reload in-memory state
+		if o.orchAgent != nil {
+			body, err := guests.LoadOrchestratorPersona(filepath.Join(o.projectRoot(), "agents"))
+			if err == nil {
+				o.orchAgent.SetOrchPersona(body)
+			}
+		}
 
-	if err := os.WriteFile(voicePath, []byte(merged.Raw), 0644); err != nil {
-		return fmt.Errorf("writing VOICE.md: %w", err)
-	}
+		diff = fmt.Sprintf("+ orchestrator.md ## %s\n%s", action.SectionName, action.SectionContent)
+		if err := voice.AppendChangelog(changelogPath, "orchestrator", diff); err != nil {
+			o.logger.Warn("failed to append voice changelog", "error", err)
+		}
+	} else {
+		// User knowledge section -> VOICE.md
+		o.logger.Info("voice section routed", "section", action.SectionName, "target", "VOICE.md")
 
-	diff := fmt.Sprintf("- %s\n+ %s", current.Raw, merged.Raw)
+		current, err := voice.LoadFile(voicePath)
+		if err != nil {
+			current = &voice.VoiceConfig{}
+		}
 
-	if err := voice.AppendChangelog(changelogPath, "orchestrator", diff); err != nil {
-		o.logger.Warn("failed to append voice changelog", "error", err)
-	}
+		proposed := &voice.VoiceConfig{
+			Sections: []voice.Section{{Name: action.SectionName, Content: action.SectionContent}},
+		}
 
-	o.voiceContent = merged.Raw
-	if o.orchAgent != nil {
-		o.orchAgent.SetVoiceContent(merged.Raw)
+		merged := voice.Merge(current, proposed)
+
+		if err := os.WriteFile(voicePath, []byte(merged.Raw), 0644); err != nil {
+			return fmt.Errorf("writing VOICE.md: %w", err)
+		}
+
+		diff = fmt.Sprintf("- %s\n+ %s", current.Raw, merged.Raw)
+		if err := voice.AppendChangelog(changelogPath, "orchestrator", diff); err != nil {
+			o.logger.Warn("failed to append voice changelog", "error", err)
+		}
+
+		o.voiceContent = merged.Raw
+		if o.orchAgent != nil {
+			o.orchAgent.SetUserContext(merged.Raw)
+		}
 	}
 
 	o.logger.Info("voice updated", "section", action.SectionName)
@@ -1718,6 +1745,7 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 					channelMgr:       o.channelMgr,
 					projectSummary:   projectSummary,
 					featureContext:   featureCtx,
+					userContext:      o.voiceContent,
 					mode:             mode,
 					channelKind:      msg.ChannelKind,
 					planContent:      planContent,

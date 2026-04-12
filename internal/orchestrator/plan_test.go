@@ -25,7 +25,7 @@ func newPlanTestOrch(t *testing.T, orchRunner *agent.MockRunner) (*Orchestrator,
 	mgr := channel.NewManager(nil)
 	mgr.Register(ch)
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 10, 25, 10, 5, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 10, 25, 10, 5, testLogger())
 
 	cfg := config.DefaultConfig()
 	cfg.Tracker.Kind = "github"
@@ -689,7 +689,7 @@ func TestConsultPlan_UsesPlanMaxTurns(t *testing.T) {
 		}, nil
 	}
 
-	oa := NewOrchestratorAgent(orchRunner, "", 100000, 10, 25, 10, 5, testLogger())
+	oa := NewOrchestratorAgent(orchRunner, "", "", 100000, 10, 25, 10, 5, testLogger())
 	_, err := oa.ConsultPlan(context.Background(), StateSnapshot{}, "", nil)
 	if err != nil {
 		t.Fatalf("ConsultPlan() error: %v", err)
@@ -723,7 +723,7 @@ func TestScoutPlan_ParsesExploreRequests(t *testing.T) {
 		}, nil
 	}
 
-	oa := NewOrchestratorAgent(orchRunner, "", 100000, 10, 25, 10, 5, testLogger())
+	oa := NewOrchestratorAgent(orchRunner, "", "", 100000, 10, 25, 10, 5, testLogger())
 	explores, userMsg, err := oa.ScoutPlan(context.Background(), StateSnapshot{}, "", nil)
 	if err != nil {
 		t.Fatalf("ScoutPlan() error: %v", err)
@@ -756,7 +756,7 @@ func TestScoutPlan_CapsAtMaxExplorers(t *testing.T) {
 		}, nil
 	}
 
-	oa := NewOrchestratorAgent(orchRunner, "", 100000, 10, 25, 10, 2, testLogger())
+	oa := NewOrchestratorAgent(orchRunner, "", "", 100000, 10, 25, 10, 2, testLogger())
 	explores, _, err := oa.ScoutPlan(context.Background(), StateSnapshot{}, "", nil)
 	if err != nil {
 		t.Fatalf("ScoutPlan() error: %v", err)
@@ -893,7 +893,7 @@ func TestSynthesizePlan_IncludesFindings(t *testing.T) {
 		}, nil
 	}
 
-	oa := NewOrchestratorAgent(orchRunner, "", 100000, 10, 25, 10, 5, testLogger())
+	oa := NewOrchestratorAgent(orchRunner, "", "", 100000, 10, 25, 10, 5, testLogger())
 	findings := []ExploreResult{
 		{Query: "Check tests", Summary: "No tests for /api/costs", Findings: "Detailed finding text"},
 		{Query: "Check security", Error: "explorer timed out"},

@@ -22,6 +22,7 @@ import (
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/constraints"
 	"github.com/rauriemo/anthem/internal/discovery"
+	"github.com/rauriemo/anthem/internal/guests"
 	"github.com/rauriemo/anthem/internal/httpbridge"
 	"github.com/rauriemo/anthem/internal/logging"
 	"github.com/rauriemo/anthem/internal/maintenance"
@@ -91,15 +92,37 @@ func runCmd() *cobra.Command {
 				logger.Debug("no user constraints file found, continuing without")
 			}
 
-			// Load voice
-			var voiceContent string
+			// Load user context (shared across ALL agents -- onboarding brief)
+			var userContext string
 			home, _ := os.UserHomeDir()
 			voicePath := filepath.Join(home, ".anthem", "VOICE.md")
 			vc, err := voice.LoadFile(voicePath)
 			if err != nil {
-				logger.Warn("VOICE.md not found, continuing without personality", "path", voicePath)
+				logger.Warn("VOICE.md not found, continuing without user context", "path", voicePath)
 			} else {
-				voiceContent = vc.Raw
+				userContext = vc.Raw
+			}
+
+			// Run migration: split VOICE.md Identity/Personality into agents/orchestrator.md
+			projectDir, _ := os.Getwd()
+			agentsDir := filepath.Join(projectDir, "agents")
+			projectName := strings.Replace(filepath.Base(projectDir), "-", " ", -1)
+			projectName = strings.Title(projectName) //nolint:staticcheck
+			if err := voice.MigrateVoiceToOrchestrator(voicePath, agentsDir, projectName, logger); err != nil {
+				logger.Warn("voice migration failed", "error", err)
+			}
+
+			// Reload user context after migration (Identity/Personality may have been removed)
+			if vc2, err := voice.LoadFile(voicePath); err == nil {
+				userContext = vc2.Raw
+			}
+
+			// Load orchestrator persona (project-specific)
+			var orchPersona string
+			if p, err := guests.LoadOrchestratorPersona(agentsDir); err == nil {
+				orchPersona = p
+			} else if err != nil {
+				logger.Debug("orchestrator.md not found, continuing without persona", "error", err)
 			}
 
 			cfg, body, err := config.LoadFile(workflowPath)
@@ -211,7 +234,7 @@ func runCmd() *cobra.Command {
 			var orchAgent *orchestrator.OrchestratorAgent
 			if cfg.Orchestrator.Enabled {
 				orchAgent = orchestrator.NewOrchestratorAgent(
-					runner, voiceContent, cfg.Orchestrator.MaxContextTokens, cfg.Orchestrator.MaxTurns, cfg.Orchestrator.PlanMaxTurns, cfg.Orchestrator.ExplorerMaxTurns, cfg.Orchestrator.MaxExplorers, logger,
+					runner, orchPersona, userContext, cfg.Orchestrator.MaxContextTokens, cfg.Orchestrator.MaxTurns, cfg.Orchestrator.PlanMaxTurns, cfg.Orchestrator.ExplorerMaxTurns, cfg.Orchestrator.MaxExplorers, logger,
 				)
 			}
 
@@ -223,7 +246,7 @@ func runCmd() *cobra.Command {
 				Workspace:       ws,
 				EventBus:        events,
 				Logger:          logger,
-				VoiceContent:    voiceContent,
+				VoiceContent:    userContext,
 				UserConstraints: userConstraints,
 				StatePath:       statePath,
 				OrchAgent:       orchAgent,
@@ -384,11 +407,27 @@ func initCmd() *cobra.Command {
 				return err
 			}
 
+			// Create agents/orchestrator.md in cwd
+			agentsDir := filepath.Join(".", "agents")
+			if err := os.MkdirAll(agentsDir, 0755); err != nil {
+				return fmt.Errorf("creating agents directory: %w", err)
+			}
+			orchPath := filepath.Join(agentsDir, "orchestrator.md")
+			cwd, _ := os.Getwd()
+			dirName := filepath.Base(cwd)
+			displayName := strings.Replace(dirName, "-", " ", -1)
+			displayName = strings.Title(displayName) //nolint:staticcheck
+			orchContent := fmt.Sprintf(defaultOrchestrator, displayName, displayName)
+			if err := createFileIfNotExists(orchPath, orchContent); err != nil {
+				return err
+			}
+
 			fmt.Println("Anthem initialized:")
 			fmt.Println("  ./WORKFLOW.md created")
 			fmt.Printf("  %s created\n", voicePath)
 			fmt.Printf("  %s created\n", constraintsPath)
 			fmt.Printf("  %s created\n", channelsPath)
+			fmt.Printf("  %s created\n", orchPath)
 			return nil
 		},
 	}

@@ -763,3 +763,121 @@ func agentKeys(index GuestIndex) []string {
 	}
 	return keys
 }
+
+func TestScanDirectory_ExcludesOrchestratorMD(t *testing.T) {
+	dir := t.TempDir()
+
+	orchContent := `---
+name: My Project
+description: Project orchestrator
+role: orchestrator
+---
+
+## Identity
+I am the orchestrator.
+`
+	guestContent := `---
+name: Miyazaki
+description: Game designer
+---
+
+You are a game designer.
+`
+	os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte(orchContent), 0644)
+	os.WriteFile(filepath.Join(dir, "miyazaki.md"), []byte(guestContent), 0644)
+
+	index, err := ScanDirectory(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := index.Agents["orchestrator"]; ok {
+		t.Error("orchestrator.md should be excluded from GuestIndex")
+	}
+	if _, ok := index.Agents["miyazaki"]; !ok {
+		t.Error("miyazaki.md should be in GuestIndex")
+	}
+	if len(index.Agents) != 1 {
+		t.Errorf("expected exactly 1 agent in index, got %d", len(index.Agents))
+	}
+}
+
+func TestScanDirectory_OrchestratorOnlyDir(t *testing.T) {
+	dir := t.TempDir()
+
+	orchContent := `---
+name: Solo Project
+description: Orchestrator only
+role: orchestrator
+---
+
+## Identity
+Alone.
+`
+	os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte(orchContent), 0644)
+
+	index, err := ScanDirectory(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(index.Agents) != 0 {
+		t.Errorf("expected empty index when only orchestrator.md exists, got %d agents", len(index.Agents))
+	}
+}
+
+func TestLoadOrchestratorPersona_Exists(t *testing.T) {
+	dir := t.TempDir()
+
+	content := `---
+name: Test
+description: Test orchestrator
+role: orchestrator
+---
+
+## Identity
+I am the test orchestrator.
+
+## Personality
+- Direct and clear.
+`
+	os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte(content), 0644)
+
+	body, err := LoadOrchestratorPersona(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, "## Identity") {
+		t.Error("body should contain ## Identity section")
+	}
+	if !strings.Contains(body, "## Personality") {
+		t.Error("body should contain ## Personality section")
+	}
+	if strings.Contains(body, "---") {
+		t.Error("body should not contain frontmatter delimiters")
+	}
+}
+
+func TestLoadOrchestratorPersona_Missing(t *testing.T) {
+	dir := t.TempDir()
+
+	body, err := LoadOrchestratorPersona(dir)
+	if err != nil {
+		t.Fatalf("expected nil error for missing file, got: %v", err)
+	}
+	if body != "" {
+		t.Errorf("expected empty body for missing file, got: %q", body)
+	}
+}
+
+func TestLoadOrchestratorPersona_NoFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	// File without frontmatter -- LoadPersona will return error, LoadOrchestratorPersona wraps it
+	os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte("Just plain text"), 0644)
+
+	_, err := LoadOrchestratorPersona(dir)
+	// This should return an error since the file exists but has no frontmatter
+	if err == nil {
+		t.Error("expected error for file without frontmatter")
+	}
+}

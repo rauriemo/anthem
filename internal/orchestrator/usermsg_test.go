@@ -65,7 +65,7 @@ func TestHandleUserMessage_ConsultsAndReplies(t *testing.T) {
 	mgr := channel.NewManager(nil)
 	mgr.Register(ch)
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, 0, 0, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
 
 	cfg := config.DefaultConfig()
 	cfg.Tracker.Kind = "github"
@@ -146,7 +146,7 @@ func TestHandleUserMessage_PrismSkipsReplyWhenDisplayPresent(t *testing.T) {
 	mgr := channel.NewManager(nil)
 	mgr.Register(ch)
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, 0, 0, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
 
 	cfg := config.DefaultConfig()
 	cfg.Tracker.Kind = "github"
@@ -271,7 +271,7 @@ func TestHandleUserMessage_OrchestratorFails(t *testing.T) {
 	mgr := channel.NewManager(nil)
 	mgr.Register(ch)
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, 0, 0, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
 
 	cfg := config.DefaultConfig()
 	cfg.Tracker.Kind = "github"
@@ -352,7 +352,7 @@ func TestHandleUserMessage_StreamsDeltasAndDone(t *testing.T) {
 	mgr := channel.NewManager(nil)
 	mgr.Register(ch)
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, 0, 0, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
 
 	cfg := config.DefaultConfig()
 	cfg.Tracker.Kind = "github"
@@ -435,7 +435,7 @@ func TestHandleUserMessage_SkipsOrchestratorWhenGuestsActive(t *testing.T) {
 	mgr := channel.NewManager(nil)
 	mgr.Register(ch)
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, 0, 0, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
 
 	cfg := config.DefaultConfig()
 	cfg.Tracker.Kind = "github"
@@ -495,7 +495,7 @@ func TestHandleUserMessage_IncludesOrchestratorWithSystemTag(t *testing.T) {
 	mgr := channel.NewManager(nil)
 	mgr.Register(ch)
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, 0, 0, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
 
 	cfg := config.DefaultConfig()
 
@@ -555,7 +555,7 @@ func TestHandleGuestMention_StreamsDeltas(t *testing.T) {
 	mgr := channel.NewManager(nil)
 	mgr.Register(ch)
 
-	orchAgent := NewOrchestratorAgent(orchRunner, "", 100000, 0, 0, 0, 0, testLogger())
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
 
 	cfg := config.DefaultConfig()
 	cfg.Workspace.Root = dir

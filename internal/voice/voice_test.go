@@ -213,3 +213,217 @@ func TestSelfEvolutionInstruction(t *testing.T) {
 		t.Error("SelfEvolutionInstruction() should not reference [CORE]")
 	}
 }
+
+func TestSelfEvolutionInstruction_MentionsBothFiles(t *testing.T) {
+	inst := SelfEvolutionInstruction()
+	if !strings.Contains(inst, "orchestrator.md") {
+		t.Error("should mention orchestrator.md")
+	}
+	if !strings.Contains(inst, "VOICE.md") {
+		t.Error("should mention VOICE.md")
+	}
+}
+
+func TestSelfEvolutionInstruction_MentionsUpdateVoice(t *testing.T) {
+	inst := SelfEvolutionInstruction()
+	if !strings.Contains(inst, "update_voice") {
+		t.Error("should mention update_voice action")
+	}
+}
+
+func TestIsAgentSection(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"Identity", true},
+		{"Personality", true},
+		{"Your Focus", true},
+		{"Coordination", true},
+		{"Communication Style", false},
+		{"Preferences", false},
+		{"Expertise", false},
+		{"Random Section", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsAgentSection(tt.name)
+			if got != tt.want {
+				t.Errorf("IsAgentSection(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUpdateAgentSection_ReplacesExisting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "orchestrator.md")
+	content := `---
+name: Test
+description: Test orch
+role: orchestrator
+---
+
+## Identity
+Old identity
+
+## Personality
+Keep this unchanged
+`
+	os.WriteFile(path, []byte(content), 0644)
+
+	err := UpdateAgentSection(path, "Identity", "New identity text")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(path)
+	result := string(data)
+
+	if !strings.Contains(result, "New identity text") {
+		t.Error("Identity section should be updated")
+	}
+	if !strings.Contains(result, "Keep this unchanged") {
+		t.Error("Personality section should be preserved")
+	}
+	if strings.Contains(result, "Old identity") {
+		t.Error("old Identity content should be gone")
+	}
+}
+
+func TestUpdateAgentSection_AddsNewSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "orchestrator.md")
+	content := `---
+name: Test
+description: Test orch
+role: orchestrator
+---
+
+## Identity
+Existing identity
+`
+	os.WriteFile(path, []byte(content), 0644)
+
+	err := UpdateAgentSection(path, "Your Focus", "Build and ship fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(path)
+	result := string(data)
+
+	if !strings.Contains(result, "## Identity") {
+		t.Error("existing Identity should be preserved")
+	}
+	if !strings.Contains(result, "## Your Focus") {
+		t.Error("new Your Focus section should be added")
+	}
+	if !strings.Contains(result, "Build and ship fast") {
+		t.Error("new section content should be present")
+	}
+}
+
+func TestUpdateAgentSection_PreservesFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "orchestrator.md")
+	content := `---
+name: My Project
+description: Project orchestrator and pair programmer
+role: orchestrator
+capabilities:
+  - task planning
+  - code review
+---
+
+## Identity
+Old text
+`
+	os.WriteFile(path, []byte(content), 0644)
+
+	err := UpdateAgentSection(path, "Identity", "Updated text")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(path)
+	result := string(data)
+
+	if !strings.Contains(result, "name: My Project") {
+		t.Error("frontmatter name should be preserved")
+	}
+	if !strings.Contains(result, "role: orchestrator") {
+		t.Error("frontmatter role should be preserved")
+	}
+	if !strings.Contains(result, "task planning") {
+		t.Error("frontmatter capabilities should be preserved")
+	}
+	if !strings.Contains(result, "Updated text") {
+		t.Error("body should be updated")
+	}
+}
+
+func TestUpdateAgentSection_EndOfFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.md")
+	content := `---
+name: Test
+description: Test
+---
+
+## Identity
+First section
+
+## Personality
+Last section content
+`
+	os.WriteFile(path, []byte(content), 0644)
+
+	err := UpdateAgentSection(path, "Personality", "Completely new personality")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(path)
+	result := string(data)
+
+	if !strings.Contains(result, "First section") {
+		t.Error("first section should be preserved")
+	}
+	if !strings.Contains(result, "Completely new personality") {
+		t.Error("last section should be updated")
+	}
+	if strings.Contains(result, "Last section content") {
+		t.Error("old last section content should be gone")
+	}
+}
+
+func TestUpdateAgentSection_EmptyBody(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.md")
+	content := `---
+name: Test
+description: Empty body test
+---
+`
+	os.WriteFile(path, []byte(content), 0644)
+
+	err := UpdateAgentSection(path, "Identity", "Brand new section")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(path)
+	result := string(data)
+
+	if !strings.Contains(result, "## Identity") {
+		t.Error("section should be added")
+	}
+	if !strings.Contains(result, "Brand new section") {
+		t.Error("section content should be present")
+	}
+	if !strings.Contains(result, "name: Test") {
+		t.Error("frontmatter should be preserved")
+	}
+}

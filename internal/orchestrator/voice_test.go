@@ -133,7 +133,7 @@ func TestExecuteUpdateVoice_MergeExisting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orchAgent := NewOrchestratorAgent(newNoopRunner(), initial, 10000, 0, 0, 0, 0, testLogger())
+	orchAgent := NewOrchestratorAgent(newNoopRunner(), "", initial, 10000, 0, 0, 0, 0, testLogger())
 
 	orch := newVoiceTestOrch(t, home)
 	orch.homeDir = home
@@ -171,8 +171,8 @@ func TestExecuteUpdateVoice_MergeExisting(t *testing.T) {
 		t.Errorf("Communication section should be preserved, got:\n%s", content)
 	}
 
-	// OrchestratorAgent voice content should be updated
-	if !strings.Contains(orchAgent.voiceContent, "Formal") {
-		t.Error("orchAgent voiceContent should be updated")
+	// OrchestratorAgent user context should be updated
+	if !strings.Contains(orchAgent.userContext, "Formal") {
+		t.Error("orchAgent userContext should be updated")
 	}
 }

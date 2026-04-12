@@ -140,7 +140,7 @@ func TestBuildStateSnapshot_IncludesProjectContext(t *testing.T) {
 }
 
 func TestBuildSystemPrompt_ContainsProjectContextSection(t *testing.T) {
-	prompt := buildSystemPrompt("")
+	prompt := buildSystemPrompt("", "")
 
 	if !strings.Contains(prompt, "## Project Context") {
 		t.Error("system prompt should contain '## Project Context'")

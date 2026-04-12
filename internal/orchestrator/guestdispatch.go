@@ -41,6 +41,7 @@ type GuestPromptOpts struct {
 	StoryContext   *StoryContext
 	FocusText      string
 	FeatureContext string
+	UserContext    string
 }
 
 var planEditBlockRe = regexp.MustCompile("(?s)```plan-edit\\s*\\n(.*?)\\n```")
@@ -205,6 +206,12 @@ func buildGuestPrompt(persona, projectSummary, sharedCtx, history, userMsg strin
 	sb.WriteString("When asked personal questions, draw from your namesake's documented views, creative works, and known history. ")
 	sb.WriteString("Your expertise, opinions, and personality are theirs.\n\n")
 
+	if opts.UserContext != "" {
+		sb.WriteString("## User Context\n\n")
+		sb.WriteString(opts.UserContext)
+		sb.WriteString("\n\n")
+	}
+
 	if projectSummary != "" {
 		sb.WriteString("## Project Context\n")
 		sb.WriteString(projectSummary)
@@ -324,6 +331,7 @@ type guestDispatchParams struct {
 	channelMgr       *channel.Manager
 	projectSummary   string
 	featureContext   string
+	userContext      string
 	mode             string
 	channelKind      string
 	planContent      string
@@ -419,6 +427,7 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 			StoryContext:   storyCtx,
 			FocusText:      focusText,
 			FeatureContext: p.featureContext,
+			UserContext:    p.userContext,
 		})
 
 		var allowedTools []string
