@@ -4,6 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -402,5 +406,340 @@ func TestAdapter_EventLogRecordsTransitions(t *testing.T) {
 	}
 	if !hasTTSStarted {
 		t.Error("missing EvTTSStarted event")
+	}
+}
+
+// --- FastLLM adapter integration tests ---
+
+func newFastLLMTestAdapter(t *testing.T, sseBody string) (*Adapter, *MockSTT, *MockTTS, *httptest.Server) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(sseBody))
+	}))
+	t.Cleanup(srv.Close)
+
+	stt := NewMockSTT()
+	tts := NewMockTTS()
+	llm := NewFastLLM(FastLLMOpts{
+		APIKey:  "test-key",
+		BaseURL: srv.URL,
+	})
+	a := NewAdapterWithOpts(AdapterOpts{
+		STT:     stt,
+		TTS:     tts,
+		FastLLM: llm,
+		Logger:  slog.Default(),
+	})
+	return a, stt, tts, srv
+}
+
+func sse(lines ...string) string {
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString("data: ")
+		b.WriteString(l)
+		b.WriteString("\n\n")
+	}
+	return b.String()
+}
+
+func TestAdapter_FastLLM_TextToTTS(t *testing.T) {
+	t.Parallel()
+	body := sse(
+		`{"type":"message_start","message":{"id":"msg_a"}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello. "}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"World. "}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_stop"}`,
+	)
+
+	a, stt, tts, _ := newFastLLMTestAdapter(t, body)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := a.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	stt.InjectTranscript(Transcript{Text: "Hi there", IsFinal: true, Confidence: 0.95})
+
+	deadline := time.After(3 * time.Second)
+	for {
+		calls := tts.TextCalls()
+		if len(calls) > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for TTS calls")
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	select {
+	case <-a.Incoming():
+		t.Error("fastLLM path should NOT push to incoming channel")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestAdapter_FastLLM_ToolUseCallback(t *testing.T) {
+	t.Parallel()
+	body := sse(
+		`{"type":"message_start","message":{"id":"msg_b"}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Inviting Noah."}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"invite_agent","input":{}}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"agent_name\": \"noah\", \"task_description\": \"help\"}"}}`,
+		`{"type":"content_block_stop","index":1}`,
+		`{"type":"message_stop"}`,
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+
+	stt := NewMockSTT()
+	tts := NewMockTTS()
+	llm := NewFastLLM(FastLLMOpts{
+		APIKey:  "test-key",
+		BaseURL: srv.URL,
+		Tools:   VoiceToolDefs(),
+	})
+
+	cmdCh := make(chan VoiceCommand, 4)
+	a := NewAdapterWithOpts(AdapterOpts{
+		STT:       stt,
+		TTS:       tts,
+		FastLLM:   llm,
+		OnCommand: func(cmd VoiceCommand) { cmdCh <- cmd },
+		Logger:    slog.Default(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := a.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	stt.InjectTranscript(Transcript{Text: "Invite Noah", IsFinal: true, Confidence: 0.95})
+
+	select {
+	case cmd := <-cmdCh:
+		if cmd.Type != "invite_agent" {
+			t.Errorf("command type = %q, want invite_agent", cmd.Type)
+		}
+		if cmd.AgentName != "noah" {
+			t.Errorf("agent = %q, want noah", cmd.AgentName)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for command callback")
+	}
+}
+
+func TestAdapter_FastLLM_BargeInCancels(t *testing.T) {
+	t.Parallel()
+
+	var reqCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&reqCount, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+
+		if n == 1 {
+			// Slow first response -- will be cancelled by barge-in
+			_, _ = w.Write([]byte(sse(
+				`{"type":"message_start","message":{"id":"msg_slow"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Starting a long. "}}`,
+			)))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+
+		_, _ = w.Write([]byte(sse(
+			`{"type":"message_start","message":{"id":"msg_fast"}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Quick reply. "}}`,
+			`{"type":"content_block_stop","index":0}`,
+			`{"type":"message_stop"}`,
+		)))
+	}))
+	t.Cleanup(srv.Close)
+
+	stt := NewMockSTT()
+	tts := NewMockTTS()
+	llm := NewFastLLM(FastLLMOpts{APIKey: "key", BaseURL: srv.URL})
+	a := NewAdapterWithOpts(AdapterOpts{
+		STT:     stt,
+		TTS:     tts,
+		FastLLM: llm,
+		Logger:  slog.Default(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := a.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	stt.InjectTranscript(Transcript{Text: "First question", IsFinal: true, Confidence: 0.95})
+	time.Sleep(100 * time.Millisecond)
+
+	stt.InjectTranscript(Transcript{Text: "Barge in second", IsFinal: true, Confidence: 0.95})
+
+	deadline := time.After(3 * time.Second)
+	for {
+		if atomic.LoadInt32(&reqCount) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("second request never arrived (barge-in should cancel first)")
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+func TestAdapter_FastLLM_NilFallback(t *testing.T) {
+	t.Parallel()
+
+	stt := NewMockSTT()
+	tts := NewMockTTS()
+	a := NewAdapterWithOpts(AdapterOpts{
+		STT:    stt,
+		TTS:    tts,
+		Logger: slog.Default(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := a.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	stt.InjectTranscript(Transcript{Text: "Fallback test", IsFinal: true, Confidence: 0.95})
+
+	select {
+	case msg := <-a.Incoming():
+		if msg.Text != "Fallback test" {
+			t.Errorf("text = %q, want %q", msg.Text, "Fallback test")
+		}
+		if msg.ChannelKind != "voice" {
+			t.Errorf("kind = %q, want voice", msg.ChannelKind)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for incoming message (fallback path)")
+	}
+}
+
+func TestAdapter_FastLLM_ConcurrentTranscriptCancelsPrevious(t *testing.T) {
+	t.Parallel()
+
+	var reqCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&reqCount, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+
+		if n == 1 {
+			_, _ = w.Write([]byte(sse(
+				`{"type":"message_start","message":{"id":"msg_1"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			)))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+
+		_, _ = w.Write([]byte(sse(
+			`{"type":"message_start","message":{"id":"msg_2"}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Second reply. "}}`,
+			`{"type":"content_block_stop","index":0}`,
+			`{"type":"message_stop"}`,
+		)))
+	}))
+	t.Cleanup(srv.Close)
+
+	stt := NewMockSTT()
+	tts := NewMockTTS()
+	llm := NewFastLLM(FastLLMOpts{APIKey: "key", BaseURL: srv.URL})
+	a := NewAdapterWithOpts(AdapterOpts{
+		STT:     stt,
+		TTS:     tts,
+		FastLLM: llm,
+		Logger:  slog.Default(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := a.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	stt.InjectTranscript(Transcript{Text: "First message", IsFinal: true, Confidence: 0.9})
+	time.Sleep(100 * time.Millisecond)
+
+	stt.InjectTranscript(Transcript{Text: "Second message", IsFinal: true, Confidence: 0.9})
+
+	deadline := time.After(3 * time.Second)
+	for {
+		if atomic.LoadInt32(&reqCount) >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("second fastLLM request never started")
+		default:
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+func TestAdapter_FastLLM_ErrorFallsBack(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		_, _ = w.Write([]byte(`{"error":{"message":"server error"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	stt := NewMockSTT()
+	tts := NewMockTTS()
+	llm := NewFastLLM(FastLLMOpts{APIKey: "key", BaseURL: srv.URL})
+	a := NewAdapterWithOpts(AdapterOpts{
+		STT:     stt,
+		TTS:     tts,
+		FastLLM: llm,
+		Logger:  slog.Default(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := a.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	stt.InjectTranscript(Transcript{Text: "Error test", IsFinal: true, Confidence: 0.95})
+
+	select {
+	case msg := <-a.Incoming():
+		if msg.Text != "Error test" {
+			t.Errorf("text = %q, want %q", msg.Text, "Error test")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for fallback incoming message")
 	}
 }

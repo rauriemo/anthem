@@ -27,11 +27,26 @@ type Adapter struct {
 	sentBuf  *SentenceBuffer
 	voiceID  string // ElevenLabs voice_id for the orchestrator
 
-	mu       sync.Mutex
-	cancel   context.CancelFunc
-	started  bool
-	closed   bool
-	threadID string // guarded by mu
+	fastLLM  *FastLLM        // nil -> fallback to orchestrator via incoming channel
+	cmdBridge *CommandBridge  // nil when fastLLM is nil
+
+	mu           sync.Mutex
+	cancel       context.CancelFunc
+	started      bool
+	closed       bool
+	threadID     string             // guarded by mu
+	llmCancel    context.CancelFunc // cancels in-flight fastLLM request
+}
+
+// AdapterOpts configures a new Adapter.
+type AdapterOpts struct {
+	STT              StreamingSTT
+	TTS              StreamingTTS
+	Transport        *LiveKitTransport // nil for tests / no LiveKit
+	OrchestratorVoiceID string
+	FastLLM          *FastLLM          // nil -> fallback to orchestrator path
+	OnCommand        CommandCallback   // optional; invoked on tool_use commands
+	Logger           *slog.Logger
 }
 
 // NewAdapter creates a voice channel adapter. The STT and TTS providers are
@@ -40,27 +55,44 @@ type Adapter struct {
 // LiveKit is not configured. orchestratorVoiceID is the ElevenLabs voice ID
 // for the orchestrator agent (read from agent frontmatter).
 func NewAdapter(stt StreamingSTT, tts StreamingTTS, transport *LiveKitTransport, orchestratorVoiceID string, logger *slog.Logger) *Adapter {
-	if logger == nil {
-		logger = slog.Default()
+	return NewAdapterWithOpts(AdapterOpts{
+		STT:                 stt,
+		TTS:                 tts,
+		Transport:           transport,
+		OrchestratorVoiceID: orchestratorVoiceID,
+		Logger:              logger,
+	})
+}
+
+// NewAdapterWithOpts creates a voice channel adapter with full configuration
+// including optional FastLLM for direct Anthropic API voice responses.
+func NewAdapterWithOpts(opts AdapterOpts) *Adapter {
+	if opts.Logger == nil {
+		opts.Logger = slog.Default()
 	}
-	if orchestratorVoiceID == "" {
-		orchestratorVoiceID = orchestratorAgentID
+	if opts.OrchestratorVoiceID == "" {
+		opts.OrchestratorVoiceID = orchestratorAgentID
 	}
 	floor := NewFloorController("orchestrator")
 	eventLog := NewRoomEventLog(1024, nil)
 
 	a := &Adapter{
-		stt:       stt,
-		tts:       tts,
-		transport: transport,
+		stt:       opts.STT,
+		tts:       opts.TTS,
+		transport: opts.Transport,
 		floor:     floor,
 		log:       eventLog,
-		logger:    logger,
+		logger:    opts.Logger,
 		incoming:  make(chan channel.IncomingMessage, 64),
-		voiceID:   orchestratorVoiceID,
+		voiceID:   opts.OrchestratorVoiceID,
+		fastLLM:   opts.FastLLM,
 	}
 	a.sentBuf = NewSentenceBuffer(a.onSentence)
 	a.sentBuf.EagerMode = true
+
+	if a.fastLLM != nil {
+		a.cmdBridge = NewCommandBridge(opts.OnCommand, a.sentBuf, a.incoming, opts.Logger)
+	}
 	return a
 }
 
@@ -288,6 +320,9 @@ func (a *Adapter) handleTranscript(t Transcript) {
 		"confidence": t.Confidence,
 	})
 
+	// Cancel any in-flight FastLLM request (barge-in or new turn).
+	a.cancelLLM()
+
 	state := a.floor.State()
 	if state == OrchestratorSpeaking {
 		if err := a.BargeIn(); err != nil {
@@ -295,8 +330,6 @@ func (a *Adapter) handleTranscript(t Transcript) {
 		}
 	}
 
-	// Re-read state after potential barge-in which transitions
-	// OrchestratorSpeaking -> BargeInAbort -> UserSpeaking.
 	state = a.floor.State()
 	if state == Idle {
 		_ = a.floor.Transition(UserSpeaking, "vad_onset")
@@ -307,6 +340,11 @@ func (a *Adapter) handleTranscript(t Transcript) {
 
 	threadID := fmt.Sprintf("voice-%d", time.Now().UnixMilli())
 	a.setThreadID(threadID)
+
+	if a.fastLLM != nil {
+		go a.handleFastLLM(t.Text, threadID)
+		return
+	}
 
 	msg := channel.IncomingMessage{
 		ChannelKind: "voice",
@@ -320,6 +358,87 @@ func (a *Adapter) handleTranscript(t Transcript) {
 	case a.incoming <- msg:
 	default:
 		a.logger.Warn("dropping voice incoming message, buffer full")
+	}
+}
+
+func (a *Adapter) cancelLLM() {
+	a.mu.Lock()
+	if a.llmCancel != nil {
+		a.llmCancel()
+		a.llmCancel = nil
+	}
+	a.mu.Unlock()
+}
+
+// handleFastLLM calls the Anthropic API directly and pipes text deltas to TTS.
+func (a *Adapter) handleFastLLM(text, threadID string) {
+	ctx, cancel := context.WithCancel(context.Background())
+	a.mu.Lock()
+	a.llmCancel = cancel
+	a.mu.Unlock()
+
+	defer cancel()
+
+	events, err := a.fastLLM.StreamChat(ctx, text)
+	if err != nil {
+		a.logger.Warn("fastllm: stream failed, falling back to orchestrator", "error", err)
+		a.fallbackToOrchestrator(text, threadID)
+		return
+	}
+
+	spoke := false
+	for ev := range events {
+		if ctx.Err() != nil {
+			return
+		}
+
+		if ev.TextDelta != "" {
+			if !spoke {
+				spoke = true
+				state := a.floor.State()
+				if state == CommitPending || state == Idle {
+					if err := a.floor.Transition(OrchestratorSpeaking, "tts_start"); err != nil {
+						a.logger.Debug("floor transition to speaking failed", "error", err)
+					} else {
+						a.log.Emit(EvTTSStarted, orchestratorAgentID, threadID, nil)
+					}
+				}
+			}
+			a.sentBuf.Write(ev.TextDelta)
+		}
+
+		if ev.ToolUse != nil && a.cmdBridge != nil {
+			a.cmdBridge.HandleToolCall(*ev.ToolUse)
+		}
+
+		if ev.Done {
+			a.sentBuf.Flush()
+			if err := a.tts.Flush(); err != nil {
+				a.logger.Warn("TTS flush failed", "error", err)
+			}
+			if spoke {
+				state := a.floor.State()
+				if state == OrchestratorSpeaking {
+					_ = a.floor.Transition(Idle, "response_done")
+					a.log.Emit(EvResponseDone, orchestratorAgentID, threadID, nil)
+				}
+			}
+		}
+	}
+}
+
+func (a *Adapter) fallbackToOrchestrator(text, threadID string) {
+	msg := channel.IncomingMessage{
+		ChannelKind: "voice",
+		SenderID:    "user",
+		ThreadID:    threadID,
+		Text:        text,
+		Timestamp:   time.Now(),
+	}
+	select {
+	case a.incoming <- msg:
+	default:
+		a.logger.Warn("dropping voice fallback message, buffer full")
 	}
 }
 

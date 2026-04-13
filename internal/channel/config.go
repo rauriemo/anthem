@@ -34,6 +34,7 @@ type VoiceCredentials struct {
 	LiveKitAPISecret string `yaml:"livekit_api_secret"`
 	DeepgramAPIKey   string `yaml:"deepgram_api_key"`
 	ElevenLabsAPIKey string `yaml:"elevenlabs_api_key,omitempty"`
+	AnthropicAPIKey  string `yaml:"anthropic_api_key,omitempty"`
 }
 
 func LoadCredentials(path string) (*ChannelsConfig, error) {
