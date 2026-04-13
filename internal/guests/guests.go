@@ -77,16 +77,16 @@ type InputTypeSpec struct {
 }
 
 type HTTPToolConfig struct {
-	URL              string                      `yaml:"url" json:"url"`
-	Method           string                      `yaml:"method" json:"method"`
-	AuthTokenEnv     string                      `yaml:"auth_token_env,omitempty" json:"auth_token_env,omitempty"`
-	AuthScheme       string                      `yaml:"auth_scheme,omitempty" json:"auth_scheme,omitempty"`
-	AsyncPolling     *AsyncPollingConfig         `yaml:"async_polling,omitempty" json:"async_polling,omitempty"`
-	InputTypes       map[string]InputTypeSpec    `yaml:"input_types,omitempty" json:"input_types,omitempty"`
-	RequestTemplate  map[string]any              `yaml:"request_template,omitempty" json:"request_template,omitempty"`
-	ResponseArtifact *ArtifactTemplate           `yaml:"response_artifact,omitempty" json:"response_artifact,omitempty"`
-	TimeoutMS        int                         `yaml:"timeout_ms,omitempty" json:"timeout_ms,omitempty"`
-	Description      string                      `yaml:"description,omitempty" json:"description,omitempty"`
+	URL              string                   `yaml:"url" json:"url"`
+	Method           string                   `yaml:"method" json:"method"`
+	AuthTokenEnv     string                   `yaml:"auth_token_env,omitempty" json:"auth_token_env,omitempty"`
+	AuthScheme       string                   `yaml:"auth_scheme,omitempty" json:"auth_scheme,omitempty"`
+	AsyncPolling     *AsyncPollingConfig      `yaml:"async_polling,omitempty" json:"async_polling,omitempty"`
+	InputTypes       map[string]InputTypeSpec `yaml:"input_types,omitempty" json:"input_types,omitempty"`
+	RequestTemplate  map[string]any           `yaml:"request_template,omitempty" json:"request_template,omitempty"`
+	ResponseArtifact *ArtifactTemplate        `yaml:"response_artifact,omitempty" json:"response_artifact,omitempty"`
+	TimeoutMS        int                      `yaml:"timeout_ms,omitempty" json:"timeout_ms,omitempty"`
+	Description      string                   `yaml:"description,omitempty" json:"description,omitempty"`
 }
 
 type GuestAgent struct {

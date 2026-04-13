@@ -483,7 +483,7 @@ func TestNormalizeFrames_UniformCanvas(t *testing.T) {
 func TestNormalizeFrames_AllTransparent(t *testing.T) {
 	dir := t.TempDir()
 	frameDir := filepath.Join(dir, "frames")
-	os.Mkdir(frameDir, 0755)
+	_ = os.Mkdir(frameDir, 0755)
 
 	// Frame with no opaque pixels
 	writeSizedPNG(t, filepath.Join(frameDir, "frame_0001.png"), 20, 20, image.Rect(0, 0, 0, 0))
@@ -499,7 +499,7 @@ func TestNormalizeFrames_AllTransparent(t *testing.T) {
 func TestNormalizeFrames_DefaultPadding(t *testing.T) {
 	dir := t.TempDir()
 	frameDir := filepath.Join(dir, "frames")
-	os.Mkdir(frameDir, 0755)
+	_ = os.Mkdir(frameDir, 0755)
 
 	// Frame with content at (5,5)-(15,15) = 10x10 content
 	writeSizedPNG(t, filepath.Join(frameDir, "frame_0001.png"), 20, 20, image.Rect(5, 5, 15, 15))
@@ -535,14 +535,14 @@ func TestStitchSpritesheet_NoFrameDir(t *testing.T) {
 func TestStitchSpritesheet_Success(t *testing.T) {
 	dir := t.TempDir()
 	frameDir := filepath.Join(dir, "frames")
-	os.Mkdir(frameDir, 0755)
+	_ = os.Mkdir(frameDir, 0755)
 
 	for i := 1; i <= 6; i++ {
 		writePNGToPath(filepath.Join(frameDir, fmt.Sprintf("frame_%04d.png", i)), 32, 32)
 	}
 
 	videoPath := filepath.Join(dir, "goblin-walk.mp4")
-	os.WriteFile(videoPath, []byte("fake video"), 0644)
+	_ = os.WriteFile(videoPath, []byte("fake video"), 0644)
 
 	state := PipelineState{"frame_dir": frameDir, "fps": "10"}
 	proc := &StitchSpritesheetProcessor{}
@@ -618,11 +618,11 @@ func TestStitchSpritesheet_Success(t *testing.T) {
 func TestStitchSpritesheet_KeepVideo(t *testing.T) {
 	dir := t.TempDir()
 	frameDir := filepath.Join(dir, "frames")
-	os.Mkdir(frameDir, 0755)
+	_ = os.Mkdir(frameDir, 0755)
 	writePNGToPath(filepath.Join(frameDir, "frame_0001.png"), 16, 16)
 
 	videoPath := filepath.Join(dir, "anim.mp4")
-	os.WriteFile(videoPath, []byte("fake"), 0644)
+	_ = os.WriteFile(videoPath, []byte("fake"), 0644)
 
 	state := PipelineState{"frame_dir": frameDir}
 	proc := &StitchSpritesheetProcessor{}
@@ -638,7 +638,7 @@ func TestStitchSpritesheet_KeepVideo(t *testing.T) {
 func TestStitchSpritesheet_FrameSizeMismatch(t *testing.T) {
 	dir := t.TempDir()
 	frameDir := filepath.Join(dir, "frames")
-	os.Mkdir(frameDir, 0755)
+	_ = os.Mkdir(frameDir, 0755)
 	writePNGToPath(filepath.Join(frameDir, "frame_0001.png"), 32, 32)
 	writePNGToPath(filepath.Join(frameDir, "frame_0002.png"), 64, 64)
 
@@ -656,13 +656,13 @@ func TestStitchSpritesheet_FrameSizeMismatch(t *testing.T) {
 func TestStitchSpritesheet_DefaultColumns(t *testing.T) {
 	dir := t.TempDir()
 	frameDir := filepath.Join(dir, "frames")
-	os.Mkdir(frameDir, 0755)
+	_ = os.Mkdir(frameDir, 0755)
 	for i := 1; i <= 5; i++ {
 		writePNGToPath(filepath.Join(frameDir, fmt.Sprintf("frame_%04d.png", i)), 16, 16)
 	}
 
 	videoPath := filepath.Join(dir, "anim.mp4")
-	os.WriteFile(videoPath, []byte("fake"), 0644)
+	_ = os.WriteFile(videoPath, []byte("fake"), 0644)
 
 	state := PipelineState{"frame_dir": frameDir}
 	proc := &StitchSpritesheetProcessor{}

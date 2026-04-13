@@ -8,15 +8,15 @@ import (
 // MockTTS implements StreamingTTS for testing. It records all method calls
 // and emits pre-scripted audio chunks.
 type MockTTS struct {
-	mu           sync.Mutex
-	audio        chan []byte
-	textCalls    []string
-	flushCalls   int
-	cancelCalls  int
-	started      bool
-	closed       bool
-	voiceID      string
-	StartFunc    func(ctx context.Context, voiceID string) error
+	mu          sync.Mutex
+	audio       chan []byte
+	textCalls   []string
+	flushCalls  int
+	cancelCalls int
+	started     bool
+	closed      bool
+	voiceID     string
+	StartFunc   func(ctx context.Context, voiceID string) error
 }
 
 func NewMockTTS() *MockTTS {

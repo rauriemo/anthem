@@ -197,8 +197,8 @@ func (e *ElevenLabsTTS) Close() error {
 }
 
 type elevenLabsResponse struct {
-	Audio       string `json:"audio"`
-	IsFinal     bool   `json:"isFinal"`
+	Audio               string           `json:"audio"`
+	IsFinal             bool             `json:"isFinal"`
 	NormalizedAlignment *json.RawMessage `json:"normalizedAlignment,omitempty"`
 }
 

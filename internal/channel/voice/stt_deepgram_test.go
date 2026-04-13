@@ -65,7 +65,7 @@ func TestDeepgramSTT_ConnectAndTranscript(t *testing.T) {
 						{"transcript": "hello world", "confidence": 0.95},
 					},
 				},
-				"is_final":    true,
+				"is_final":     true,
 				"speech_final": false,
 			}
 			data, _ := json.Marshal(resp)

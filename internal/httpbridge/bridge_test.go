@@ -1336,8 +1336,8 @@ func TestResolveInputs(t *testing.T) {
 		parent := t.TempDir()
 		root := filepath.Join(parent, "project")
 		sibling := filepath.Join(parent, "project-old")
-		os.MkdirAll(root, 0755)
-		os.MkdirAll(sibling, 0755)
+		_ = os.MkdirAll(root, 0755)
+		_ = os.MkdirAll(sibling, 0755)
 		writeTestFile(t, sibling, "secret.txt", []byte("secret"))
 
 		_, err := ResolveInputs(
@@ -1452,10 +1452,10 @@ func TestMCPProtocol_ToolCall_FileInput_Integration(t *testing.T) {
 	var capturedBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var buf bytes.Buffer
-		buf.ReadFrom(r.Body)
+		_, _ = buf.ReadFrom(r.Body)
 		capturedBody = buf.Bytes()
 		w.WriteHeader(200)
-		w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer srv.Close()
 
@@ -1546,7 +1546,7 @@ func TestMCPProtocol_ToolsList_FileInputDescription(t *testing.T) {
 	tool, _ := toolList[0].(map[string]any)
 	schema, _ := tool["inputSchema"].(map[string]any)
 	props, _ := schema["properties"].(map[string]any)
-	imgProp := props["img"].(map[string]any)
+	imgProp, _ := props["img"].(map[string]any)
 	desc, ok := imgProp["description"].(string)
 	if !ok {
 		t.Fatal("img property missing description")
@@ -1774,7 +1774,7 @@ func TestMCPProtocol_ToolCall_ArtifactSave_VideoPipelineOps(t *testing.T) {
 				},
 			}},
 		}
-		json.NewEncoder(w).Encode(apiResp)
+		_ = json.NewEncoder(w).Encode(apiResp)
 	}))
 	defer srv.Close()
 
