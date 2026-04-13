@@ -100,6 +100,40 @@ func (e *ElevenLabsTTS) connect() error {
 	return nil
 }
 
+// SwitchVoice changes the active ElevenLabs voice by reconnecting the
+// WebSocket with the new voice ID. No-op if the voice is already active.
+func (e *ElevenLabsTTS) SwitchVoice(voiceID string) error {
+	e.mu.Lock()
+	if e.closed || !e.started {
+		e.mu.Unlock()
+		return nil
+	}
+	if e.voiceID == voiceID {
+		e.mu.Unlock()
+		return nil
+	}
+	conn := e.conn
+	e.voiceID = voiceID
+	e.mu.Unlock()
+
+	if conn != nil {
+		_ = conn.Close()
+	}
+
+	// Drain buffered audio from the previous voice
+	for {
+		select {
+		case <-e.audio:
+		default:
+			goto drained
+		}
+	}
+drained:
+
+	e.logger.Info("switching TTS voice", "voice_id", voiceID)
+	return e.connect()
+}
+
 func (e *ElevenLabsTTS) WriteText(text string) error {
 	e.mu.Lock()
 	conn := e.conn

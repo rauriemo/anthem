@@ -59,6 +59,7 @@ type transition struct {
 // orchestratorTransitions defines the valid transition graph for orchestrator mode.
 var orchestratorTransitions = map[transition]bool{
 	{Idle, UserSpeaking}:                  true, // vad_onset
+	{Idle, OrchestratorSpeaking}:          true, // text-chat response (no prior voice turn)
 	{UserSpeaking, CommitPending}:         true, // silence_detected
 	{UserSpeaking, Idle}:                  true, // vad_false_positive
 	{CommitPending, OrchestratorSpeaking}: true, // turn_committed

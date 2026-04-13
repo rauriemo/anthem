@@ -8,15 +8,16 @@ import (
 // MockTTS implements StreamingTTS for testing. It records all method calls
 // and emits pre-scripted audio chunks.
 type MockTTS struct {
-	mu          sync.Mutex
-	audio       chan []byte
-	textCalls   []string
-	flushCalls  int
-	cancelCalls int
-	started     bool
-	closed      bool
-	voiceID     string
-	StartFunc   func(ctx context.Context, voiceID string) error
+	mu               sync.Mutex
+	audio            chan []byte
+	textCalls        []string
+	flushCalls       int
+	cancelCalls      int
+	switchVoiceCalls []string
+	started          bool
+	closed           bool
+	voiceID          string
+	StartFunc        func(ctx context.Context, voiceID string) error
 }
 
 func NewMockTTS() *MockTTS {
@@ -32,6 +33,14 @@ func (m *MockTTS) Start(ctx context.Context, voiceID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.started = true
+	m.voiceID = voiceID
+	return nil
+}
+
+func (m *MockTTS) SwitchVoice(voiceID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.switchVoiceCalls = append(m.switchVoiceCalls, voiceID)
 	m.voiceID = voiceID
 	return nil
 }
@@ -110,9 +119,18 @@ func (m *MockTTS) Closed() bool {
 	return m.closed
 }
 
-// VoiceID returns the voice ID passed to Start.
+// VoiceID returns the voice ID passed to Start or SwitchVoice.
 func (m *MockTTS) VoiceID() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.voiceID
+}
+
+// SwitchVoiceCalls returns voice IDs passed to SwitchVoice.
+func (m *MockTTS) SwitchVoiceCalls() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.switchVoiceCalls))
+	copy(out, m.switchVoiceCalls)
+	return out
 }

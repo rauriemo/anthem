@@ -259,6 +259,23 @@ func runCmd() *cobra.Command {
 						if orchVoiceID != "" {
 							logger.Info("orchestrator voice_id loaded", "voice_id", orchVoiceID)
 						}
+						voiceConfigs := make(map[string]string)
+						if orchVoiceID != "" {
+							voiceConfigs["orchestrator"] = orchVoiceID
+						}
+						if gIdx, err := guests.ScanDirectory(filepath.Join(projectDir, "agents"), logger); err == nil {
+							for slug, agent := range gIdx.Agents {
+								if agent.VoiceID != "" {
+									voiceConfigs[slug] = agent.VoiceID
+								}
+								if agent.Role == "orchestrator" && agent.VoiceID != "" {
+									voiceConfigs["orchestrator"] = agent.VoiceID
+								}
+							}
+							if n := len(voiceConfigs); n > 1 {
+								logger.Info("loaded guest voice configs", "count", n-1)
+							}
+						}
 						stt := voicech.NewDeepgramSTT(vc.DeepgramAPIKey, logger)
 						tts := voicech.NewElevenLabsTTS(vc.ElevenLabsAPIKey, logger)
 						transport := voicech.NewLiveKitTransport(
@@ -288,6 +305,7 @@ func runCmd() *cobra.Command {
 							TTS:                 tts,
 							Transport:           transport,
 							OrchestratorVoiceID: orchVoiceID,
+							VoiceConfigs:        voiceConfigs,
 							FastLLM:             fastLLM,
 							Logger:              logger,
 						})

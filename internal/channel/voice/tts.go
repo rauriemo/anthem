@@ -6,6 +6,7 @@ import "context"
 // incrementally and synthesized audio chunks are read from the Audio channel.
 type StreamingTTS interface {
 	Start(ctx context.Context, voiceID string) error
+	SwitchVoice(voiceID string) error
 	WriteText(text string) error
 	Flush() error
 	Audio() <-chan []byte

@@ -23,9 +23,10 @@ type Adapter struct {
 	log       *RoomEventLog
 	logger    *slog.Logger
 
-	incoming chan channel.IncomingMessage
-	sentBuf  *SentenceBuffer
-	voiceID  string // ElevenLabs voice_id for the orchestrator
+	incoming     chan channel.IncomingMessage
+	sentBuf      *SentenceBuffer
+	voiceID      string            // ElevenLabs voice_id for the orchestrator
+	voiceConfigs map[string]string // agent slug -> ElevenLabs voice_id
 
 	fastLLM   *FastLLM       // nil -> fallback to orchestrator via incoming channel
 	cmdBridge *CommandBridge // nil when fastLLM is nil
@@ -44,8 +45,9 @@ type AdapterOpts struct {
 	TTS                 StreamingTTS
 	Transport           *LiveKitTransport // nil for tests / no LiveKit
 	OrchestratorVoiceID string
-	FastLLM             *FastLLM        // nil -> fallback to orchestrator path
-	OnCommand           CommandCallback // optional; invoked on tool_use commands
+	VoiceConfigs        map[string]string // agent slug -> ElevenLabs voice_id
+	FastLLM             *FastLLM          // nil -> fallback to orchestrator path
+	OnCommand           CommandCallback   // optional; invoked on tool_use commands
 	Logger              *slog.Logger
 }
 
@@ -76,16 +78,27 @@ func NewAdapterWithOpts(opts AdapterOpts) *Adapter {
 	floor := NewFloorController("orchestrator")
 	eventLog := NewRoomEventLog(1024, nil)
 
+	vc := opts.VoiceConfigs
+	if vc == nil {
+		vc = make(map[string]string)
+	}
+	if opts.OrchestratorVoiceID != "" {
+		if _, exists := vc[orchestratorAgentID]; !exists {
+			vc[orchestratorAgentID] = opts.OrchestratorVoiceID
+		}
+	}
+
 	a := &Adapter{
-		stt:       opts.STT,
-		tts:       opts.TTS,
-		transport: opts.Transport,
-		floor:     floor,
-		log:       eventLog,
-		logger:    opts.Logger,
-		incoming:  make(chan channel.IncomingMessage, 64),
-		voiceID:   opts.OrchestratorVoiceID,
-		fastLLM:   opts.FastLLM,
+		stt:          opts.STT,
+		tts:          opts.TTS,
+		transport:    opts.Transport,
+		floor:        floor,
+		log:          eventLog,
+		logger:       opts.Logger,
+		incoming:     make(chan channel.IncomingMessage, 64),
+		voiceID:      opts.OrchestratorVoiceID,
+		voiceConfigs: vc,
+		fastLLM:      opts.FastLLM,
 	}
 	a.sentBuf = NewSentenceBuffer(a.onSentence)
 	a.sentBuf.EagerMode = true
@@ -152,9 +165,20 @@ func (a *Adapter) Start(ctx context.Context) error {
 	return nil
 }
 
-// Send handles outgoing messages from the orchestrator. StreamDelta text from
-// the orchestrator is buffered into sentences and piped to TTS. Guest deltas
-// are silently ignored in orchestrator mode.
+// switchVoiceForSpeaker switches the TTS voice to match the agent producing
+// the current stream. If the agent has no configured voice_id the current
+// voice stays active (acceptable fallback).
+func (a *Adapter) switchVoiceForSpeaker(speakerID string) {
+	if voiceID, ok := a.voiceConfigs[speakerID]; ok && voiceID != "" {
+		if err := a.tts.SwitchVoice(voiceID); err != nil {
+			a.logger.Warn("TTS voice switch failed", "agent", speakerID, "error", err)
+		}
+	}
+}
+
+// Send handles outgoing messages. StreamDelta text is buffered into sentences
+// and piped to TTS. When a guest has a configured voice_id the TTS voice is
+// switched before speaking.
 func (a *Adapter) Send(_ context.Context, msg channel.OutgoingMessage) error {
 	if msg.StreamDelta != "" {
 		return a.handleStreamDelta(msg)
@@ -166,8 +190,9 @@ func (a *Adapter) Send(_ context.Context, msg channel.OutgoingMessage) error {
 }
 
 func (a *Adapter) handleStreamDelta(msg channel.OutgoingMessage) error {
-	if msg.GuestID != "" && msg.GuestID != orchestratorAgentID {
-		return nil
+	speakerID := msg.GuestID
+	if speakerID == "" {
+		speakerID = orchestratorAgentID
 	}
 
 	state := a.floor.State()
@@ -176,12 +201,13 @@ func (a *Adapter) handleStreamDelta(msg channel.OutgoingMessage) error {
 	}
 
 	if state == CommitPending || state == Idle {
+		a.switchVoiceForSpeaker(speakerID)
 		if err := a.floor.Transition(OrchestratorSpeaking, "tts_start"); err != nil {
 			a.logger.Debug("floor transition to speaking failed, queueing delta",
 				"state", state.String(), "error", err)
 			return nil
 		}
-		a.log.Emit(EvTTSStarted, orchestratorAgentID, a.getThreadID(), nil)
+		a.log.Emit(EvTTSStarted, speakerID, a.getThreadID(), nil)
 	}
 
 	a.sentBuf.Write(msg.StreamDelta)
@@ -189,8 +215,9 @@ func (a *Adapter) handleStreamDelta(msg channel.OutgoingMessage) error {
 }
 
 func (a *Adapter) handleStreamDone(msg channel.OutgoingMessage) error {
-	if msg.GuestID != "" && msg.GuestID != orchestratorAgentID {
-		return nil
+	speakerID := msg.GuestID
+	if speakerID == "" {
+		speakerID = orchestratorAgentID
 	}
 
 	a.sentBuf.Flush()
@@ -204,7 +231,7 @@ func (a *Adapter) handleStreamDone(msg channel.OutgoingMessage) error {
 		if err := a.floor.Transition(Idle, "response_done"); err != nil {
 			a.logger.Warn("floor transition to idle failed", "error", err)
 		}
-		a.log.Emit(EvResponseDone, orchestratorAgentID, a.getThreadID(), nil)
+		a.log.Emit(EvResponseDone, speakerID, a.getThreadID(), nil)
 	}
 
 	return nil

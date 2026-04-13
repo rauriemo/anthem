@@ -38,6 +38,9 @@ type guestAgentInfo struct {
 	RequirementsFingerprint string   `json:"requirementsFingerprint,omitempty"`
 	Scope                   string   `json:"scope,omitempty"`
 	Source                  string   `json:"source,omitempty"`
+	VoiceID                 string   `json:"voice_id,omitempty"`
+	VoiceModel              string   `json:"voice_model,omitempty"`
+	VoicePriority           int      `json:"voice_priority,omitempty"`
 }
 
 type suggestGuestFrame struct {
@@ -213,6 +216,9 @@ func (a *Adapter) UpdateGuestIndex(index guests.GuestIndex) {
 			RequirementsFingerprint: agent.RequirementsFingerprint,
 			Scope:                   agent.Scope,
 			Source:                  agent.Source,
+			VoiceID:                 agent.VoiceID,
+			VoiceModel:              agent.VoiceModel,
+			VoicePriority:           agent.VoicePriority,
 		})
 	}
 	sort.Slice(infos, func(i, j int) bool { return infos[i].ID < infos[j].ID })

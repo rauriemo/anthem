@@ -507,16 +507,36 @@ func normalizeForHash(v any) any {
 	}
 }
 
-// ReadOrchestratorVoiceID reads agents/orchestrator.md and returns its voice_id
-// from frontmatter. Returns empty string if the file doesn't exist or has no voice_id.
+// ReadOrchestratorVoiceID returns the voice_id for the orchestrator agent.
+// It first checks agents/orchestrator.md, then falls back to scanning for
+// any agent file with role: orchestrator (e.g. tower.md).
 func ReadOrchestratorVoiceID(agentsDir string) string {
 	data, err := os.ReadFile(filepath.Join(agentsDir, "orchestrator.md"))
+	if err == nil {
+		if agent, err := ParseFrontmatter(data); err == nil && agent.VoiceID != "" {
+			return agent.VoiceID
+		}
+	}
+
+	entries, err := os.ReadDir(agentsDir)
 	if err != nil {
 		return ""
 	}
-	agent, err := ParseFrontmatter(data)
-	if err != nil {
-		return ""
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		fdata, err := os.ReadFile(filepath.Join(agentsDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		agent, err := ParseFrontmatter(fdata)
+		if err != nil {
+			continue
+		}
+		if agent.Role == "orchestrator" && agent.VoiceID != "" {
+			return agent.VoiceID
+		}
 	}
-	return agent.VoiceID
+	return ""
 }
