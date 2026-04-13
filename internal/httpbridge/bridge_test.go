@@ -1543,9 +1543,9 @@ func TestMCPProtocol_ToolsList_FileInputDescription(t *testing.T) {
 	if !ok || len(toolList) == 0 {
 		t.Fatal("no tools in list")
 	}
-	tool := toolList[0].(map[string]any)
-	schema := tool["inputSchema"].(map[string]any)
-	props := schema["properties"].(map[string]any)
+	tool, _ := toolList[0].(map[string]any)
+	schema, _ := tool["inputSchema"].(map[string]any)
+	props, _ := schema["properties"].(map[string]any)
 	imgProp := props["img"].(map[string]any)
 	desc, ok := imgProp["description"].(string)
 	if !ok {
@@ -1573,7 +1573,7 @@ func TestMCPProtocol_ToolCall_ArtifactSave_WithPostProcess(t *testing.T) {
 				},
 			}},
 		}
-		json.NewEncoder(w).Encode(apiResp)
+		_ = json.NewEncoder(w).Encode(apiResp)
 	}))
 	defer srv.Close()
 
@@ -1643,7 +1643,7 @@ func TestMCPProtocol_ToolCall_ArtifactSave_NoPostProcess(t *testing.T) {
 				},
 			}},
 		}
-		json.NewEncoder(w).Encode(apiResp)
+		_ = json.NewEncoder(w).Encode(apiResp)
 	}))
 	defer srv.Close()
 
@@ -1704,7 +1704,7 @@ func TestMCPProtocol_ToolCall_ArtifactSave_UnknownPostProcessOp(t *testing.T) {
 				},
 			}},
 		}
-		json.NewEncoder(w).Encode(apiResp)
+		_ = json.NewEncoder(w).Encode(apiResp)
 	}))
 	defer srv.Close()
 

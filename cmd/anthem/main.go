@@ -251,21 +251,21 @@ func runCmd() *cobra.Command {
 							logger.Warn("voice channel skipped: missing credentials", "fields", missing)
 							continue
 						}
-					roomName := chCfg.Target
-					if roomName == "" {
-						roomName = "anthem-voice"
-					}
-					orchVoiceID := guests.ReadOrchestratorVoiceID(filepath.Join(projectDir, "agents"))
-					if orchVoiceID != "" {
-						logger.Info("orchestrator voice_id loaded", "voice_id", orchVoiceID)
-					}
-					stt := voicech.NewDeepgramSTT(vc.DeepgramAPIKey, logger)
-					tts := voicech.NewElevenLabsTTS(vc.ElevenLabsAPIKey, logger)
-					transport := voicech.NewLiveKitTransport(
-						vc.LiveKitURL, vc.LiveKitAPIKey, vc.LiveKitAPISecret,
-						roomName, "anthem-gateway", stt, tts, logger,
-					)
-					voiceAdapter := voicech.NewAdapter(stt, tts, transport, orchVoiceID, logger)
+						roomName := chCfg.Target
+						if roomName == "" {
+							roomName = "anthem-voice"
+						}
+						orchVoiceID := guests.ReadOrchestratorVoiceID(filepath.Join(projectDir, "agents"))
+						if orchVoiceID != "" {
+							logger.Info("orchestrator voice_id loaded", "voice_id", orchVoiceID)
+						}
+						stt := voicech.NewDeepgramSTT(vc.DeepgramAPIKey, logger)
+						tts := voicech.NewElevenLabsTTS(vc.ElevenLabsAPIKey, logger)
+						transport := voicech.NewLiveKitTransport(
+							vc.LiveKitURL, vc.LiveKitAPIKey, vc.LiveKitAPISecret,
+							roomName, "anthem-gateway", stt, tts, logger,
+						)
+						voiceAdapter := voicech.NewAdapter(stt, tts, transport, orchVoiceID, logger)
 						chanManager.Register(voiceAdapter)
 						logger.Info("registered voice channel", "room", roomName)
 					default:

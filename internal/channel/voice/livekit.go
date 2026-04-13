@@ -2,7 +2,6 @@ package voice
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -20,10 +19,10 @@ const (
 	InboundSampleRate  = 48000
 	OutboundSampleRate = 24000
 	FrameDuration      = 20 * time.Millisecond
-	InboundFrameSize   = InboundSampleRate * 20 / 1000   // 960 samples
-	OutboundFrameSize  = OutboundSampleRate * 20 / 1000   // 480 samples
-	InboundFrameBytes  = InboundFrameSize * 2             // 1920 bytes (16-bit)
-	OutboundFrameBytes = OutboundFrameSize * 2            // 960 bytes (16-bit)
+	InboundFrameSize   = InboundSampleRate * 20 / 1000  // 960 samples
+	OutboundFrameSize  = OutboundSampleRate * 20 / 1000 // 480 samples
+	InboundFrameBytes  = InboundFrameSize * 2           // 1920 bytes (16-bit)
+	OutboundFrameBytes = OutboundFrameSize * 2          // 960 bytes (16-bit)
 )
 
 // LiveKitTransport bridges a LiveKit room to STT/TTS providers.
@@ -250,15 +249,4 @@ func (t *LiveKitTransport) Close() error {
 
 	t.logger.Info("livekit transport closed")
 	return nil
-}
-
-// pcmToFloat32 converts signed 16-bit LE PCM to float32 samples.
-// Not currently used but available for analysis/level metering.
-func pcmToFloat32(pcm []byte) []float32 {
-	samples := make([]float32, len(pcm)/2)
-	for i := range samples {
-		s := int16(binary.LittleEndian.Uint16(pcm[i*2:]))
-		samples[i] = float32(s) / 32768.0
-	}
-	return samples
 }

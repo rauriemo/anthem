@@ -3,7 +3,6 @@ package voice
 import (
 	"context"
 	"log/slog"
-	"sync"
 	"testing"
 	"time"
 )
@@ -11,25 +10,6 @@ import (
 // TestPublishLoop_FrameSlicing verifies that the publish loop correctly slices
 // variable-length TTS audio into 20ms frames (OutboundFrameBytes = 960 bytes).
 func TestPublishLoop_FrameSlicing(t *testing.T) {
-	tts := NewMockTTS()
-	stt := NewMockSTT()
-
-	transport := &LiveKitTransport{
-		stt:    stt,
-		tts:    tts,
-		logger: slog.Default(),
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var frames [][]byte
-	var mu sync.Mutex
-
-	// We'll test the framing logic directly by calling publishLoop
-	// with a context and monitoring what would be written.
-	// Since we can't easily mock the LiveKit local track, test the
-	// framing algorithm extracted as a helper.
 	chunk := make([]byte, OutboundFrameBytes*2+100) // 2 full frames + 100 bytes residual
 	for i := range chunk {
 		chunk[i] = byte(i % 256)
@@ -68,11 +48,6 @@ func TestPublishLoop_FrameSlicing(t *testing.T) {
 	if len(residual) != 100 {
 		t.Errorf("expected 100 residual, got %d", len(residual))
 	}
-
-	_ = frames
-	_ = mu
-	_ = ctx
-	_ = transport
 }
 
 // TestAudioThroughSTT verifies that audio written to the transport reaches the STT writer.
@@ -146,7 +121,7 @@ func TestTransportCloseIdempotent(t *testing.T) {
 	}
 }
 
-// TestPublishLoopContextCancel verifies that publishLoop exits when context is cancelled.
+// TestPublishLoopContextCancel verifies that publishLoop exits when context is canceled.
 func TestPublishLoopContextCancel(t *testing.T) {
 	tts := NewMockTTS()
 	stt := NewMockSTT()

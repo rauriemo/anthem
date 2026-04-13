@@ -278,7 +278,7 @@ func TestRemoveBackground_AtomicWrite(t *testing.T) {
 func TestRemoveBackground_BatchMode(t *testing.T) {
 	dir := t.TempDir()
 	frameDir := filepath.Join(dir, "frames")
-	os.Mkdir(frameDir, 0755)
+	_ = os.Mkdir(frameDir, 0755)
 
 	for i := 1; i <= 3; i++ {
 		writePNG(t, filepath.Join(frameDir, fmt.Sprintf("frame_%04d.png", i)), false)
@@ -311,7 +311,7 @@ func TestRemoveBackground_BatchMode(t *testing.T) {
 func TestRemoveBackground_BatchNoFrames(t *testing.T) {
 	dir := t.TempDir()
 	frameDir := filepath.Join(dir, "empty_frames")
-	os.Mkdir(frameDir, 0755)
+	_ = os.Mkdir(frameDir, 0755)
 
 	proc := &RemoveBackgroundProcessor{
 		LookPath: func(string) (string, error) { return "rembg", nil },
@@ -343,7 +343,7 @@ func TestExtractVideoFrames_FfmpegNotInstalled(t *testing.T) {
 func TestExtractVideoFrames_Success(t *testing.T) {
 	dir := t.TempDir()
 	videoPath := filepath.Join(dir, "test.mp4")
-	os.WriteFile(videoPath, []byte("fake video"), 0644)
+	_ = os.WriteFile(videoPath, []byte("fake video"), 0644)
 
 	proc := &ExtractVideoFramesProcessor{
 		LookPath: func(string) (string, error) { return "ffmpeg", nil },
@@ -379,7 +379,7 @@ func TestExtractVideoFrames_Success(t *testing.T) {
 func TestExtractVideoFrames_DefaultFPS(t *testing.T) {
 	dir := t.TempDir()
 	videoPath := filepath.Join(dir, "test.mp4")
-	os.WriteFile(videoPath, []byte("fake"), 0644)
+	_ = os.WriteFile(videoPath, []byte("fake"), 0644)
 
 	var capturedArgs []string
 	proc := &ExtractVideoFramesProcessor{
@@ -413,7 +413,7 @@ func TestExtractVideoFrames_DefaultFPS(t *testing.T) {
 func TestExtractVideoFrames_CmdFails(t *testing.T) {
 	dir := t.TempDir()
 	videoPath := filepath.Join(dir, "test.mp4")
-	os.WriteFile(videoPath, []byte("fake"), 0644)
+	_ = os.WriteFile(videoPath, []byte("fake"), 0644)
 
 	proc := &ExtractVideoFramesProcessor{
 		LookPath: func(string) (string, error) { return "ffmpeg", nil },
@@ -444,7 +444,7 @@ func TestNormalizeFrames_NoFrameDir(t *testing.T) {
 func TestNormalizeFrames_UniformCanvas(t *testing.T) {
 	dir := t.TempDir()
 	frameDir := filepath.Join(dir, "frames")
-	os.Mkdir(frameDir, 0755)
+	_ = os.Mkdir(frameDir, 0755)
 
 	// Frame 1: content at (2,2)-(8,8) within 20x20
 	writeSizedPNG(t, filepath.Join(frameDir, "frame_0001.png"), 20, 20, image.Rect(2, 2, 8, 8))
@@ -859,5 +859,5 @@ func writePNGToPath(path string, w, h int) {
 	}
 	f, _ := os.Create(path)
 	defer f.Close()
-	png.Encode(f, img)
+	_ = png.Encode(f, img)
 }

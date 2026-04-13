@@ -282,7 +282,7 @@ func TestAdapter_BargeInFromNonSpeaking(t *testing.T) {
 		t.Fatal("barge-in from idle should be no-op, not error")
 	}
 	if tts.CancelCalls() != 0 {
-		t.Error("TTS should not be cancelled from non-speaking state")
+		t.Error("TTS should not be canceled from non-speaking state")
 	}
 }
 

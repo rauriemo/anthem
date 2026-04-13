@@ -135,12 +135,8 @@ type deepgramResponse struct {
 			Confidence float64 `json:"confidence"`
 		} `json:"alternatives"`
 	} `json:"channel"`
-	IsFinal    bool `json:"is_final"`
+	IsFinal     bool `json:"is_final"`
 	SpeechFinal bool `json:"speech_final"`
-}
-
-type deepgramVADEvent struct {
-	Type string `json:"type"`
 }
 
 func (d *DeepgramSTT) readLoop(ctx context.Context) {

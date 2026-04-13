@@ -15,7 +15,7 @@ const (
 	UserSpeaking                           // User has the floor, VAD active
 	CommitPending                          // User stopped, turn being finalized
 	OrchestratorSpeaking                   // Orchestrator's TTS playing
-	BargeInAbort                           // User interrupted, cancelling orchestrator
+	BargeInAbort                           // User interrupted, canceling orchestrator
 
 	// Extended states (Phase 3+ -- multi-agent mode only)
 	OrchestratorAck // Fast ack playing
@@ -69,28 +69,28 @@ var orchestratorTransitions = map[transition]bool{
 
 // multiAgentTransitions defines the valid transition graph for multi-agent mode (Phase 3+).
 var multiAgentTransitions = map[transition]bool{
-	{Idle, UserSpeaking}:                true,
-	{UserSpeaking, CommitPending}:       true,
-	{UserSpeaking, Idle}:                true,
-	{CommitPending, OrchestratorAck}:    true,
-	{OrchestratorAck, AgentSpeaking}:    true,
-	{OrchestratorAck, BargeInAbort}:     true,
-	{AgentSpeaking, Idle}:              true,
-	{AgentSpeaking, BargeInAbort}:      true,
-	{AgentSpeaking, HandoffPending}:    true,
-	{HandoffPending, OrchestratorAck}:  true,
-	{HandoffPending, BargeInAbort}:     true,
-	{BargeInAbort, UserSpeaking}:       true,
+	{Idle, UserSpeaking}:              true,
+	{UserSpeaking, CommitPending}:     true,
+	{UserSpeaking, Idle}:              true,
+	{CommitPending, OrchestratorAck}:  true,
+	{OrchestratorAck, AgentSpeaking}:  true,
+	{OrchestratorAck, BargeInAbort}:   true,
+	{AgentSpeaking, Idle}:             true,
+	{AgentSpeaking, BargeInAbort}:     true,
+	{AgentSpeaking, HandoffPending}:   true,
+	{HandoffPending, OrchestratorAck}: true,
+	{HandoffPending, BargeInAbort}:    true,
+	{BargeInAbort, UserSpeaking}:      true,
 }
 
 // FloorController manages turn-taking state for the voice room.
 type FloorController struct {
-	mu             sync.Mutex
-	state          FloorState
-	activeSpeaker  string
-	transitions    map[transition]bool
-	events         chan FloorEvent
-	mode           string
+	mu            sync.Mutex
+	state         FloorState
+	activeSpeaker string
+	transitions   map[transition]bool
+	events        chan FloorEvent
+	mode          string
 }
 
 // NewFloorController creates a floor controller for the given mode.
@@ -129,11 +129,11 @@ func (fc *FloorController) Transition(to FloorState, reason string) error {
 
 	fc.state = to
 	ev := FloorEvent{
-		Timestamp:     time.Now(),
-		FromState:     from,
-		ToState:       to,
-		AgentID:       fc.activeSpeaker,
-		Reason:        reason,
+		Timestamp: time.Now(),
+		FromState: from,
+		ToState:   to,
+		AgentID:   fc.activeSpeaker,
+		Reason:    reason,
 	}
 
 	select {

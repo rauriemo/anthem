@@ -12,14 +12,14 @@ type RoomEventType string
 
 const (
 	// Phase 1 events (orchestrator mode)
-	EvSpeechStart      RoomEventType = "speech_start"
+	EvSpeechStart       RoomEventType = "speech_start"
 	EvPartialTranscript RoomEventType = "partial_transcript"
-	EvFinalTranscript  RoomEventType = "final_transcript"
-	EvTTSStarted       RoomEventType = "tts_started"
-	EvTTSInterrupted   RoomEventType = "tts_interrupted"
-	EvFloorTransition  RoomEventType = "floor_transition"
-	EvBargeIn          RoomEventType = "barge_in"
-	EvResponseDone     RoomEventType = "response_done"
+	EvFinalTranscript   RoomEventType = "final_transcript"
+	EvTTSStarted        RoomEventType = "tts_started"
+	EvTTSInterrupted    RoomEventType = "tts_interrupted"
+	EvFloorTransition   RoomEventType = "floor_transition"
+	EvBargeIn           RoomEventType = "barge_in"
+	EvResponseDone      RoomEventType = "response_done"
 
 	// Phase 2 events (tool observability)
 	EvToolCall   RoomEventType = "tool_call"

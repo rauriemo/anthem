@@ -49,7 +49,7 @@ type PostProcessor interface {
 }
 
 var processors = map[string]PostProcessor{
-	"remove_background":   &RemoveBackgroundProcessor{},
+	"remove_background":    &RemoveBackgroundProcessor{},
 	"extract_video_frames": &ExtractVideoFramesProcessor{},
 	"normalize_frames":     &NormalizeFramesProcessor{},
 	"stitch_spritesheet":   &StitchSpritesheetProcessor{},
@@ -308,8 +308,6 @@ func (p *ExtractVideoFramesProcessor) Run(artifactPath string, cfg map[string]st
 // centering each frame on a uniform canvas.
 type NormalizeFramesProcessor struct{}
 
-const defaultNormPadding = "4"
-
 func (p *NormalizeFramesProcessor) Run(artifactPath string, cfg map[string]string, state PipelineState, log *slog.Logger) PostProcessResult {
 	frameDir := state["frame_dir"]
 	if frameDir == "" {
@@ -420,8 +418,6 @@ func contentBoundingBox(img image.Image) image.Rectangle {
 // StitchSpritesheetProcessor packs individual frame PNGs into a grid sprite
 // sheet and writes a metadata sidecar JSON file.
 type StitchSpritesheetProcessor struct{}
-
-const defaultStitchColumns = "4"
 
 // SpritesheetMeta is the JSON sidecar written alongside the sprite sheet.
 type SpritesheetMeta struct {
