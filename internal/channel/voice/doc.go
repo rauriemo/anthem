@@ -4,9 +4,10 @@
 // orchestrator, and pipes streamed responses through a TTS provider
 // (ElevenLabs eleven_flash_v2_5) back into the LiveKit room.
 //
-// Audio format: inbound 48kHz PCM16 mono (no resampling to STT), outbound
-// 24kHz PCM16 mono (no resampling from TTS). The publish loop slices
-// variable-length TTS chunks into 20ms frames.
+// Audio uses Opus end-to-end passthrough to avoid CGo codec dependencies:
+// inbound Opus payloads from the browser's WebRTC track go directly to
+// Deepgram (encoding=opus), and outbound Opus frames from ElevenLabs
+// (opus_48000_64) go directly to LiveKit's WriteSample for RTP packetization.
 //
 // The package defines pluggable provider interfaces (StreamingSTT, StreamingTTS)
 // and a formal FloorController state machine that governs turn-taking and

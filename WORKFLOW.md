@@ -56,6 +56,8 @@ channels:
       - task.completed
       - task.failed
       - maintenance.suggested
+  - kind: voice
+    target: "anthem-voice"
 server:
   port: 8080
 ---

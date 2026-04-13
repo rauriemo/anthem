@@ -13,14 +13,13 @@ import (
 )
 
 const (
-	elevenLabsBaseURL    = "wss://api.elevenlabs.io/v1/text-to-speech"
-	elevenLabsModel      = "eleven_flash_v2_5"
-	elevenLabsFormat     = "pcm_24000"
-	elevenLabsSampleRate = 24000
+	elevenLabsBaseURL = "wss://api.elevenlabs.io/v1/text-to-speech"
+	elevenLabsModel   = "eleven_flash_v2_5"
+	elevenLabsFormat  = "opus_48000_64"
 )
 
 // ElevenLabsTTS implements StreamingTTS using ElevenLabs' WebSocket stream-input API.
-// Outputs PCM16 at 24kHz mono for direct LiveKit publishing without resampling.
+// Outputs Opus at 48kHz/64kbps for direct LiveKit publishing without transcoding.
 type ElevenLabsTTS struct {
 	apiKey string
 	logger *slog.Logger
@@ -234,14 +233,14 @@ func (e *ElevenLabsTTS) readLoop() {
 			continue
 		}
 
-		pcm, err := base64.StdEncoding.DecodeString(resp.Audio)
+		opusData, err := base64.StdEncoding.DecodeString(resp.Audio)
 		if err != nil {
 			e.logger.Warn("elevenlabs TTS: base64 decode error", "error", err)
 			continue
 		}
 
 		select {
-		case e.audio <- pcm:
+		case e.audio <- opusData:
 		default:
 			e.logger.Warn("elevenlabs TTS: audio channel full, dropping chunk")
 		}

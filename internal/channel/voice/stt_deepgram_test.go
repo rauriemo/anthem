@@ -99,6 +99,8 @@ func TestDeepgramSTT_ConnectAndTranscript(t *testing.T) {
 
 	ctx2, cancel2 := context.WithCancel(ctx)
 	stt.cancel = cancel2
+	stt.ctx = ctx2
+	stt.wg.Add(1)
 	go stt.readLoop(ctx2)
 
 	_ = origURL
@@ -182,6 +184,8 @@ func TestDeepgramSTT_EmptyTranscriptIgnored(t *testing.T) {
 	stt.started = true
 	stt.mu.Unlock()
 	stt.cancel = cancel
+	stt.ctx = ctx
+	stt.wg.Add(1)
 	go stt.readLoop(ctx)
 
 	select {
@@ -231,6 +235,8 @@ func TestDeepgramSTT_PartialTranscript(t *testing.T) {
 	stt.started = true
 	stt.mu.Unlock()
 	stt.cancel = cancel
+	stt.ctx = ctx
+	stt.wg.Add(1)
 	go stt.readLoop(ctx)
 
 	select {
@@ -285,6 +291,8 @@ func TestDeepgramSTT_VADEventHandled(t *testing.T) {
 	stt.started = true
 	stt.mu.Unlock()
 	stt.cancel = cancel
+	stt.ctx = ctx
+	stt.wg.Add(1)
 	go stt.readLoop(ctx)
 
 	// VAD events don't produce transcripts, just ensure no panic

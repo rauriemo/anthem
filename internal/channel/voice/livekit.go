@@ -12,22 +12,21 @@ import (
 	"github.com/pion/webrtc/v4/pkg/media"
 )
 
-// Audio format contract constants.
-// Inbound (user -> STT):  48kHz, mono, PCM16 LE, 20ms frames = 960 samples = 1920 bytes
-// Outbound (TTS -> user): 24kHz, mono, PCM16 LE, 20ms frames = 480 samples =  960 bytes
+// Audio format contract: Opus end-to-end passthrough (no PCM conversion).
+//
+//	Browser -> [Opus RTP] -> LiveKit -> readTrack -> [Opus payload] -> Deepgram (encoding=opus)
+//	ElevenLabs (opus_48000) -> [Opus frames] -> publishLoop -> WriteSample -> LiveKit -> [Opus RTP] -> Browser
+//
+// Opus RTP always uses a 48 kHz clock rate per RFC 7587.
 const (
-	InboundSampleRate  = 48000
-	OutboundSampleRate = 24000
-	FrameDuration      = 20 * time.Millisecond
-	InboundFrameSize   = InboundSampleRate * 20 / 1000  // 960 samples
-	OutboundFrameSize  = OutboundSampleRate * 20 / 1000 // 480 samples
-	InboundFrameBytes  = InboundFrameSize * 2           // 1920 bytes (16-bit)
-	OutboundFrameBytes = OutboundFrameSize * 2          // 960 bytes (16-bit)
+	OpusClockRate = 48000
+	FrameDuration = 20 * time.Millisecond
 )
 
-// LiveKitTransport bridges a LiveKit room to STT/TTS providers.
-// It subscribes to user audio, decodes to PCM, and pipes to STT.
-// It reads TTS audio, frames it into 20ms chunks, and publishes to the room.
+// LiveKitTransport bridges a LiveKit room to STT/TTS providers using Opus
+// passthrough. Inbound Opus payloads go directly to Deepgram (configured for
+// encoding=opus), and outbound Opus frames from ElevenLabs go directly to
+// LiveKit via WriteSample.
 type LiveKitTransport struct {
 	url       string
 	apiKey    string
@@ -108,7 +107,7 @@ func (t *LiveKitTransport) Start(ctx context.Context) error {
 
 	track, err := lksdk.NewLocalSampleTrack(webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeOpus,
-		ClockRate: uint32(OutboundSampleRate),
+		ClockRate: OpusClockRate,
 		Channels:  1,
 	})
 	if err != nil {
@@ -135,11 +134,11 @@ func (t *LiveKitTransport) Start(ctx context.Context) error {
 	return nil
 }
 
-// readTrack reads PCM audio from a remote participant's track and pipes it to STT.
+// readTrack reads RTP packets from a remote participant's audio track,
+// extracts the Opus payload, and forwards it to Deepgram (encoding=opus).
 func (t *LiveKitTransport) readTrack(ctx context.Context, track *webrtc.TrackRemote, participant string) {
 	defer t.wg.Done()
 
-	buf := make([]byte, 4096)
 	for {
 		select {
 		case <-ctx.Done():
@@ -147,30 +146,27 @@ func (t *LiveKitTransport) readTrack(ctx context.Context, track *webrtc.TrackRem
 		default:
 		}
 
-		n, _, err := track.Read(buf)
+		pkt, _, err := track.ReadRTP()
 		if err != nil {
 			t.logger.Debug("livekit: track read ended", "participant", participant, "error", err)
 			return
 		}
 
-		if n == 0 {
+		if len(pkt.Payload) == 0 {
 			continue
 		}
 
-		pcm := make([]byte, n)
-		copy(pcm, buf[:n])
-
-		if err := t.stt.WriteAudio(pcm); err != nil {
+		if err := t.stt.WriteAudio(pkt.Payload); err != nil {
 			t.logger.Warn("livekit: stt write failed", "error", err)
 		}
 	}
 }
 
-// publishLoop reads TTS audio, slices it into 20ms frames, and publishes to the room.
+// publishLoop reads Opus frames from TTS and publishes them to the LiveKit
+// room. Each chunk from ElevenLabs (opus_48000) is a complete Opus packet
+// that WriteSample packetizes into RTP.
 func (t *LiveKitTransport) publishLoop(ctx context.Context) {
 	defer t.wg.Done()
-
-	var residual []byte
 
 	for {
 		select {
@@ -181,31 +177,23 @@ func (t *LiveKitTransport) publishLoop(ctx context.Context) {
 				return
 			}
 
-			data := append(residual, chunk...)
-			residual = nil
-
-			for len(data) >= OutboundFrameBytes {
-				frame := data[:OutboundFrameBytes]
-				data = data[OutboundFrameBytes:]
-
-				t.mu.Lock()
-				track := t.localTrack
-				t.mu.Unlock()
-
-				if track == nil {
-					return
-				}
-
-				if err := track.WriteSample(media.Sample{
-					Data:     frame,
-					Duration: FrameDuration,
-				}, nil); err != nil {
-					t.logger.Warn("livekit: write sample failed", "error", err)
-				}
+			if len(chunk) == 0 {
+				continue
 			}
 
-			if len(data) > 0 {
-				residual = data
+			t.mu.Lock()
+			track := t.localTrack
+			t.mu.Unlock()
+
+			if track == nil {
+				return
+			}
+
+			if err := track.WriteSample(media.Sample{
+				Data:     chunk,
+				Duration: FrameDuration,
+			}, nil); err != nil {
+				t.logger.Warn("livekit: write sample failed", "error", err)
 			}
 		}
 	}

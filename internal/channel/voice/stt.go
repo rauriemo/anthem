@@ -10,10 +10,11 @@ type Transcript struct {
 }
 
 // StreamingSTT abstracts a streaming speech-to-text provider. Implementations
-// accept raw PCM audio and emit partial/final transcripts on a channel.
+// accept raw audio bytes (Opus or PCM depending on configuration) and emit
+// partial/final transcripts on a channel.
 type StreamingSTT interface {
 	Start(ctx context.Context) error
-	WriteAudio(pcm []byte) error
+	WriteAudio(data []byte) error
 	Transcripts() <-chan Transcript
 	Close() error
 }

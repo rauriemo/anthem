@@ -16,10 +16,19 @@ const (
 	deepgramBaseURL    = "wss://api.deepgram.com/v1/listen"
 	deepgramModel      = "nova-3"
 	deepgramSampleRate = 48000
+	deepgramEncoding   = "opus"
+
+	keepaliveInterval = 5 * time.Second
+	reconnectMinDelay = 500 * time.Millisecond
+	reconnectMaxDelay = 15 * time.Second
 )
+
+var keepaliveMsg = []byte(`{"type": "KeepAlive"}`)
 
 // DeepgramSTT implements StreamingSTT using Deepgram's WebSocket streaming API.
 // Uses nova-3 (not nova-3-agent) so our own TurnDetector owns endpointing.
+// Sends KeepAlive messages every 5s to prevent Deepgram's 10s idle timeout,
+// and automatically reconnects on disconnect.
 type DeepgramSTT struct {
 	apiKey string
 	logger *slog.Logger
@@ -27,9 +36,11 @@ type DeepgramSTT struct {
 	mu          sync.Mutex
 	conn        *websocket.Conn
 	transcripts chan Transcript
+	ctx         context.Context
 	started     bool
 	closed      bool
 	cancel      context.CancelFunc
+	wg          sync.WaitGroup
 }
 
 func NewDeepgramSTT(apiKey string, logger *slog.Logger) *DeepgramSTT {
@@ -53,9 +64,23 @@ func (d *DeepgramSTT) Start(ctx context.Context) error {
 	d.mu.Unlock()
 
 	ctx, d.cancel = context.WithCancel(ctx)
+	d.ctx = ctx
 
+	if err := d.dial(ctx); err != nil {
+		return err
+	}
+
+	d.wg.Add(2)
+	go d.readLoop(ctx)
+	go d.keepaliveLoop(ctx)
+
+	d.logger.Info("deepgram STT started", "model", deepgramModel, "sample_rate", deepgramSampleRate)
+	return nil
+}
+
+func (d *DeepgramSTT) dial(ctx context.Context) error {
 	params := url.Values{
-		"encoding":        {"linear16"},
+		"encoding":        {deepgramEncoding},
 		"sample_rate":     {fmt.Sprintf("%d", deepgramSampleRate)},
 		"channels":        {"1"},
 		"model":           {deepgramModel},
@@ -78,14 +103,35 @@ func (d *DeepgramSTT) Start(ctx context.Context) error {
 	d.mu.Lock()
 	d.conn = conn
 	d.mu.Unlock()
-
-	go d.readLoop(ctx)
-
-	d.logger.Info("deepgram STT started", "model", deepgramModel, "sample_rate", deepgramSampleRate)
 	return nil
 }
 
-func (d *DeepgramSTT) WriteAudio(pcm []byte) error {
+// reconnect attempts to re-establish the Deepgram WebSocket with exponential
+// backoff. Returns false only when the context is cancelled (shutdown).
+func (d *DeepgramSTT) reconnect(ctx context.Context) bool {
+	delay := reconnectMinDelay
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(delay):
+		}
+
+		d.logger.Info("deepgram STT: reconnecting...")
+		if err := d.dial(ctx); err != nil {
+			d.logger.Warn("deepgram STT: reconnect failed", "error", err, "retry_in", delay)
+			delay = delay * 2
+			if delay > reconnectMaxDelay {
+				delay = reconnectMaxDelay
+			}
+			continue
+		}
+		d.logger.Info("deepgram STT: reconnected")
+		return true
+	}
+}
+
+func (d *DeepgramSTT) WriteAudio(data []byte) error {
 	d.mu.Lock()
 	conn := d.conn
 	closed := d.closed
@@ -95,7 +141,7 @@ func (d *DeepgramSTT) WriteAudio(pcm []byte) error {
 		return fmt.Errorf("deepgram STT: not connected")
 	}
 
-	return conn.WriteMessage(websocket.BinaryMessage, pcm)
+	return conn.WriteMessage(websocket.BinaryMessage, data)
 }
 
 func (d *DeepgramSTT) Transcripts() <-chan Transcript {
@@ -116,6 +162,8 @@ func (d *DeepgramSTT) Close() error {
 		d.cancel()
 	}
 
+	d.wg.Wait()
+
 	if conn != nil {
 		closeMsg := []byte(`{"type": "CloseStream"}`)
 		_ = conn.WriteMessage(websocket.TextMessage, closeMsg)
@@ -125,6 +173,33 @@ func (d *DeepgramSTT) Close() error {
 	close(d.transcripts)
 	d.logger.Info("deepgram STT closed")
 	return nil
+}
+
+// keepaliveLoop sends KeepAlive messages to prevent Deepgram's 10s idle timeout.
+func (d *DeepgramSTT) keepaliveLoop(ctx context.Context) {
+	defer d.wg.Done()
+	ticker := time.NewTicker(keepaliveInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			d.mu.Lock()
+			conn := d.conn
+			closed := d.closed
+			d.mu.Unlock()
+
+			if closed || conn == nil {
+				continue
+			}
+
+			if err := conn.WriteMessage(websocket.TextMessage, keepaliveMsg); err != nil {
+				d.logger.Debug("deepgram STT: keepalive write failed", "error", err)
+			}
+		}
+	}
 }
 
 type deepgramResponse struct {
@@ -140,38 +215,38 @@ type deepgramResponse struct {
 }
 
 func (d *DeepgramSTT) readLoop(ctx context.Context) {
-	defer func() {
-		d.mu.Lock()
-		if !d.closed {
-			close(d.transcripts)
-		}
-		d.mu.Unlock()
-	}()
+	defer d.wg.Done()
 
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
 		d.mu.Lock()
 		conn := d.conn
 		d.mu.Unlock()
 
 		if conn == nil {
-			return
+			if !d.reconnect(ctx) {
+				return
+			}
+			continue
 		}
 
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			d.mu.Lock()
 			closed := d.closed
+			d.conn = nil
 			d.mu.Unlock()
-			if !closed {
-				d.logger.Warn("deepgram STT: read error", "error", err)
+
+			if closed {
+				return
 			}
-			return
+
+			d.logger.Warn("deepgram STT: read error, will reconnect", "error", err)
+
+			_ = conn.Close()
+			if !d.reconnect(ctx) {
+				return
+			}
+			continue
 		}
 
 		var baseMsg struct {
