@@ -212,7 +212,7 @@ func TestFastLLM_HistoryEviction(t *testing.T) {
 		requestCount.Add(1)
 		body := sseLines(
 			`{"type":"message_start","message":{"id":"msg_h"}}`,
-			fmt.Sprintf(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 			fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"reply %d"}}`, requestCount.Load()),
 			`{"type":"content_block_stop","index":0}`,
 			`{"type":"message_stop"}`,
