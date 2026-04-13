@@ -174,7 +174,9 @@ In `internal/config/loader.go` or a new `internal/config/guests.go`:
 
 In `internal/channel/prism/adapter.go`:
 - Include `guest_agents` array in the `auth_ok` response frame after successful authentication
-- Data sourced from the loaded `GuestIndex` -- only discovery-tier metadata, not full personas
+- Data sourced from the loaded `GuestIndex` -- discovery-tier metadata plus voice config
+- Wire format (`guestAgentInfo` struct) includes: `id`, `name`, `description`, `role`, `capabilities`, `icon`, `model`, `quotes`, `requirementsFingerprint`, `scope`, `source`, `voice_id`, `voice_model`, `voice_priority`
+- `UpdateGuestIndex` converts `GuestAgent` to `guestAgentInfo`, preserving all voice fields from frontmatter
 - On config reload, broadcast updated `guest_agents` to all connected Prism clients
 
 ### Testdata fixtures
