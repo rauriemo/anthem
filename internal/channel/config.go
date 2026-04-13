@@ -12,6 +12,7 @@ type ChannelsConfig struct {
 	Slack    *SlackCredentials    `yaml:"slack,omitempty"`
 	Dispatch *DispatchCredentials `yaml:"dispatch,omitempty"`
 	Prism    *PrismCredentials    `yaml:"prism,omitempty"`
+	Voice    *VoiceCredentials    `yaml:"voice,omitempty"`
 }
 
 type DispatchCredentials struct {
@@ -25,6 +26,14 @@ type SlackCredentials struct {
 
 type PrismCredentials struct {
 	Token string `yaml:"token"`
+}
+
+type VoiceCredentials struct {
+	LiveKitURL       string `yaml:"livekit_url"`
+	LiveKitAPIKey    string `yaml:"livekit_api_key"`
+	LiveKitAPISecret string `yaml:"livekit_api_secret"`
+	DeepgramAPIKey   string `yaml:"deepgram_api_key"`
+	ElevenLabsAPIKey string `yaml:"elevenlabs_api_key,omitempty"`
 }
 
 func LoadCredentials(path string) (*ChannelsConfig, error) {

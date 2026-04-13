@@ -19,6 +19,7 @@ import (
 	dispatchch "github.com/rauriemo/anthem/internal/channel/dispatch"
 	prismch "github.com/rauriemo/anthem/internal/channel/prism"
 	slackch "github.com/rauriemo/anthem/internal/channel/slack"
+	voicech "github.com/rauriemo/anthem/internal/channel/voice"
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/constraints"
 	"github.com/rauriemo/anthem/internal/discovery"
@@ -224,6 +225,49 @@ func runCmd() *cobra.Command {
 						} else {
 							logger.Warn("prism channel configured but no credentials found in channels.yaml")
 						}
+					case "voice":
+						if channelCreds.Voice == nil {
+							logger.Warn("voice channel configured but no credentials found in channels.yaml")
+							continue
+						}
+						vc := channelCreds.Voice
+						var missing []string
+						if vc.LiveKitURL == "" {
+							missing = append(missing, "livekit_url")
+						}
+						if vc.LiveKitAPIKey == "" {
+							missing = append(missing, "livekit_api_key")
+						}
+						if vc.LiveKitAPISecret == "" {
+							missing = append(missing, "livekit_api_secret")
+						}
+						if vc.DeepgramAPIKey == "" {
+							missing = append(missing, "deepgram_api_key")
+						}
+						if vc.ElevenLabsAPIKey == "" {
+							missing = append(missing, "elevenlabs_api_key")
+						}
+						if len(missing) > 0 {
+							logger.Warn("voice channel skipped: missing credentials", "fields", missing)
+							continue
+						}
+					roomName := chCfg.Target
+					if roomName == "" {
+						roomName = "anthem-voice"
+					}
+					orchVoiceID := guests.ReadOrchestratorVoiceID(filepath.Join(projectDir, "agents"))
+					if orchVoiceID != "" {
+						logger.Info("orchestrator voice_id loaded", "voice_id", orchVoiceID)
+					}
+					stt := voicech.NewDeepgramSTT(vc.DeepgramAPIKey, logger)
+					tts := voicech.NewElevenLabsTTS(vc.ElevenLabsAPIKey, logger)
+					transport := voicech.NewLiveKitTransport(
+						vc.LiveKitURL, vc.LiveKitAPIKey, vc.LiveKitAPISecret,
+						roomName, "anthem-gateway", stt, tts, logger,
+					)
+					voiceAdapter := voicech.NewAdapter(stt, tts, transport, orchVoiceID, logger)
+						chanManager.Register(voiceAdapter)
+						logger.Info("registered voice channel", "room", roomName)
 					default:
 						logger.Warn("unknown channel kind, skipping", "kind", chCfg.Kind)
 					}

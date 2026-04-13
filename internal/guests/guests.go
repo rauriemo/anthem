@@ -105,6 +105,9 @@ type GuestAgent struct {
 	Scope                   string                            `json:"scope"`
 	Source                  string                            `json:"source"`
 	File                    string                            `json:"file"`
+	VoiceID                 string                            `json:"voice_id,omitempty"`
+	VoiceModel              string                            `json:"voice_model,omitempty"`
+	VoicePriority           int                               `json:"voice_priority,omitempty"`
 }
 
 type GuestIndex struct {
@@ -114,17 +117,20 @@ type GuestIndex struct {
 }
 
 type frontmatter struct {
-	Name         string                            `yaml:"name"`
-	Description  string                            `yaml:"description"`
-	Model        string                            `yaml:"model"`
-	Role         string                            `yaml:"role"`
-	Capabilities []string                          `yaml:"capabilities"`
-	Icon         string                            `yaml:"icon"`
-	Quotes       []string                          `yaml:"quotes"`
-	Requirements map[string]any                    `yaml:"requirements"`
-	AllowedTools []string                          `yaml:"allowed_tools"`
-	MCPServers   map[string]mcpconfig.MCPServerRef `yaml:"mcp_servers"`
-	HTTPTools    map[string]HTTPToolConfig         `yaml:"http_tools"`
+	Name          string                            `yaml:"name"`
+	Description   string                            `yaml:"description"`
+	Model         string                            `yaml:"model"`
+	Role          string                            `yaml:"role"`
+	Capabilities  []string                          `yaml:"capabilities"`
+	Icon          string                            `yaml:"icon"`
+	Quotes        []string                          `yaml:"quotes"`
+	Requirements  map[string]any                    `yaml:"requirements"`
+	AllowedTools  []string                          `yaml:"allowed_tools"`
+	MCPServers    map[string]mcpconfig.MCPServerRef `yaml:"mcp_servers"`
+	HTTPTools     map[string]HTTPToolConfig         `yaml:"http_tools"`
+	VoiceID       string                            `yaml:"voice_id"`
+	VoiceModel    string                            `yaml:"voice_model"`
+	VoicePriority int                               `yaml:"voice_priority"`
 }
 
 const indexFile = ".agents-index.json"
@@ -319,6 +325,9 @@ func ParseFrontmatter(data []byte) (GuestAgent, error) {
 		AllowedTools:            fm.AllowedTools,
 		MCPServers:              fm.MCPServers,
 		HTTPTools:               fm.HTTPTools,
+		VoiceID:                 fm.VoiceID,
+		VoiceModel:              fm.VoiceModel,
+		VoicePriority:           fm.VoicePriority,
 	}, nil
 }
 
@@ -496,4 +505,18 @@ func normalizeForHash(v any) any {
 	default:
 		return v
 	}
+}
+
+// ReadOrchestratorVoiceID reads agents/orchestrator.md and returns its voice_id
+// from frontmatter. Returns empty string if the file doesn't exist or has no voice_id.
+func ReadOrchestratorVoiceID(agentsDir string) string {
+	data, err := os.ReadFile(filepath.Join(agentsDir, "orchestrator.md"))
+	if err != nil {
+		return ""
+	}
+	agent, err := ParseFrontmatter(data)
+	if err != nil {
+		return ""
+	}
+	return agent.VoiceID
 }

@@ -155,6 +155,26 @@ dispatch:
 
 prism:
   token: ""
+
+# Voice channel credentials for always-on voice room.
+# Requires LiveKit (WebRTC SFU), Deepgram (STT), and ElevenLabs (TTS).
+#
+# LiveKit: Create a project at https://cloud.livekit.io, get URL + API key/secret.
+# Deepgram: Get an API key at https://console.deepgram.com (needs streaming access).
+# ElevenLabs: Get an API key at https://elevenlabs.io (needs Text to Speech + Voices Read).
+#
+# Then add a channels: block to your project WORKFLOW.md:
+#   channels:
+#     - kind: voice
+#       target: "anthem-voice"   # LiveKit room name
+#       events: [task.completed, task.failed]
+
+voice:
+  livekit_url: ""
+  livekit_api_key: ""
+  livekit_api_secret: ""
+  deepgram_api_key: ""
+  elevenlabs_api_key: ""
 `
 
 const defaultConstraints = `constraints:

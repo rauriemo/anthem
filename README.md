@@ -382,7 +382,50 @@ channels:
 
 Requires a Slack app with Socket Mode enabled, `message.channels` event subscription, and bot scopes: `channels:history`, `channels:read`, `chat:write`, `files:read`.
 
-Run `anthem init` to generate a `channels.yaml` template with setup instructions for both adapters.
+#### Voice Room (always-on voice chat)
+
+The voice channel provides an always-on voice room where users converse with the orchestrator via WebRTC audio (LiveKit). The orchestrator speaks responses via ElevenLabs TTS and manages guest agents silently in the background.
+
+**Strategy note:** The original architecture doc reserved ElevenLabs for Phase 3 (per-agent voice identity), with Google Cloud TTS for Phase 1. This was changed intentionally -- ElevenLabs ships from Phase 1 because its WebSocket streaming API is lower-latency than Google's REST endpoint, the API key and agent voice IDs were already configured, and building a Google TTS provider would be throwaway work.
+
+**Provider choices:**
+- **STT:** Deepgram `nova-3` (not `nova-3-agent`). We disable Deepgram's built-in endpointing (`endpointing=false`) because our own `TurnDetector` handles silence timeout, utterance length, and confidence filtering. This avoids conflicting turn-commit logic.
+- **TTS:** ElevenLabs `eleven_flash_v2_5` via WebSocket stream-input. ~75ms first-byte latency. Per-agent voice IDs are configured in agent frontmatter (`voice_id`, `voice_model`, `voice_priority`).
+- **Transport:** LiveKit WebRTC SFU. Anthem joins as a bot participant, subscribes to user audio, publishes TTS audio.
+
+**Audio format contract:**
+
+| Stage | Format | Sample Rate | Channels |
+|-------|--------|-------------|----------|
+| LiveKit inbound (user audio) | Opus -> PCM16 LE | 48kHz | mono |
+| Deepgram STT input | PCM16 linear16 | 48kHz | mono |
+| ElevenLabs TTS output | PCM16 | 24kHz | mono |
+| LiveKit outbound (agent audio) | PCM16 -> Opus | 24kHz | mono |
+
+No resampling anywhere in the pipeline. Inbound audio passes through at 48kHz; outbound at 24kHz. The publish loop slices variable-length TTS chunks into 20ms frames (480 samples at 24kHz).
+
+`~/.anthem/channels.yaml`:
+```yaml
+voice:
+  livekit_url: "wss://your-project.livekit.cloud"
+  livekit_api_key: "your-api-key"
+  livekit_api_secret: "your-api-secret"
+  deepgram_api_key: "your-deepgram-key"
+  elevenlabs_api_key: "your-elevenlabs-key"
+```
+
+WORKFLOW.md:
+```yaml
+channels:
+  - kind: voice
+    target: "anthem-voice"   # LiveKit room name (optional, defaults to "anthem-voice")
+```
+
+All 5 credentials are required. If any are missing, Anthem logs a warning and skips the voice channel (it does not crash). This matches how Slack handles missing bot tokens -- voice is optional infrastructure.
+
+The voice channel implements `channel.Channel` as `internal/channel/voice/adapter.go`. It uses pluggable provider interfaces (`StreamingSTT`, `StreamingTTS`) so STT/TTS providers can be swapped without changing room logic.
+
+Run `anthem init` to generate a `channels.yaml` template with setup instructions for all adapters.
 
 ### Maintenance
 
