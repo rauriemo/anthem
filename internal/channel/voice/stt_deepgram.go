@@ -86,7 +86,7 @@ func (d *DeepgramSTT) dial(ctx context.Context) error {
 		"model":           {deepgramModel},
 		"punctuate":       {"true"},
 		"interim_results": {"true"},
-		"endpointing":     {"false"},
+		"endpointing":     {"300"},
 		"vad_events":      {"true"},
 	}
 
@@ -107,7 +107,7 @@ func (d *DeepgramSTT) dial(ctx context.Context) error {
 }
 
 // reconnect attempts to re-establish the Deepgram WebSocket with exponential
-// backoff. Returns false only when the context is cancelled (shutdown).
+// backoff. Returns false only when the context is canceled (shutdown).
 func (d *DeepgramSTT) reconnect(ctx context.Context) bool {
 	delay := reconnectMinDelay
 	for {

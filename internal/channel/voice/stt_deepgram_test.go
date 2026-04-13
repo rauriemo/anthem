@@ -82,8 +82,8 @@ func TestDeepgramSTT_ConnectAndTranscript(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	params := fmt.Sprintf("?encoding=linear16&sample_rate=%d&channels=1&model=%s&punctuate=true&interim_results=true&endpointing=false&vad_events=true",
-		deepgramSampleRate, deepgramModel)
+	params := fmt.Sprintf("?encoding=%s&sample_rate=%d&channels=1&model=%s&punctuate=true&interim_results=true&endpointing=300&vad_events=true",
+		deepgramEncoding, deepgramSampleRate, deepgramModel)
 	wsURL := deepgramWSURL(srv) + params
 
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}

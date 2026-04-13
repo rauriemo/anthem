@@ -60,6 +60,7 @@ func NewAdapter(stt StreamingSTT, tts StreamingTTS, transport *LiveKitTransport,
 		voiceID:   orchestratorVoiceID,
 	}
 	a.sentBuf = NewSentenceBuffer(a.onSentence)
+	a.sentBuf.EagerMode = true
 	return a
 }
 

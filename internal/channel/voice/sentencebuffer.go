@@ -5,13 +5,20 @@ import (
 	"unicode"
 )
 
+const eagerCharLimit = 50
+
 // SentenceBuffer accumulates StreamDelta text tokens and emits complete
 // sentences (or clauses) suitable for TTS synthesis. This enables
 // sentence-level streaming: pipe each sentence to TTS as soon as it's
 // complete rather than waiting for the full response.
+//
+// When EagerMode is true the buffer also flushes on clause-level punctuation
+// (commas, colons, em-dashes) and on a character-count threshold so that TTS
+// receives shorter chunks and can begin speaking sooner.
 type SentenceBuffer struct {
-	buf      strings.Builder
-	callback func(sentence string)
+	buf       strings.Builder
+	callback  func(sentence string)
+	EagerMode bool
 }
 
 // NewSentenceBuffer creates a buffer that calls cb with each complete sentence.
@@ -51,18 +58,45 @@ func (sb *SentenceBuffer) flushSentences() {
 	start := 0
 	lastEmitted := 0
 	for i, r := range text {
+		flush := false
+
 		if isSentenceEnd(r) {
 			afterIdx := i + len(string(r))
 			if afterIdx < len(text) {
 				next := rune(text[afterIdx])
 				if unicode.IsSpace(next) || unicode.IsUpper(next) {
-					sentence := strings.TrimSpace(text[start:afterIdx])
-					if sentence != "" {
-						sb.callback(sentence)
-					}
-					start = afterIdx
-					lastEmitted = afterIdx
+					flush = true
 				}
+			}
+		} else if sb.EagerMode && isClausePause(r) {
+			afterIdx := i + len(string(r))
+			if afterIdx < len(text) && unicode.IsSpace(rune(text[afterIdx])) {
+				flush = true
+			}
+		}
+
+		if flush {
+			afterIdx := i + len(string(r))
+			sentence := strings.TrimSpace(text[start:afterIdx])
+			if sentence != "" {
+				sb.callback(sentence)
+			}
+			start = afterIdx
+			lastEmitted = afterIdx
+		}
+	}
+
+	if sb.EagerMode && lastEmitted < len(text) {
+		remainder := text[start:]
+		if len(remainder) >= eagerCharLimit {
+			cut := findWordBreak(remainder, eagerCharLimit)
+			if cut > 0 {
+				chunk := strings.TrimSpace(remainder[:cut])
+				if chunk != "" {
+					sb.callback(chunk)
+				}
+				start += cut
+				lastEmitted = start
 			}
 		}
 	}
@@ -75,4 +109,22 @@ func (sb *SentenceBuffer) flushSentences() {
 
 func isSentenceEnd(r rune) bool {
 	return r == '.' || r == '!' || r == '?' || r == ';'
+}
+
+func isClausePause(r rune) bool {
+	return r == ',' || r == ':' || r == '\u2014' // em-dash
+}
+
+// findWordBreak returns the index of the last space at or before limit,
+// giving a clean word-boundary cut point.
+func findWordBreak(s string, limit int) int {
+	if limit >= len(s) {
+		return len(s)
+	}
+	for i := limit; i > 0; i-- {
+		if s[i] == ' ' {
+			return i
+		}
+	}
+	return limit
 }

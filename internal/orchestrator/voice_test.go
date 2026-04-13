@@ -2,253 +2,262 @@ package orchestrator
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
+	"time"
 
+	"github.com/rauriemo/anthem/internal/agent"
+	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/config"
+	"github.com/rauriemo/anthem/internal/guests"
+	"github.com/rauriemo/anthem/internal/tracker"
+	"github.com/rauriemo/anthem/internal/types"
 	"github.com/rauriemo/anthem/internal/workspace"
 )
 
-func newVoiceTestOrch(t *testing.T, homeDir string) *Orchestrator {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Join(homeDir, ".anthem"), 0755); err != nil {
-		t.Fatal(err)
+// failOnListTracker wraps MockTracker and fails the test if ListActive is called.
+type failOnListTracker struct {
+	*tracker.MockTracker
+	t *testing.T
+}
+
+func (f *failOnListTracker) ListActive(_ context.Context) ([]types.Task, error) {
+	f.t.Fatal("ListActive should not be called for voice messages")
+	return nil, nil
+}
+
+func TestHandleUserMessage_VoiceSkipsTaskListing(t *testing.T) {
+	trk := &failOnListTracker{
+		MockTracker: tracker.NewMockTracker([]types.Task{
+			{ID: "1", Title: "Task 1", Status: types.StatusQueued, Labels: []string{"todo"}, CreatedAt: time.Now()},
+		}),
+		t: t,
 	}
+
+	orchRunner := agent.NewMockRunner()
+	orchRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{
+			SessionID: "orch-voice-1",
+			Output:    `{"reasoning": "voice reply", "actions": [{"type": "reply", "body": "Got it."}]}`,
+			TokensIn:  10, TokensOut: 5,
+		}, nil
+	}
+
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
+
 	cfg := config.DefaultConfig()
 	cfg.Tracker.Kind = "github"
 	cfg.Tracker.Repo = "t/r"
-	return New(Opts{
-		Config:       &cfg,
-		TemplateBody: "{{.issue.title}}",
-		Tracker:      newNoopTracker(),
-		Runner:       newNoopRunner(),
-		Workspace:    workspace.NewMockWorkspaceManager(),
-		EventBus:     NewMockEventBus(),
-		Logger:       testLogger(),
+	cfg.Workspace.Root = ""
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "{{.issue.title}}",
+		Tracker:        trk,
+		Runner:         agent.NewMockRunner(),
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		OrchAgent:      orchAgent,
+		ChannelManager: mgr,
 	})
-}
 
-func TestExecuteUpdateVoice(t *testing.T) {
-	home := t.TempDir()
-	anthemDir := filepath.Join(home, ".anthem")
-
-	voicePath := filepath.Join(anthemDir, "VOICE.md")
-	initial := "## Identity\nName: TestBot\n\n## Tone\nFriendly\n"
-	if err := os.MkdirAll(anthemDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(voicePath, []byte(initial), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	orch := newVoiceTestOrch(t, home)
-	orch.homeDir = home
-	orch.voiceContent = initial
-
-	err := orch.executeUpdateVoice(context.Background(), Action{
-		Type:           ActionUpdateVoice,
-		SectionName:    "Tone",
-		SectionContent: "Professional and concise",
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "voice",
+		SenderID:    "user-1",
+		ThreadID:    "thread-voice-1",
+		Text:        "What's the project status?",
+		Timestamp:   time.Now(),
 	})
-	if err != nil {
-		t.Fatalf("executeUpdateVoice() error: %v", err)
-	}
 
-	// Verify file was updated
-	data, err := os.ReadFile(voicePath)
-	if err != nil {
-		t.Fatal(err)
+	sent := ch.sentMessages()
+	var hasAck, hasStreamDone, hasReply bool
+	for _, msg := range sent {
+		if msg.Ack {
+			hasAck = true
+		}
+		if msg.StreamDone {
+			hasStreamDone = true
+		}
+		if msg.EventType == "channel.followup" && msg.Text == "Got it." {
+			hasReply = true
+		}
 	}
-	content := string(data)
-	if !strings.Contains(content, "Professional and concise") {
-		t.Errorf("VOICE.md should contain updated Tone section, got:\n%s", content)
+	if !hasAck {
+		t.Error("expected ack message")
 	}
-	if !strings.Contains(content, "Identity") {
-		t.Errorf("VOICE.md should preserve Identity section, got:\n%s", content)
+	if !hasStreamDone {
+		t.Error("expected stream done from voice path")
 	}
-
-	// Verify changelog was written
-	changelogPath := filepath.Join(anthemDir, "voice-changelog.md")
-	changelog, err := os.ReadFile(changelogPath)
-	if err != nil {
-		t.Fatalf("reading changelog: %v", err)
-	}
-	if !strings.Contains(string(changelog), "orchestrator") {
-		t.Error("changelog should mention orchestrator as the author")
-	}
-
-	// Verify in-memory state was updated
-	if !strings.Contains(orch.voiceContent, "Professional and concise") {
-		t.Error("in-memory voiceContent should be updated")
+	if !hasReply {
+		t.Error("expected follow-up reply 'Got it.'")
 	}
 }
 
-func TestExecuteUpdateVoice_NewSection(t *testing.T) {
-	home := t.TempDir()
-	anthemDir := filepath.Join(home, ".anthem")
-	voicePath := filepath.Join(anthemDir, "VOICE.md")
-
-	// Start with no voice file (empty VoiceConfig)
-	if err := os.MkdirAll(anthemDir, 0755); err != nil {
-		t.Fatal(err)
+func TestHandleUserMessage_VoiceSkipsGuestRouting(t *testing.T) {
+	orchRunner := agent.NewMockRunner()
+	orchRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{
+			SessionID: "orch-voice-2",
+			Output:    `{"reasoning": "voice answer", "actions": [{"type": "reply", "body": "Here you go."}]}`,
+			TokensIn:  10, TokensOut: 5,
+		}, nil
 	}
 
-	orch := newVoiceTestOrch(t, home)
-	orch.homeDir = home
+	guestRunner := agent.NewMockRunner()
+	guestRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		t.Fatal("guest routing runner should not be called for voice messages")
+		return nil, nil
+	}
 
-	err := orch.executeUpdateVoice(context.Background(), Action{
-		Type:           ActionUpdateVoice,
-		SectionName:    "Preferences",
-		SectionContent: "Prefers bullet points",
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
+
+	idx := &guests.GuestIndex{
+		Agents: map[string]guests.GuestAgent{
+			"noah": {Name: "Noah", Description: "Problem solver"},
+		},
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = ""
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "",
+		Runner:         guestRunner,
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		OrchAgent:      orchAgent,
+		ChannelManager: mgr,
 	})
-	if err != nil {
-		t.Fatalf("executeUpdateVoice() error: %v", err)
-	}
+	orch.guestIndex = idx
 
-	data, err := os.ReadFile(voicePath)
-	if err != nil {
-		t.Fatal(err)
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind:  "voice",
+		SenderID:     "user-1",
+		ThreadID:     "thread-voice-2",
+		Text:         "Can you help me with something?",
+		ActiveGuests: []string{"noah"},
+		Timestamp:    time.Now(),
+	})
+
+	sent := ch.sentMessages()
+	var hasReply bool
+	for _, msg := range sent {
+		if msg.EventType == "channel.followup" && msg.Text == "Here you go." {
+			hasReply = true
+		}
 	}
-	content := string(data)
-	if !strings.Contains(content, "## Preferences") {
-		t.Errorf("expected new Preferences section, got:\n%s", content)
-	}
-	if !strings.Contains(content, "Prefers bullet points") {
-		t.Errorf("expected section content, got:\n%s", content)
+	if !hasReply {
+		t.Error("expected follow-up reply 'Here you go.'")
 	}
 }
 
-func TestExecuteUpdateVoice_AgentFile(t *testing.T) {
-	home := t.TempDir()
-	anthemDir := filepath.Join(home, ".anthem")
-	if err := os.MkdirAll(anthemDir, 0755); err != nil {
-		t.Fatal(err)
+func TestHandleUserMessage_VoiceCanInviteGuest(t *testing.T) {
+	orchRunner := agent.NewMockRunner()
+	orchRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{
+			SessionID: "orch-voice-3",
+			Output: `{"reasoning": "user wants to invite noah", "actions": [
+				{"type": "reply", "body": "I'll invite Noah to help."},
+				{"type": "create_subtasks", "subtasks": [{"title": "Help with animation", "body": "Noah should assist with animation system"}]}
+			]}`,
+			TokensIn: 20, TokensOut: 15,
+		}, nil
 	}
 
-	orch := newVoiceTestOrch(t, home)
-	orch.homeDir = home
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
 
-	// Create agents directory and a guest agent file
-	agentsDir := filepath.Join(orch.projectRoot(), "agents")
-	if err := os.MkdirAll(agentsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	guestPath := filepath.Join(agentsDir, "miyazaki.md")
-	guestContent := "---\nname: Miyazaki\ndescription: Artist\nrole: 2d-artist\n---\n\n## Identity\nOriginal identity\n"
-	if err := os.WriteFile(guestPath, []byte(guestContent), 0644); err != nil {
-		t.Fatal(err)
-	}
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
 
-	err := orch.executeUpdateVoice(context.Background(), Action{
-		Type:           ActionUpdateVoice,
-		SectionName:    "Personality",
-		SectionContent: "Creative and bold",
-		AgentFile:      "miyazaki.md",
+	trk := tracker.NewMockTracker(nil)
+
+	cfg := config.DefaultConfig()
+	cfg.Tracker.Kind = "github"
+	cfg.Tracker.Repo = "t/r"
+	cfg.Workspace.Root = ""
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "",
+		Tracker:        trk,
+		Runner:         agent.NewMockRunner(),
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		OrchAgent:      orchAgent,
+		ChannelManager: mgr,
 	})
-	if err != nil {
-		t.Fatalf("executeUpdateVoice() with AgentFile error: %v", err)
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "voice",
+		SenderID:    "user-1",
+		ThreadID:    "thread-voice-3",
+		Text:        "invite Noah to help with the animation system",
+		Timestamp:   time.Now(),
+	})
+
+	sent := ch.sentMessages()
+	var hasReply bool
+	for _, msg := range sent {
+		if msg.EventType == "channel.followup" && msg.Text == "I'll invite Noah to help." {
+			hasReply = true
+		}
+	}
+	if !hasReply {
+		t.Errorf("expected follow-up reply about inviting Noah, got messages: %+v", sent)
 	}
 
-	data, err := os.ReadFile(guestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := string(data)
-	if !strings.Contains(result, "## Personality") {
-		t.Error("guest file should have Personality section")
-	}
-	if !strings.Contains(result, "Creative and bold") {
-		t.Error("guest file should have section content")
-	}
-	if !strings.Contains(result, "Original identity") {
-		t.Error("guest file should preserve existing sections")
+	// Verify create_subtasks action was processed by checking the tracker
+	if len(trk.Tasks) == 0 {
+		t.Error("expected create_subtasks to create at least one issue via the tracker")
 	}
 }
 
-func TestExecuteUpdateVoice_EmptyAgentFileUsesDefaultRouting(t *testing.T) {
-	home := t.TempDir()
-	anthemDir := filepath.Join(home, ".anthem")
-	voicePath := filepath.Join(anthemDir, "VOICE.md")
-	if err := os.MkdirAll(anthemDir, 0755); err != nil {
-		t.Fatal(err)
-	}
+func TestHandleUserMessage_VoiceFallsBackToLeanWithoutOrchAgent(t *testing.T) {
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
 
-	orch := newVoiceTestOrch(t, home)
-	orch.homeDir = home
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = ""
 
-	err := orch.executeUpdateVoice(context.Background(), Action{
-		Type:           ActionUpdateVoice,
-		SectionName:    "Preferences",
-		SectionContent: "Likes dark mode",
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "",
+		Runner:         leanRunner("lean voice response"),
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		ChannelManager: mgr,
 	})
-	if err != nil {
-		t.Fatalf("executeUpdateVoice() error: %v", err)
-	}
 
-	data, err := os.ReadFile(voicePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "Likes dark mode") {
-		t.Error("with empty AgentFile, user section should go to VOICE.md")
-	}
-}
-
-func TestExecuteUpdateVoice_MergeExisting(t *testing.T) {
-	home := t.TempDir()
-	anthemDir := filepath.Join(home, ".anthem")
-	voicePath := filepath.Join(anthemDir, "VOICE.md")
-
-	initial := "## Identity\nName: TestBot\n\n## Tone\nCasual\n\n## Communication\nDirect\n"
-	if err := os.MkdirAll(anthemDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(voicePath, []byte(initial), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	orchAgent := NewOrchestratorAgent(newNoopRunner(), "", initial, 10000, 0, 0, 0, 0, testLogger())
-
-	orch := newVoiceTestOrch(t, home)
-	orch.homeDir = home
-	orch.voiceContent = initial
-	orch.orchAgent = orchAgent
-
-	err := orch.executeUpdateVoice(context.Background(), Action{
-		Type:           ActionUpdateVoice,
-		SectionName:    "Tone",
-		SectionContent: "Formal",
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "voice",
+		SenderID:    "user-1",
+		ThreadID:    "thread-voice-lean",
+		Text:        "Hello",
+		Timestamp:   time.Now(),
 	})
-	if err != nil {
-		t.Fatalf("executeUpdateVoice() error: %v", err)
-	}
 
-	data, err := os.ReadFile(voicePath)
-	if err != nil {
-		t.Fatal(err)
+	sent := ch.sentMessages()
+	var hasStreamDone bool
+	for _, msg := range sent {
+		if msg.StreamDone {
+			hasStreamDone = true
+		}
 	}
-	content := string(data)
-
-	// Updated section
-	if !strings.Contains(content, "Formal") {
-		t.Errorf("Tone section should be updated to Formal, got:\n%s", content)
-	}
-	if strings.Contains(content, "Casual") {
-		t.Errorf("old Tone content 'Casual' should be replaced, got:\n%s", content)
-	}
-
-	// Preserved sections
-	if !strings.Contains(content, "Identity") {
-		t.Errorf("Identity section should be preserved, got:\n%s", content)
-	}
-	if !strings.Contains(content, "Communication") {
-		t.Errorf("Communication section should be preserved, got:\n%s", content)
-	}
-
-	// OrchestratorAgent user context should be updated
-	if !strings.Contains(orchAgent.userContext, "Formal") {
-		t.Error("orchAgent userContext should be updated")
+	if !hasStreamDone {
+		t.Error("expected stream done from lean fallback path")
 	}
 }

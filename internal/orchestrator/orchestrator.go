@@ -1758,6 +1758,12 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		}
 	}
 
+	// --- Voice fast path: skip guest routing & task listing, keep orchestrator consult ---
+	if msg.ChannelKind == "voice" {
+		o.handleVoiceMessage(ctx, msg, model)
+		return
+	}
+
 	// --- Respec flow: intercept before guest dispatch ---
 	if strings.Contains(msg.Text, "[system:respec") || o.hasActiveRespec(msg.ChannelKind) {
 		o.handleRespecMessage(ctx, msg, model)
@@ -2034,6 +2040,91 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 
 	o.finalizeGuestRound(ctx, msg, guestWg)
 	o.recordAudit(ctx, "channel.user_message", "", strPtr("handle_user_message"))
+}
+
+// handleVoiceMessage is an optimized path for voice-channel messages. It
+// skips guest routing (routeToGuests LLM call) and task listing (tracker
+// ListActive GitHub API call) but preserves the full orchestrator consult
+// so the user can still issue commands like "invite Noah" or "tell Forge
+// to scaffold a project".
+func (o *Orchestrator) handleVoiceMessage(ctx context.Context, msg channel.IncomingMessage, model string) {
+	o.logger.Info("handling voice message (fast path)", "sender", msg.SenderID, "text_len", len(msg.Text))
+
+	if o.orchAgent == nil {
+		o.handleLeanMessage(ctx, msg, model)
+		return
+	}
+
+	channelKey := msg.ChannelKind
+	if o.convoBuf != nil {
+		o.convoBuf.RecordUserMessage(channelKey, msg.Text)
+	}
+
+	snap := StateSnapshot{
+		UserMessage:   buildUserMessageContext(msg),
+		SourceChannel: channelKey,
+		Budget: BudgetSummary{
+			TotalSpentUSD: o.costTracker.TotalCost(),
+		},
+	}
+	if len(msg.ActiveGuests) > 0 && o.guestIndex != nil {
+		snap.ActiveGuestsSummary = o.formatGuestSummary(msg.ActiveGuests)
+	}
+	if o.sharedCtx != nil {
+		snap.SharedContext = o.sharedCtx.Get(channelKey)
+	}
+	if o.convoBuf != nil {
+		snap.ConversationHistory = FormatHistory(o.convoBuf.History(channelKey))
+	}
+
+	onStream := func(delta string) {
+		if o.channelMgr != nil {
+			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+				StreamDelta: delta,
+				ThreadID:    msg.ThreadID,
+			})
+		}
+	}
+	actions, err := o.orchAgent.ConsultWithRepairStreaming(ctx, snap, onStream)
+	o.recordOrchCost()
+
+	if o.channelMgr != nil {
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			StreamDone: true,
+			ThreadID:   msg.ThreadID,
+		})
+	}
+
+	if err != nil {
+		o.logger.Warn("voice consult failed", "error", err)
+		o.sendFollowUp(ctx, msg, "I couldn't process your message.")
+		return
+	}
+	if actions == nil {
+		o.sendFollowUp(ctx, msg, "I couldn't understand your request. Please try again.")
+		return
+	}
+
+	orchReplyText := ""
+	for i := range actions {
+		if actions[i].Type == ActionReply && o.channelMgr != nil {
+			o.sendFollowUp(ctx, msg, actions[i].Body)
+			orchReplyText += actions[i].Body
+		}
+	}
+	if o.convoBuf != nil && orchReplyText != "" {
+		o.convoBuf.RecordResponse(channelKey, o.projectSlug(), "", orchReplyText)
+	}
+
+	var otherActions []Action
+	for _, a := range actions {
+		if a.Type != ActionReply && a.Type != ActionDisplay {
+			otherActions = append(otherActions, a)
+		}
+	}
+	o.executeActions(ctx, nil, otherActions)
+
+	o.recordAudit(ctx, "channel.voice_message", "", strPtr("handle_voice_message"))
 }
 
 // sendFollowUp sends a follow-up message after the initial protocol ack.
