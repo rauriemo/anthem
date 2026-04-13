@@ -847,6 +847,145 @@ func TestContentBoundingBox_AllTransparent(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// StitchSpritesheet -- write ordering and resilience
+// ---------------------------------------------------------------------------
+
+func TestStitchSpritesheet_JSONWrittenBeforePNG(t *testing.T) {
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+	writePNGToPath(filepath.Join(frameDir, "frame_0001.png"), 16, 16)
+
+	videoPath := filepath.Join(dir, "anim.mp4")
+	_ = os.WriteFile(videoPath, []byte("fake"), 0644)
+
+	metaPath := filepath.Join(dir, "anim.spritesheet.json")
+	sheetPath := filepath.Join(dir, "anim.png")
+
+	state := PipelineState{"frame_dir": frameDir, "fps": "8"}
+	proc := &StitchSpritesheetProcessor{}
+	r := proc.Run(videoPath, nil, state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	// Both files must exist after a successful run.
+	if _, err := os.Stat(metaPath); err != nil {
+		t.Fatalf("metadata sidecar not created: %v", err)
+	}
+	if _, err := os.Stat(sheetPath); err != nil {
+		t.Fatalf("sprite sheet PNG not created: %v", err)
+	}
+
+	// Verify the metadata timestamps to confirm JSON was written first.
+	metaInfo, _ := os.Stat(metaPath)
+	sheetInfo, _ := os.Stat(sheetPath)
+	if sheetInfo.ModTime().Before(metaInfo.ModTime()) {
+		t.Error("sprite sheet PNG was modified before metadata JSON — write order is wrong")
+	}
+}
+
+func TestStitchSpritesheet_FrameDirCleanedOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+	writePNGToPath(filepath.Join(frameDir, "frame_0001.png"), 32, 32)
+	writePNGToPath(filepath.Join(frameDir, "frame_0002.png"), 64, 64)
+
+	state := PipelineState{"frame_dir": frameDir}
+	proc := &StitchSpritesheetProcessor{}
+	r := proc.Run(filepath.Join(dir, "test.mp4"), nil, state, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Fatalf("Status = %q, want %q", r.Status, PostProcessFailed)
+	}
+
+	if _, err := os.Stat(frameDir); !os.IsNotExist(err) {
+		t.Error("frame dir should be cleaned up even when stitch fails")
+	}
+}
+
+func TestStitchSpritesheet_OrphanedJSONCleanup(t *testing.T) {
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+	writePNGToPath(filepath.Join(frameDir, "frame_0001.png"), 16, 16)
+
+	videoPath := filepath.Join(dir, "anim.mp4")
+	_ = os.WriteFile(videoPath, []byte("fake"), 0644)
+
+	// Make the output directory read-only so the PNG write fails after
+	// the metadata JSON has already been written.
+	outputDir := filepath.Join(dir, "output")
+	_ = os.Mkdir(outputDir, 0755)
+	fakeVideo := filepath.Join(outputDir, "anim.mp4")
+	_ = os.WriteFile(fakeVideo, []byte("fake"), 0644)
+
+	metaPath := filepath.Join(outputDir, "anim.spritesheet.json")
+	sheetPath := filepath.Join(outputDir, "anim.png")
+
+	// Pre-create the sheet path as a directory to make encodePNG fail
+	// (can't create a file where a directory exists).
+	_ = os.Mkdir(sheetPath, 0755)
+
+	state := PipelineState{"frame_dir": frameDir, "fps": "8"}
+	proc := &StitchSpritesheetProcessor{}
+	r := proc.Run(fakeVideo, nil, state, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Fatalf("Status = %q, want %q", r.Status, PostProcessFailed)
+	}
+
+	if _, err := os.Stat(metaPath); !os.IsNotExist(err) {
+		t.Error("orphaned metadata JSON should be removed when PNG write fails")
+	}
+}
+
+func TestStitchSpritesheet_BestSpeedCompression(t *testing.T) {
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+
+	for i := 1; i <= 8; i++ {
+		writePNGToPath(filepath.Join(frameDir, fmt.Sprintf("frame_%04d.png", i)), 64, 64)
+	}
+
+	videoPath := filepath.Join(dir, "test-anim.mp4")
+	_ = os.WriteFile(videoPath, []byte("fake"), 0644)
+
+	state := PipelineState{"frame_dir": frameDir, "fps": "12"}
+	proc := &StitchSpritesheetProcessor{}
+	r := proc.Run(videoPath, map[string]string{"columns": "4"}, state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	sheetPath := filepath.Join(dir, "test-anim.png")
+	img, err := decodePNG(sheetPath)
+	if err != nil {
+		t.Fatalf("decoding sprite sheet: %v", err)
+	}
+	b := img.Bounds()
+	if b.Dx() != 256 || b.Dy() != 128 {
+		t.Errorf("sheet dimensions = %dx%d, want 256x128", b.Dx(), b.Dy())
+	}
+
+	metaPath := filepath.Join(dir, "test-anim.spritesheet.json")
+	metaData, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("reading metadata: %v", err)
+	}
+	var meta SpritesheetMeta
+	if err := json.Unmarshal(metaData, &meta); err != nil {
+		t.Fatalf("invalid metadata JSON: %v", err)
+	}
+	if meta.FrameCount != 8 || meta.Columns != 4 || meta.Rows != 2 {
+		t.Errorf("meta = %+v, want 8 frames / 4 cols / 2 rows", meta)
+	}
+	if meta.FPS != 12 {
+		t.Errorf("meta.FPS = %d, want 12", meta.FPS)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
