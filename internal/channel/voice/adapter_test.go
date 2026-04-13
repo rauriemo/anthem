@@ -555,13 +555,16 @@ func TestAdapter_FastLLM_BargeInCancels(t *testing.T) {
 		w.WriteHeader(200)
 
 		if n == 1 {
-			// Slow first response -- will be cancelled by barge-in
+			// Slow first response -- will be canceled by barge-in
 			_, _ = w.Write([]byte(sse(
 				`{"type":"message_start","message":{"id":"msg_slow"}}`,
 				`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Starting a long. "}}`,
 			)))
-			w.(http.Flusher).Flush()
+			f, _ := w.(http.Flusher)
+			if f != nil {
+				f.Flush()
+			}
 			<-r.Context().Done()
 			return
 		}
@@ -657,7 +660,10 @@ func TestAdapter_FastLLM_ConcurrentTranscriptCancelsPrevious(t *testing.T) {
 				`{"type":"message_start","message":{"id":"msg_1"}}`,
 				`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 			)))
-			w.(http.Flusher).Flush()
+			f, _ := w.(http.Flusher)
+			if f != nil {
+				f.Flush()
+			}
 			<-r.Context().Done()
 			return
 		}

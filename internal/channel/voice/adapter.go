@@ -27,26 +27,26 @@ type Adapter struct {
 	sentBuf  *SentenceBuffer
 	voiceID  string // ElevenLabs voice_id for the orchestrator
 
-	fastLLM  *FastLLM        // nil -> fallback to orchestrator via incoming channel
-	cmdBridge *CommandBridge  // nil when fastLLM is nil
+	fastLLM   *FastLLM       // nil -> fallback to orchestrator via incoming channel
+	cmdBridge *CommandBridge // nil when fastLLM is nil
 
-	mu           sync.Mutex
-	cancel       context.CancelFunc
-	started      bool
-	closed       bool
-	threadID     string             // guarded by mu
-	llmCancel    context.CancelFunc // cancels in-flight fastLLM request
+	mu        sync.Mutex
+	cancel    context.CancelFunc
+	started   bool
+	closed    bool
+	threadID  string             // guarded by mu
+	llmCancel context.CancelFunc // cancels in-flight fastLLM request
 }
 
 // AdapterOpts configures a new Adapter.
 type AdapterOpts struct {
-	STT              StreamingSTT
-	TTS              StreamingTTS
-	Transport        *LiveKitTransport // nil for tests / no LiveKit
+	STT                 StreamingSTT
+	TTS                 StreamingTTS
+	Transport           *LiveKitTransport // nil for tests / no LiveKit
 	OrchestratorVoiceID string
-	FastLLM          *FastLLM          // nil -> fallback to orchestrator path
-	OnCommand        CommandCallback   // optional; invoked on tool_use commands
-	Logger           *slog.Logger
+	FastLLM             *FastLLM        // nil -> fallback to orchestrator path
+	OnCommand           CommandCallback // optional; invoked on tool_use commands
+	Logger              *slog.Logger
 }
 
 // NewAdapter creates a voice channel adapter. The STT and TTS providers are

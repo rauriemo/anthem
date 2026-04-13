@@ -259,40 +259,40 @@ func runCmd() *cobra.Command {
 						if orchVoiceID != "" {
 							logger.Info("orchestrator voice_id loaded", "voice_id", orchVoiceID)
 						}
-					stt := voicech.NewDeepgramSTT(vc.DeepgramAPIKey, logger)
-					tts := voicech.NewElevenLabsTTS(vc.ElevenLabsAPIKey, logger)
-					transport := voicech.NewLiveKitTransport(
-						vc.LiveKitURL, vc.LiveKitAPIKey, vc.LiveKitAPISecret,
-						roomName, "anthem-gateway", stt, tts, logger,
-					)
-					var fastLLM *voicech.FastLLM
-					if vc.AnthropicAPIKey != "" {
-						systemPrompt := fmt.Sprintf(
-							"You are a voice assistant for the %s project. Be concise -- this is spoken aloud. "+
-								"You can invite specialist agents, delegate tasks, or check status using the provided tools. "+
-								"Keep replies under 2 sentences unless asked for detail.",
-							filepath.Base(projectDir),
+						stt := voicech.NewDeepgramSTT(vc.DeepgramAPIKey, logger)
+						tts := voicech.NewElevenLabsTTS(vc.ElevenLabsAPIKey, logger)
+						transport := voicech.NewLiveKitTransport(
+							vc.LiveKitURL, vc.LiveKitAPIKey, vc.LiveKitAPISecret,
+							roomName, "anthem-gateway", stt, tts, logger,
 						)
-						fastLLM = voicech.NewFastLLM(voicech.FastLLMOpts{
-							APIKey:       vc.AnthropicAPIKey,
-							SystemPrompt: systemPrompt,
-							Tools:        voicech.VoiceToolDefs(),
-							Logger:       logger,
+						var fastLLM *voicech.FastLLM
+						if vc.AnthropicAPIKey != "" {
+							systemPrompt := fmt.Sprintf(
+								"You are a voice assistant for the %s project. Be concise -- this is spoken aloud. "+
+									"You can invite specialist agents, delegate tasks, or check status using the provided tools. "+
+									"Keep replies under 2 sentences unless asked for detail.",
+								filepath.Base(projectDir),
+							)
+							fastLLM = voicech.NewFastLLM(voicech.FastLLMOpts{
+								APIKey:       vc.AnthropicAPIKey,
+								SystemPrompt: systemPrompt,
+								Tools:        voicech.VoiceToolDefs(),
+								Logger:       logger,
+							})
+							logger.Info("voice fast-LLM enabled (direct Anthropic API)")
+						} else {
+							logger.Warn("anthropic_api_key not set, voice will use orchestrator fallback (higher latency)")
+						}
+						voiceAdapter := voicech.NewAdapterWithOpts(voicech.AdapterOpts{
+							STT:                 stt,
+							TTS:                 tts,
+							Transport:           transport,
+							OrchestratorVoiceID: orchVoiceID,
+							FastLLM:             fastLLM,
+							Logger:              logger,
 						})
-						logger.Info("voice fast-LLM enabled (direct Anthropic API)")
-					} else {
-						logger.Warn("anthropic_api_key not set, voice will use orchestrator fallback (higher latency)")
-					}
-					voiceAdapter := voicech.NewAdapterWithOpts(voicech.AdapterOpts{
-						STT:                 stt,
-						TTS:                 tts,
-						Transport:           transport,
-						OrchestratorVoiceID: orchVoiceID,
-						FastLLM:             fastLLM,
-						Logger:              logger,
-					})
-					chanManager.Register(voiceAdapter)
-					logger.Info("registered voice channel", "room", roomName)
+						chanManager.Register(voiceAdapter)
+						logger.Info("registered voice channel", "room", roomName)
 					default:
 						logger.Warn("unknown channel kind, skipping", "kind", chCfg.Kind)
 					}
