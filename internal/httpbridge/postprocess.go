@@ -436,6 +436,8 @@ func (p *StitchSpritesheetProcessor) Run(artifactPath string, cfg map[string]str
 		return PostProcessResult{Op: "stitch_spritesheet", Status: PostProcessSkipped, Message: "no frame_dir in pipeline state"}
 	}
 
+	defer os.RemoveAll(frameDir)
+
 	columns := 4
 	if s := cfg["columns"]; s != "" {
 		if v, err := strconv.Atoi(s); err == nil && v > 0 {
@@ -488,10 +490,6 @@ func (p *StitchSpritesheetProcessor) Run(artifactPath string, cfg map[string]str
 	sheetPath := filepath.Join(dir, stem+".png")
 	metaPath := filepath.Join(dir, stem+".spritesheet.json")
 
-	if err := encodePNG(sheetPath, sheet); err != nil {
-		return PostProcessResult{Op: "stitch_spritesheet", Status: PostProcessFailed, Message: fmt.Sprintf("writing sprite sheet: %v", err)}
-	}
-
 	fps := 8
 	if s := state["fps"]; s != "" {
 		if v, err := strconv.Atoi(s); err == nil {
@@ -513,10 +511,14 @@ func (p *StitchSpritesheetProcessor) Run(artifactPath string, cfg map[string]str
 		return PostProcessResult{Op: "stitch_spritesheet", Status: PostProcessFailed, Message: fmt.Sprintf("writing metadata: %v", err)}
 	}
 
+	if err := encodePNG(sheetPath, sheet); err != nil {
+		os.Remove(metaPath)
+		return PostProcessResult{Op: "stitch_spritesheet", Status: PostProcessFailed, Message: fmt.Sprintf("writing sprite sheet: %v", err)}
+	}
+
 	if !keepVideo {
 		os.Remove(artifactPath)
 	}
-	os.RemoveAll(frameDir)
 
 	state["spritesheet_path"] = sheetPath
 	state["metadata_path"] = metaPath
@@ -601,7 +603,8 @@ func encodePNG(path string, img image.Image) error {
 		return err
 	}
 	defer f.Close()
-	return png.Encode(f, img)
+	enc := &png.Encoder{CompressionLevel: png.BestSpeed}
+	return enc.Encode(f, img)
 }
 
 // listPNGs returns sorted .png file paths from a directory.
