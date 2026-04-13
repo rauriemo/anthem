@@ -154,12 +154,30 @@ func TestAdapter_SendOrchestratorDelta(t *testing.T) {
 	}
 }
 
-func TestAdapter_SendGuestDeltaSilenced(t *testing.T) {
+func TestAdapter_SendGuestDeltaSwitchesVoice(t *testing.T) {
 	t.Parallel()
-	a, _, tts := startTestAdapter(t)
+	stt := NewMockSTT()
+	tts := NewMockTTS()
+	a := NewAdapterWithOpts(AdapterOpts{
+		STT: stt,
+		TTS: tts,
+		VoiceConfigs: map[string]string{
+			"orchestrator": "orch-voice",
+			"eiji":         "eiji-voice",
+		},
+		OrchestratorVoiceID: "orch-voice",
+		Logger:              slog.Default(),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := a.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	a.floor.forceState(CommitPending)
 
 	msg := channel.OutgoingMessage{
-		StreamDelta: "Guest speech",
+		StreamDelta: "Guest speech. ",
 		GuestID:     "eiji",
 	}
 	if err := a.Send(context.Background(), msg); err != nil {
@@ -167,8 +185,90 @@ func TestAdapter_SendGuestDeltaSilenced(t *testing.T) {
 	}
 
 	time.Sleep(10 * time.Millisecond)
-	if len(tts.TextCalls()) != 0 {
-		t.Error("guest delta should NOT reach TTS in orchestrator mode")
+	calls := tts.SwitchVoiceCalls()
+	if len(calls) != 1 || calls[0] != "eiji-voice" {
+		t.Errorf("SwitchVoice calls = %v, want [eiji-voice]", calls)
+	}
+	if len(tts.TextCalls()) == 0 {
+		t.Error("guest delta should reach TTS")
+	}
+}
+
+func TestAdapter_SendGuestDeltaNoConfigKeepsCurrentVoice(t *testing.T) {
+	t.Parallel()
+	stt := NewMockSTT()
+	tts := NewMockTTS()
+	a := NewAdapterWithOpts(AdapterOpts{
+		STT:                 stt,
+		TTS:                 tts,
+		OrchestratorVoiceID: "orch-voice",
+		Logger:              slog.Default(),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := a.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	a.floor.forceState(CommitPending)
+
+	msg := channel.OutgoingMessage{
+		StreamDelta: "Unknown agent speech. ",
+		GuestID:     "unknown-agent",
+	}
+	if err := a.Send(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	if len(tts.SwitchVoiceCalls()) != 0 {
+		t.Error("no SwitchVoice expected for unconfigured guest")
+	}
+	if len(tts.TextCalls()) == 0 {
+		t.Error("guest delta should still reach TTS even without voice config")
+	}
+}
+
+func TestAdapter_OrchestratorAfterGuestSwitchesBack(t *testing.T) {
+	t.Parallel()
+	stt := NewMockSTT()
+	tts := NewMockTTS()
+	a := NewAdapterWithOpts(AdapterOpts{
+		STT: stt,
+		TTS: tts,
+		VoiceConfigs: map[string]string{
+			"orchestrator": "orch-voice",
+			"walt":         "walt-voice",
+		},
+		OrchestratorVoiceID: "orch-voice",
+		Logger:              slog.Default(),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := a.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Guest turn
+	a.floor.forceState(CommitPending)
+	_ = a.Send(context.Background(), channel.OutgoingMessage{StreamDelta: "Walt here. ", GuestID: "walt"})
+	_ = a.Send(context.Background(), channel.OutgoingMessage{StreamDone: true, GuestID: "walt"})
+	time.Sleep(10 * time.Millisecond)
+
+	// Orchestrator turn
+	a.floor.forceState(CommitPending)
+	_ = a.Send(context.Background(), channel.OutgoingMessage{StreamDelta: "Back to orch. "})
+	time.Sleep(10 * time.Millisecond)
+
+	calls := tts.SwitchVoiceCalls()
+	if len(calls) < 2 {
+		t.Fatalf("expected at least 2 SwitchVoice calls, got %v", calls)
+	}
+	if calls[0] != "walt-voice" {
+		t.Errorf("first switch = %q, want walt-voice", calls[0])
+	}
+	if calls[1] != "orch-voice" {
+		t.Errorf("second switch = %q, want orch-voice", calls[1])
 	}
 }
 
@@ -295,15 +395,19 @@ func TestAdapter_SendDeltaFromIdle(t *testing.T) {
 	a, _, tts := startTestAdapter(t)
 
 	msg := channel.OutgoingMessage{
-		StreamDelta: "Early response. ",
+		StreamDelta: "Text chat response. ",
 	}
 	if err := a.Send(context.Background(), msg); err != nil {
 		t.Fatal(err)
 	}
 
 	time.Sleep(10 * time.Millisecond)
-	if len(tts.TextCalls()) != 0 {
-		t.Error("delta from Idle should be discarded (no valid Idle->OrchestratorSpeaking transition)")
+	calls := tts.TextCalls()
+	if len(calls) == 0 {
+		t.Error("delta from Idle should be spoken (text-chat initiated response)")
+	}
+	if a.floor.State() != OrchestratorSpeaking {
+		t.Errorf("floor state = %v, want OrchestratorSpeaking", a.floor.State())
 	}
 }
 

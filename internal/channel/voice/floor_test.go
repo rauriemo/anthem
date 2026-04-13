@@ -22,8 +22,9 @@ func TestFloorController_OrchestratorMode_ValidTransitions(t *testing.T) {
 		{"orchestrator speaking to barge-in", OrchestratorSpeaking, BargeInAbort, "vad_onset", false},
 		{"barge-in to user speaking", BargeInAbort, UserSpeaking, "abort_complete", false},
 
+		{"idle to orchestrator speaking", Idle, OrchestratorSpeaking, "text_chat_response", false},
+
 		// Invalid transitions
-		{"idle to orchestrator speaking", Idle, OrchestratorSpeaking, "bug", true},
 		{"idle to commit pending", Idle, CommitPending, "bug", true},
 		{"idle to barge-in", Idle, BargeInAbort, "bug", true},
 		{"commit to idle", CommitPending, Idle, "bug", true},
