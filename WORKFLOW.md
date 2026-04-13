@@ -56,7 +56,6 @@ channels:
       - task.completed
       - task.failed
       - maintenance.suggested
-
 server:
   port: 8080
 ---
