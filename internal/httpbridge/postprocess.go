@@ -205,32 +205,46 @@ func (p *RemoveBackgroundProcessor) runBatch(frameDir, rembgPath, model string, 
 		return PostProcessResult{Op: "remove_background", Status: PostProcessSkipped, Message: "no frames in frame_dir"}
 	}
 
-	for _, framePath := range frames {
-		tmpFile, err := os.CreateTemp(frameDir, "rembg-*.png")
-		if err != nil {
-			return PostProcessResult{Op: "remove_background", Status: PostProcessFailed, Message: fmt.Sprintf("creating temp file: %v", err)}
-		}
-		tmpPath := tmpFile.Name()
-		tmpFile.Close()
+	outDir, err := os.MkdirTemp("", "rembg-out-*")
+	if err != nil {
+		return PostProcessResult{Op: "remove_background", Status: PostProcessFailed, Message: fmt.Sprintf("creating output dir: %v", err)}
+	}
+	defer os.RemoveAll(outDir)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		cmd := cmdRunner(ctx, rembgPath, "i", "-m", model, framePath, tmpPath)
-		output, err := cmd.CombinedOutput()
-		cancel()
-		if err != nil {
-			os.Remove(tmpPath)
-			return PostProcessResult{Op: "remove_background", Status: PostProcessFailed, Message: fmt.Sprintf("rembg failed on %s: %v: %s", filepath.Base(framePath), err, truncateBytes(output, 200))}
+	timeout := time.Duration(len(frames)) * 30 * time.Second
+	if timeout < 2*time.Minute {
+		timeout = 2 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	log.Info("rembg batch start", "frames", len(frames), "model", model, "timeout", timeout)
+	cmd := cmdRunner(ctx, rembgPath, "p", "-m", model, frameDir, outDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return PostProcessResult{Op: "remove_background", Status: PostProcessFailed, Message: fmt.Sprintf("rembg batch failed: %v: %s", err, truncateBytes(output, 500))}
+	}
+
+	processed := 0
+	for _, framePath := range frames {
+		outPath := filepath.Join(outDir, filepath.Base(framePath))
+		if _, err := os.Stat(outPath); err != nil {
+			continue
 		}
-		if err := os.Rename(tmpPath, framePath); err != nil {
-			os.Remove(tmpPath)
-			return PostProcessResult{Op: "remove_background", Status: PostProcessFailed, Message: fmt.Sprintf("replacing frame: %v", err)}
+		if err := copyFile(outPath, framePath); err != nil {
+			return PostProcessResult{Op: "remove_background", Status: PostProcessFailed, Message: fmt.Sprintf("replacing %s: %v", filepath.Base(framePath), err)}
 		}
+		processed++
+	}
+
+	if processed == 0 {
+		return PostProcessResult{Op: "remove_background", Status: PostProcessFailed, Message: "rembg produced no output files"}
 	}
 
 	return PostProcessResult{
 		Op:      "remove_background",
 		Status:  PostProcessApplied,
-		Message: fmt.Sprintf("%s; %d frames processed", model, len(frames)),
+		Message: fmt.Sprintf("%s; %d frames processed (batch)", model, processed),
 	}
 }
 
@@ -321,6 +335,13 @@ func (p *NormalizeFramesProcessor) Run(artifactPath string, cfg map[string]strin
 		}
 	}
 
+	alphaThreshold := defaultAlphaThreshold
+	if s := cfg["alpha_threshold"]; s != "" {
+		if v, err := strconv.ParseUint(s, 10, 32); err == nil {
+			alphaThreshold = uint32(v)
+		}
+	}
+
 	frames, err := listPNGs(frameDir)
 	if err != nil || len(frames) == 0 {
 		return PostProcessResult{Op: "normalize_frames", Status: PostProcessSkipped, Message: "no frames to normalize"}
@@ -340,7 +361,10 @@ func (p *NormalizeFramesProcessor) Run(artifactPath string, cfg map[string]strin
 		if err != nil {
 			return PostProcessResult{Op: "normalize_frames", Status: PostProcessFailed, Message: fmt.Sprintf("decoding %s: %v", filepath.Base(path), err)}
 		}
-		bbox := contentBoundingBox(img)
+		if nrgba, ok := img.(*image.NRGBA); ok {
+			floorAlpha(nrgba, alphaThreshold)
+		}
+		bbox := contentBoundingBox(img, alphaThreshold)
 		if first {
 			unionBBox = bbox
 			first = false
@@ -379,8 +403,10 @@ func (p *NormalizeFramesProcessor) Run(artifactPath string, cfg map[string]strin
 	}
 }
 
-// contentBoundingBox returns the tightest rectangle containing all non-fully-transparent pixels.
-func contentBoundingBox(img image.Image) image.Rectangle {
+// contentBoundingBox returns the tightest rectangle containing all pixels
+// whose alpha exceeds alphaThreshold (uint32 scale, 0–0xFFFF).
+// A threshold of 0 reproduces the legacy "any non-zero alpha" behavior.
+func contentBoundingBox(img image.Image, alphaThreshold uint32) image.Rectangle {
 	b := img.Bounds()
 	minX, minY := b.Max.X, b.Max.Y
 	maxX, maxY := b.Min.X, b.Min.Y
@@ -388,7 +414,7 @@ func contentBoundingBox(img image.Image) image.Rectangle {
 	for y := b.Min.Y; y < b.Max.Y; y++ {
 		for x := b.Min.X; x < b.Max.X; x++ {
 			_, _, _, a := img.At(x, y).RGBA()
-			if a > 0 {
+			if a > alphaThreshold {
 				if x < minX {
 					minX = x
 				}
@@ -409,6 +435,26 @@ func contentBoundingBox(img image.Image) image.Rectangle {
 		return image.Rectangle{}
 	}
 	return image.Rect(minX, minY, maxX+1, maxY+1)
+}
+
+// defaultAlphaThreshold is ~6% opacity (0x1000 / 0xFFFF). Pixels at or below
+// this level are treated as rembg residue noise rather than real content.
+const defaultAlphaThreshold uint32 = 0x1000
+
+// floorAlpha sets the alpha channel to 0 for every pixel whose alpha is
+// non-zero but at or below the given threshold (uint32 scale). This removes
+// near-invisible rembg halos that cause faded-frame artifacts in sprite sheets.
+func floorAlpha(img *image.NRGBA, threshold uint32) {
+	pix := img.Pix
+	for i := 3; i < len(pix); i += 4 {
+		a8 := pix[i]
+		if a8 == 0 {
+			continue
+		}
+		if uint32(a8)*0x101 <= threshold {
+			pix[i] = 0
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -621,6 +667,14 @@ func listPNGs(dir string) ([]string, error) {
 	}
 	sort.Strings(paths)
 	return paths, nil
+}
+
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0644)
 }
 
 func truncateBytes(b []byte, max int) string {

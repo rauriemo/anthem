@@ -638,15 +638,29 @@ func handleAsyncArtifactDownload(cfg guests.HTTPToolConfig, artifactURI string, 
 	}
 
 	msg := fmt.Sprintf("Saved %s (%d bytes) to %s", cfg.ResponseArtifact.Type, len(data), savePath)
-	slog.Default().Info("handleAsyncArtifactDownload", "postProcessOps", len(cfg.ResponseArtifact.PostProcess), "savePath", savePath)
 	if len(cfg.ResponseArtifact.PostProcess) > 0 {
-		results, state := RunPostProcess(cfg.ResponseArtifact.PostProcess, savePath, slog.Default())
+		ppLog := postProcessFileLogger(savePath)
+		ppLog.Info("post-process pipeline starting", "ops", len(cfg.ResponseArtifact.PostProcess), "artifact", savePath)
+		results, state := RunPostProcess(cfg.ResponseArtifact.PostProcess, savePath, ppLog)
 		if sp := state["spritesheet_path"]; sp != "" {
 			msg = fmt.Sprintf("Saved sprite sheet image/png to %s (from %s)", sp, savePath)
 		}
+		ppLog.Info("post-process pipeline finished", "results", FormatResults("", results))
 		msg = FormatResults(msg, results)
 	}
 	return msg, nil
+}
+
+// postProcessFileLogger creates an slog.Logger that writes to a .postprocess.log
+// file alongside the artifact. Falls back to the default logger on error.
+func postProcessFileLogger(artifactPath string) *slog.Logger {
+	logPath := artifactPath + ".postprocess.log"
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		slog.Default().Warn("could not create post-process log file", "path", logPath, "err", err)
+		return slog.Default()
+	}
+	return slog.New(slog.NewTextHandler(io.MultiWriter(f, os.Stderr), &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
 func truncate(s string, max int) string {

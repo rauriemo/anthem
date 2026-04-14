@@ -280,8 +280,9 @@ func TestRemoveBackground_BatchMode(t *testing.T) {
 	frameDir := filepath.Join(dir, "frames")
 	_ = os.Mkdir(frameDir, 0755)
 
-	for i := 1; i <= 3; i++ {
-		writePNG(t, filepath.Join(frameDir, fmt.Sprintf("frame_%04d.png", i)), false)
+	frameNames := []string{"frame_0001.png", "frame_0002.png", "frame_0003.png"}
+	for _, name := range frameNames {
+		writePNG(t, filepath.Join(frameDir, name), false)
 	}
 	transparentSrc := filepath.Join(dir, "transparent_src.png")
 	writePNG(t, transparentSrc, true)
@@ -291,7 +292,11 @@ func TestRemoveBackground_BatchMode(t *testing.T) {
 		LookPath: func(string) (string, error) { return "rembg", nil },
 		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
 			callCount++
-			return mockCmdRunner(transparentSrc, false)(ctx, name, args...)
+			outDir := args[len(args)-1]
+			for _, fn := range frameNames {
+				_ = copyFile(transparentSrc, filepath.Join(outDir, fn))
+			}
+			return noopCmd(ctx)
 		},
 	}
 
@@ -300,11 +305,14 @@ func TestRemoveBackground_BatchMode(t *testing.T) {
 	if r.Status != PostProcessApplied {
 		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
 	}
-	if callCount != 3 {
-		t.Errorf("expected 3 rembg calls, got %d", callCount)
+	if callCount != 1 {
+		t.Errorf("expected 1 rembg batch call, got %d", callCount)
 	}
 	if !strings.Contains(r.Message, "3 frames") {
 		t.Errorf("Message = %q, should mention frame count", r.Message)
+	}
+	if !strings.Contains(r.Message, "batch") {
+		t.Errorf("Message = %q, should mention batch mode", r.Message)
 	}
 }
 
@@ -320,6 +328,50 @@ func TestRemoveBackground_BatchNoFrames(t *testing.T) {
 	r := proc.Run(filepath.Join(dir, "video.mp4"), nil, state, slog.Default())
 	if r.Status != PostProcessSkipped {
 		t.Errorf("Status = %q, want %q", r.Status, PostProcessSkipped)
+	}
+}
+
+func TestRemoveBackground_BatchFails(t *testing.T) {
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+	writePNG(t, filepath.Join(frameDir, "frame_0001.png"), false)
+
+	proc := &RemoveBackgroundProcessor{
+		LookPath: func(string) (string, error) { return "rembg", nil },
+		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			return failCmd(ctx)
+		},
+	}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run(filepath.Join(dir, "video.mp4"), nil, state, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Errorf("Status = %q, want %q", r.Status, PostProcessFailed)
+	}
+	if !strings.Contains(r.Message, "rembg batch failed") {
+		t.Errorf("Message = %q, should mention batch failure", r.Message)
+	}
+}
+
+func TestRemoveBackground_BatchNoOutput(t *testing.T) {
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+	writePNG(t, filepath.Join(frameDir, "frame_0001.png"), false)
+
+	proc := &RemoveBackgroundProcessor{
+		LookPath: func(string) (string, error) { return "rembg", nil },
+		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			return noopCmd(ctx)
+		},
+	}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run(filepath.Join(dir, "video.mp4"), nil, state, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Errorf("Status = %q, want %q", r.Status, PostProcessFailed)
+	}
+	if !strings.Contains(r.Message, "no output") {
+		t.Errorf("Message = %q, should mention no output", r.Message)
 	}
 }
 
@@ -832,7 +884,7 @@ func TestContentBoundingBox(t *testing.T) {
 			img.SetNRGBA(x, y, color.NRGBA{R: 255, A: 255})
 		}
 	}
-	bbox := contentBoundingBox(img)
+	bbox := contentBoundingBox(img, 0)
 	if bbox.Min.X != 3 || bbox.Min.Y != 5 || bbox.Max.X != 17 || bbox.Max.Y != 15 {
 		t.Errorf("bbox = %v, want (3,5)-(17,15)", bbox)
 	}
@@ -840,9 +892,186 @@ func TestContentBoundingBox(t *testing.T) {
 
 func TestContentBoundingBox_AllTransparent(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(0, 0, 10, 10))
-	bbox := contentBoundingBox(img)
+	bbox := contentBoundingBox(img, 0)
 	if !bbox.Empty() {
 		t.Errorf("expected empty bbox for all-transparent image, got %v", bbox)
+	}
+}
+
+func TestContentBoundingBox_AlphaThreshold(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 20, 20))
+	// Ghost pixels at (0,0)-(3,3) with very low alpha
+	for y := 0; y < 3; y++ {
+		for x := 0; x < 3; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 2})
+		}
+	}
+	// Real content at (5,5)-(10,10)
+	for y := 5; y < 10; y++ {
+		for x := 5; x < 10; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 255})
+		}
+	}
+
+	bbox := contentBoundingBox(img, 0x1000)
+	if bbox.Min.X != 5 || bbox.Min.Y != 5 || bbox.Max.X != 10 || bbox.Max.Y != 10 {
+		t.Errorf("bbox = %v, want (5,5)-(10,10) — ghost pixels should be excluded", bbox)
+	}
+}
+
+func TestContentBoundingBox_ZeroThreshold(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 20, 20))
+	for y := 0; y < 3; y++ {
+		for x := 0; x < 3; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 2})
+		}
+	}
+	for y := 5; y < 10; y++ {
+		for x := 5; x < 10; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 255})
+		}
+	}
+
+	bbox := contentBoundingBox(img, 0)
+	if bbox.Min.X != 0 || bbox.Min.Y != 0 || bbox.Max.X != 10 || bbox.Max.Y != 10 {
+		t.Errorf("bbox = %v, want (0,0)-(10,10) — zero threshold should include ghost pixels", bbox)
+	}
+}
+
+func TestFloorAlpha(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 4, 1))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 255, A: 0})   // fully transparent
+	img.SetNRGBA(1, 0, color.NRGBA{R: 255, A: 2})   // ghost (below threshold)
+	img.SetNRGBA(2, 0, color.NRGBA{R: 255, A: 100}) // real semi-transparent
+	img.SetNRGBA(3, 0, color.NRGBA{R: 255, A: 255}) // fully opaque
+
+	floorAlpha(img, 0x1000)
+
+	if img.Pix[0*4+3] != 0 {
+		t.Errorf("pixel 0: alpha = %d, want 0 (was already transparent)", img.Pix[0*4+3])
+	}
+	if img.Pix[1*4+3] != 0 {
+		t.Errorf("pixel 1: alpha = %d, want 0 (ghost should be floored)", img.Pix[1*4+3])
+	}
+	if img.Pix[2*4+3] != 100 {
+		t.Errorf("pixel 2: alpha = %d, want 100 (real semi-transparent untouched)", img.Pix[2*4+3])
+	}
+	if img.Pix[3*4+3] != 255 {
+		t.Errorf("pixel 3: alpha = %d, want 255 (opaque untouched)", img.Pix[3*4+3])
+	}
+}
+
+func TestFloorAlpha_ZeroThreshold(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 2, 1))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 255, A: 1})
+	img.SetNRGBA(1, 0, color.NRGBA{R: 255, A: 255})
+
+	floorAlpha(img, 0)
+
+	if img.Pix[0*4+3] != 1 {
+		t.Errorf("pixel 0: alpha = %d, want 1 (zero threshold should not floor anything)", img.Pix[0*4+3])
+	}
+	if img.Pix[1*4+3] != 255 {
+		t.Errorf("pixel 1: alpha = %d, want 255", img.Pix[1*4+3])
+	}
+}
+
+// writeGhostPNG creates a PNG with opaque content at contentRect and ghost
+// pixels (low alpha) at ghostRect. Everything else is fully transparent.
+func writeGhostPNG(t *testing.T, path string, w, h int, contentRect, ghostRect image.Rectangle) {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := contentRect.Min.Y; y < contentRect.Max.Y; y++ {
+		for x := contentRect.Min.X; x < contentRect.Max.X; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 255})
+		}
+	}
+	for y := ghostRect.Min.Y; y < ghostRect.Max.Y; y++ {
+		for x := ghostRect.Min.X; x < ghostRect.Max.X; x++ {
+			if img.NRGBAAt(x, y).A == 0 {
+				img.SetNRGBA(x, y, color.NRGBA{R: 200, G: 200, B: 200, A: 3})
+			}
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("creating ghost PNG: %v", err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatalf("encoding ghost PNG: %v", err)
+	}
+}
+
+func TestNormalizeFrames_AlphaFloor(t *testing.T) {
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+
+	// Frame 1: opaque content at (5,5)-(10,10), ghost halo at (0,0)-(15,15)
+	writeGhostPNG(t, filepath.Join(frameDir, "frame_0001.png"), 20, 20,
+		image.Rect(5, 5, 10, 10), image.Rect(0, 0, 15, 15))
+	// Frame 2: opaque content at (8,8)-(14,14), ghost halo at (3,3)-(18,18)
+	writeGhostPNG(t, filepath.Join(frameDir, "frame_0002.png"), 20, 20,
+		image.Rect(8, 8, 14, 14), image.Rect(3, 3, 18, 18))
+
+	proc := &NormalizeFramesProcessor{}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run("irrelevant", map[string]string{"padding": "2"}, state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	// Union of opaque content is (5,5)-(14,14) = 9x9, + 2px padding = 13x13
+	if state["normalized_width"] != "13" {
+		t.Errorf("normalized_width = %q, want 13 (ghost halo should not inflate bbox)", state["normalized_width"])
+	}
+	if state["normalized_height"] != "13" {
+		t.Errorf("normalized_height = %q, want 13 (ghost halo should not inflate bbox)", state["normalized_height"])
+	}
+
+	// Verify ghost pixels were zeroed in output
+	img1, err := decodePNG(filepath.Join(frameDir, "frame_0001.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nrgba1, ok := img1.(*image.NRGBA)
+	if !ok {
+		t.Fatal("expected NRGBA output")
+	}
+	for y := nrgba1.Bounds().Min.Y; y < nrgba1.Bounds().Max.Y; y++ {
+		for x := nrgba1.Bounds().Min.X; x < nrgba1.Bounds().Max.X; x++ {
+			c := nrgba1.NRGBAAt(x, y)
+			if c.A > 0 && c.A < 10 {
+				t.Errorf("ghost pixel survived at (%d,%d): A=%d", x, y, c.A)
+			}
+		}
+	}
+}
+
+func TestNormalizeFrames_AlphaThresholdConfig(t *testing.T) {
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+
+	// Frame with opaque content at center and ghost pixels in a wide halo
+	writeGhostPNG(t, filepath.Join(frameDir, "frame_0001.png"), 20, 20,
+		image.Rect(5, 5, 10, 10), image.Rect(0, 0, 18, 18))
+
+	proc := &NormalizeFramesProcessor{}
+	state := PipelineState{"frame_dir": frameDir}
+	// alpha_threshold=0 means old behavior: ghost pixels count as content
+	r := proc.Run("irrelevant", map[string]string{"padding": "0", "alpha_threshold": "0"}, state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	// With threshold 0, bbox includes ghost pixels at (0,0)-(18,18) = 18x18 canvas
+	if state["normalized_width"] != "18" {
+		t.Errorf("normalized_width = %q, want 18 (zero threshold should include ghost pixels)", state["normalized_width"])
+	}
+	if state["normalized_height"] != "18" {
+		t.Errorf("normalized_height = %q, want 18 (zero threshold should include ghost pixels)", state["normalized_height"])
 	}
 }
 

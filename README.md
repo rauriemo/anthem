@@ -126,6 +126,17 @@ pip install "rembg[cli,gpu]"        # NVIDIA/CUDA GPU (faster)
 
 Both must be on PATH when Anthem starts. The post-process pipeline degrades gracefully: if either tool is missing, the corresponding step is skipped and the raw artifact is kept.
 
+**Post-process operation config keys:**
+
+| Op | Key | Default | Description |
+|----|-----|---------|-------------|
+| `extract_video_frames` | `fps` | `8` | Frame extraction rate |
+| `remove_background` | `model` | `isnet-anime` | rembg model name |
+| `normalize_frames` | `padding` | `4` | Transparent padding (px) around content |
+| `normalize_frames` | `alpha_threshold` | `4096` | Alpha floor (0–65535). Pixels at or below this opacity are treated as transparent. Cleans up rembg residue halos |
+| `stitch_spritesheet` | `columns` | `4` | Grid columns in output sheet |
+| `stitch_spritesheet` | `keep_video` | `false` | Retain source MP4 after stitching |
+
 ## Features
 
 - **GitHub issue-driven**: poll by label, claim, dispatch, update status, close on completion
