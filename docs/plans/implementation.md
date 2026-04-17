@@ -1,5 +1,7 @@
 # Anthem -- Full Project Scaffold + Implementation Plan
 
+> **Historical document.** This file records the scaffold and per-phase implementation plans for Phases 1 → 4 and the plan/build/agent mode work that preceded the mode refactor. It remains accurate for the files and packages it describes. For the current architecture read [`docs/architecture/modes.md`](../architecture/modes.md) and [`docs/plans/architecture.md`](./architecture.md) (sections 16–18). Phase 5 (mode refactor + Execute v1) is summarized in `architecture.md`, not here.
+
 ## Design Decisions (Locked In)
 
 - **Language**: Go (latest stable)

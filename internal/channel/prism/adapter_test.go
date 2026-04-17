@@ -739,6 +739,147 @@ func TestSendStream_KindOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestAuthOk_CurrentModeOmittedWhenUnset(t *testing.T) {
+	_, url := startTestAdapter(t)
+	conn := dial(t, url)
+
+	authFrame := frame{Type: "auth", Token: testToken, Client: "test"}
+	data, _ := json.Marshal(authFrame)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write auth: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, resp, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read auth response: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(resp, &raw); err != nil {
+		t.Fatalf("parse auth response: %v", err)
+	}
+	if _, ok := raw["current_mode"]; ok {
+		t.Error("current_mode should be omitted from auth_ok when not set")
+	}
+}
+
+func TestAuthOk_CurrentModeIncludedWhenSet(t *testing.T) {
+	a, url := startTestAdapter(t)
+	a.SetCurrentMode("loop")
+
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("expected auth_ok, got %s", f.Type)
+	}
+	if f.CurrentMode != "loop" {
+		t.Errorf("current_mode = %q, want %q", f.CurrentMode, "loop")
+	}
+}
+
+func TestSendRes_CurrentModeFromCache(t *testing.T) {
+	a, url := startTestAdapter(t)
+	a.SetCurrentMode("plan")
+
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	reqFrame := frame{Type: "req", ID: "mode-res-1", Text: "hello"}
+	data, _ := json.Marshal(reqFrame)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	err := a.Send(context.Background(), channel.OutgoingMessage{
+		ThreadID: "mode-res-1",
+		Text:     "response",
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	resFrame := readFrame(t, conn)
+	if resFrame.Type != "res" {
+		t.Fatalf("expected res, got %s", resFrame.Type)
+	}
+	if resFrame.CurrentMode != "plan" {
+		t.Errorf("current_mode = %q, want %q", resFrame.CurrentMode, "plan")
+	}
+}
+
+func TestSendRes_CurrentModeExplicitOverridesCache(t *testing.T) {
+	a, url := startTestAdapter(t)
+	a.SetCurrentMode("loop")
+
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	reqFrame := frame{Type: "req", ID: "mode-res-2", Text: "hello"}
+	data, _ := json.Marshal(reqFrame)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	err := a.Send(context.Background(), channel.OutgoingMessage{
+		ThreadID:    "mode-res-2",
+		Text:        "response",
+		CurrentMode: "execute",
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	resFrame := readFrame(t, conn)
+	if resFrame.CurrentMode != "execute" {
+		t.Errorf("current_mode = %q, want %q (explicit should override cache)", resFrame.CurrentMode, "execute")
+	}
+}
+
+func TestSendStream_CurrentModeFromCache(t *testing.T) {
+	a, url := startTestAdapter(t)
+	a.SetCurrentMode("execute")
+
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	if err := a.Send(context.Background(), channel.OutgoingMessage{
+		StreamDelta: "chunk",
+	}); err != nil {
+		t.Fatalf("send stream delta: %v", err)
+	}
+	if err := a.Send(context.Background(), channel.OutgoingMessage{
+		StreamDone: true,
+	}); err != nil {
+		t.Fatalf("send stream done: %v", err)
+	}
+
+	delta := readFrame(t, conn)
+	if delta.Type != "stream" {
+		t.Fatalf("expected stream, got %s", delta.Type)
+	}
+	if delta.CurrentMode != "execute" {
+		t.Errorf("delta current_mode = %q, want %q", delta.CurrentMode, "execute")
+	}
+
+	done := readFrame(t, conn)
+	if done.CurrentMode != "execute" {
+		t.Errorf("done current_mode = %q, want %q", done.CurrentMode, "execute")
+	}
+}
+
 func TestStreamFrameKindPropagation(t *testing.T) {
 	a, url := startTestAdapter(t)
 	conn := dial(t, url)

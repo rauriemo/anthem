@@ -59,7 +59,7 @@ func TestExtractPlanEdit_NestedCodeBlocks(t *testing.T) {
 }
 
 func TestBuildGuestPrompt_FastMode(t *testing.T) {
-	prompt := buildGuestPrompt("You are a game designer.", "Game project", "Key decisions...", "## Recent conversation\n...", "What about cards?", GuestPromptOpts{Mode: "fast"})
+	prompt := buildGuestPrompt("You are a game designer.", "Game project", "Key decisions...", "## Recent conversation\n...", "What about cards?", GuestPromptOpts{Mode: types.ModeChat})
 
 	if len(prompt) == 0 {
 		t.Fatal("expected non-empty prompt")
@@ -74,7 +74,7 @@ func TestBuildGuestPrompt_FastMode(t *testing.T) {
 
 func TestBuildGuestPrompt_PlanMode(t *testing.T) {
 	prompt := buildGuestPrompt("You are a game designer.", "", "", "", "Edit the plan", GuestPromptOpts{
-		Mode:        "plan",
+		Mode:        types.ModePlan,
 		PlanContent: "# My Plan\n\n## Section 1\nContent",
 	})
 
@@ -87,7 +87,7 @@ func TestBuildGuestPrompt_PlanMode(t *testing.T) {
 }
 
 func TestBuildGuestPrompt_AgentMode(t *testing.T) {
-	prompt := buildGuestPrompt("You are a designer.", "project", "context", "history", "Do something", GuestPromptOpts{Mode: "agent"})
+	prompt := buildGuestPrompt("You are a designer.", "project", "context", "history", "Do something", GuestPromptOpts{Mode: types.ModeLoop})
 
 	if strings.Contains(prompt, "Be concise.") {
 		t.Error("agent mode should not include 'Be concise.'")
@@ -104,7 +104,7 @@ func TestBuildGuestPrompt_IncludesAllSections(t *testing.T) {
 		"Decided on pixel art style",
 		"## Recent conversation\nUser: hello\nArtist: hi",
 		"Draw a tower",
-		GuestPromptOpts{Mode: "agent"},
+		GuestPromptOpts{Mode: types.ModeLoop},
 	)
 
 	if !strings.Contains(prompt, "## Project Context") {
@@ -125,7 +125,7 @@ func TestBuildGuestPrompt_IncludesAllSections(t *testing.T) {
 }
 
 func TestBuildGuestPrompt_OmitsEmptySections(t *testing.T) {
-	prompt := buildGuestPrompt("You are a writer.", "", "", "", "Write a story", GuestPromptOpts{Mode: "fast"})
+	prompt := buildGuestPrompt("You are a writer.", "", "", "", "Write a story", GuestPromptOpts{Mode: types.ModeChat})
 
 	if strings.Contains(prompt, "## Project Context") {
 		t.Error("should omit project context when empty")
@@ -137,7 +137,7 @@ func TestBuildGuestPrompt_OmitsEmptySections(t *testing.T) {
 
 func TestBuildGuestPrompt_PlanModeWithoutContent(t *testing.T) {
 	prompt := buildGuestPrompt("You are a designer.", "", "", "", "Edit plan", GuestPromptOpts{
-		Mode:        "plan",
+		Mode:        types.ModePlan,
 		PlanContent: "",
 	})
 
@@ -293,7 +293,7 @@ func TestBuildGuestPrompt_NoStoryContext(t *testing.T) {
 
 func TestBuildGuestPrompt_PrismDisplayInstructions(t *testing.T) {
 	prompt := buildGuestPrompt("You are a writer.", "Project", "", "", "Show me the docs", GuestPromptOpts{
-		Mode:        "agent",
+		Mode:        types.ModeLoop,
 		ChannelKind: "prism",
 	})
 
@@ -310,7 +310,7 @@ func TestBuildGuestPrompt_PrismDisplayInstructions(t *testing.T) {
 
 func TestBuildGuestPrompt_NoPrismDisplayForOtherChannels(t *testing.T) {
 	prompt := buildGuestPrompt("You are a writer.", "Project", "", "", "Show me the docs", GuestPromptOpts{
-		Mode:        "agent",
+		Mode:        types.ModeLoop,
 		ChannelKind: "",
 	})
 
@@ -338,7 +338,7 @@ func TestBuildGuestPrompt_CharacterCommitment(t *testing.T) {
 
 func TestBuildGuestPrompt_NoPrismDisplayForCLI(t *testing.T) {
 	prompt := buildGuestPrompt("You are a writer.", "Project", "", "", "Show me the docs", GuestPromptOpts{
-		Mode:        "agent",
+		Mode:        types.ModeLoop,
 		ChannelKind: "cli",
 	})
 

@@ -341,12 +341,13 @@ func runCmd() *cobra.Command {
 				ChannelManager:  chanManager,
 			})
 
-			// Wire guest agent updates to Prism adapter
+			// Wire guest agent updates and mode to Prism adapter
 			if prismAdapter != nil {
 				orch.SetGuestUpdateCallback(prismAdapter.UpdateGuestIndex)
 				if cfg.MaxActiveGuests > 0 {
 					prismAdapter.SetMaxActiveGuests(cfg.MaxActiveGuests)
 				}
+				prismAdapter.SetCurrentMode(string(orch.CurrentMode))
 			}
 
 			// Start config hot-reload watcher

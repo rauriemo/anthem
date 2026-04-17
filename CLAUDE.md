@@ -2,14 +2,22 @@
 
 ## What Is Anthem
 
-Anthem is an open-source agent orchestrator for Claude Code -- an alternative to OpenAI Symphony with a key differentiator: a hybrid architecture where a Go daemon handles mechanical reliability (polling, process management, workspace isolation, retry, state) and an AI orchestrator agent (Phase 3) sits on top for intelligence (user communication, task decomposition, parallel planning). The orchestrator agent uses a two-file identity model: project-specific character from `agents/orchestrator.md` and shared user knowledge from `~/.anthem/VOICE.md`. Executor agents are headless coding workers that get harnesses (WORKFLOW.md, skills, MCP tools, constraints), not personality. All agents (orchestrator and guests) receive `VOICE.md` user context so they benefit from shared learning about the user.
+Anthem is an open-source **project agent runtime**. Each project gets one Anthem instance that exposes a persistent orchestrator agent plus a roster of guest specialists. Every interaction happens in one of four explicit modes: **Chat**, **Plan**, **Execute**, or **Loop**.
+
+Under the hood Anthem is a hybrid: a Go daemon owns reliability and control flow (channels, state, concurrency, audit, workspace isolation, step advancement in Execute, tracker polling in Loop), and a Claude orchestrator agent owns intelligence (conversation, plan synthesis, step content, user context). Guest agents are headless specialists dispatched by either mode router or plan runner, with harnesses (WORKFLOW.md, skills, MCP tools, constraints) injected per task.
+
+The orchestrator uses a two-file identity model: project-specific character from `agents/orchestrator.md`, shared user knowledge from `~/.anthem/VOICE.md`. All agents (orchestrator and guests) receive `VOICE.md` user context so they benefit from shared learning.
+
+**Canonical mode reference:** [`docs/architecture/modes.md`](docs/architecture/modes.md).
+**Runtime architecture:** [`docs/plans/architecture.md`](docs/plans/architecture.md) (sections 16–18 cover mode router, ExecutionBackend, and the Execute runtime).
 
 ## Plans and Architecture Docs
 
 Read these documents thoroughly before writing any code:
 
-- `docs/plans/architecture.md` -- Full system architecture with mermaid diagrams, all 15 components, Go interface definitions, data types, CLI spec, cross-platform details, event bus, rate limiting, hook failure handling
-- `docs/plans/implementation.md` -- Scaffold structure, implementation order with specific steps, phase breakdown, dependency list, testing strategy
+- `docs/architecture/modes.md` -- Canonical description of the four modes (Chat, Plan, Execute, Loop), mode selection, Execute v1 contract, event protocol
+- `docs/plans/architecture.md` -- Full system architecture with mermaid diagrams, runtime planes, component catalog, mode router, ExecutionBackend, Execute runtime, CLI spec, cross-platform details, event bus
+- `docs/plans/implementation.md` -- Scaffold structure, phase history, dependency list, testing strategy
 
 These are the source of truth for what to build and how.
 
@@ -18,7 +26,13 @@ These are the source of truth for what to build and how.
 - **Language**: Go (latest stable)
 - **Module path**: `github.com/rauriemo/anthem`
 - **Cross-platform**: Windows-first, all three OS from day 1. Build tags for platform-specific process management.
-- **Hybrid architecture**: Go daemon = reliability (polling, process mgmt, workspace isolation, retry, state). Orchestrator agent = intelligence (Claude session with orchestrator persona + user context, task decomposition, wave planning). Executors = headless Claude Code workers with harnesses.
+- **Project agent runtime**: Default `anthem run` boots a conversational orchestrator with a guest roster and channels. No tracker required. Loop is an opt-in `ExecutionBackend`, not the core identity.
+- **Four-mode grammar**: `Mode` enum in `internal/types/task.go` — `ModeChat` / `ModePlan` / `ModeExecute` / `ModeLoop`. `Orchestrator.CurrentMode` is observable state. `[system:<mode>]` tag selects; untagged = Chat. Legacy tags (`fast`, `agent`, `build`) remap for compatibility.
+- **ExecutionBackend abstraction**: `internal/backend/backend.go` — `Start` / `Stop` / `QueueWork` / `ActiveWork` / `OnProgress` + `LoopHost` callback. `GitHubLoopBackend` is the shipping implementation. Loop is pluggable.
+- **Execute mechanical split**: Code owns step state, advancement, gates, artifact registration, event emission, failure semantics. Agents own plan compilation, per-step context/prompts, and content. No autonomous retries in v1.
+- **ArtifactProvider abstraction**: `internal/execute/artifacts.go` — `ContextArtifactProvider` (reads `.context/features/<feature>/artifacts.yaml`) or `FilesystemArtifactProvider` (mtime fallback).
+- **Execute event protocol**: Stable `execution.*` events (`plan_loaded`, `step_started`, `gate_opened`, `plan_completed`, etc.) emitted on the same channel pipe as chat. Prism routes by EventType.
+- **Hybrid architecture**: Go daemon = reliability (channels, state, concurrency, audit, workspace isolation, retry, step advancement, tracker polling). Orchestrator agent = intelligence (Claude session with orchestrator persona + user context, task decomposition, plan synthesis, step content). Executors = headless Claude Code workers with harnesses.
 - **Two-file identity model**: `agents/orchestrator.md` holds the project-specific orchestrator character (Identity, Personality, Your Focus, Coordination). `~/.anthem/VOICE.md` holds shared user knowledge (communication style, habits, expertise) -- facts and stable preferences, not project state or agent self-description. Both are injected into orchestrator prompts. Guest agents receive `VOICE.md` user context. `orchestrator.md` lives in `agents/` for authoring consistency but is **not** a guest -- it's excluded from GuestIndex and never appears in Prism's roster.
 - **Section routing**: `update_voice` uses explicit allowlists. Agent-owned sections (Identity, Personality, Your Focus, Coordination) route to `agents/orchestrator.md`. All other sections default to `~/.anthem/VOICE.md`. Routing decisions are logged.
 - **Migration**: On startup, `voice.MigrateVoiceToOrchestrator()` moves Identity/Personality from VOICE.md to `agents/orchestrator.md` if orchestrator.md doesn't exist. If both exist, orchestrator.md wins and VOICE.md is not auto-pruned (warning logged).
@@ -31,8 +45,7 @@ These are the source of truth for what to build and how.
 - **Error handling**: Wrap with `fmt.Errorf("context: %w", err)`. Never swallow errors.
 - **No global state in code**: Dependency injection via constructors.
 - **Template engine**: sprig (`github.com/Masterminds/sprig/v3`) for WORKFLOW.md body rendering.
-- **Orchestrator module pattern**: All dispatch/reconciliation/state logic in `orchestrator.go`.
-- **Orchestrator modes**: Plan (markdown-only), Build (plan -> subtasks), Agent (full JSON actions). Falls back to mechanical dispatch on failure.
+- **Orchestrator module pattern**: All dispatch/reconciliation/state logic in `orchestrator.go`. Mode router (`detectMode` + `HandleUserMessage`) dispatches to `handleChat` / `handlePlan` / `handleExecute` / `handleLoop`.
 - **Contract-first tool surface**: 12 action types with schemas, risk levels, idempotency. JSON structured output. `update_agent_meta` writes YAML frontmatter; `update_voice` extended with optional `agent_file` for guest targeting.
 - **Three-layer state**: Event Log (SQLite audit), State Snapshot (in-memory), Knowledge Artifacts (repo docs).
 - **Channel system**: Pluggable adapters (Slack Socket Mode, Dispatch WebSocket, Prism WebSocket).
@@ -52,16 +65,15 @@ Full details in `docs/plans/architecture.md`.
 
 ## Current Status
 
-**Phase**: Phase 4 — Frontier Implementation (**complete**)
-**Working plan**: `docs/plans/frontier-implementation.md` — completed checklist with detailed steps and file paths.
-**Scaffold**: Complete (all 11 steps done)
-**Phase 1**: Complete. All 10 steps implemented and verified with a live GitHub issue (pickup -> Claude Code execution -> issue closure -> label lifecycle).
+**Shipped:** Phase 1 → Phase 5 (Mode refactor + Execute v1).
 
-All phases (1, 2, 3a, 3b, C, 4, post-4) are complete. Key capabilities shipped: GitHub issue-driven dispatch, rules engine, retry/backoff, state persistence, config hot-reload, graceful shutdown, contract-based orchestrator agent (10 action types), SQLite audit log, wave-aware dispatch, task lifecycle state machine, Slack + Dispatch + Prism channel adapters, LLM token streaming, maintenance scanner, DAG edges, multi-LLM driver, executor-reviewer loop, specialist agent profiles, decision traces, orchestrator codebase awareness, explorer subagent pipeline, plan/build/agent modes, plan-card UI, model selection, embedded skills (6 SKILL.md packages via go:embed).
+Cumulative capabilities across all shipped phases: GitHub issue-driven dispatch (as Loop mode), rules engine, retry/backoff, state persistence, config hot-reload, graceful shutdown, contract-based orchestrator agent, SQLite audit log, wave-aware dispatch, task lifecycle state machine, Slack + Dispatch + Prism channel adapters, LLM token streaming, maintenance scanner, DAG edges in Loop, multi-LLM driver, executor-reviewer loop, specialist agent profiles, decision traces, orchestrator codebase awareness, explorer subagent pipeline, embedded skills (6 SKILL.md packages via go:embed), guest agent registry, context reporting + hydration, MCP platform, **four-mode router (Chat/Plan/Execute/Loop)**, **ExecutionBackend abstraction**, **Execute v1 runtime** (linear handoff chains, approval gates, artifact providers, stable event protocol), **conversational Chat as default run path**.
 
-See `docs/plans/architecture.md` and `docs/plans/implementation.md` for implementation details of completed phases.
+See `docs/plans/architecture.md` (sections 16–18) and `docs/architecture/modes.md` for current architecture details. `docs/plans/implementation.md` retains historical phase notes.
 
-**Phase 5 (future)**: WhatsApp channel adapter, GoReleaser binaries, code signing, demo video.
+**Phase 6 (deferred — Execute v2):** parallel DAG branches, `for_each` fan-out over manifest artifacts, richer artifact taxonomy, per-item revision actions in approval gates, native Prism renderers for image-gallery / animation-preview / scene-review kinds, optional autonomous retry policy.
+
+**Phase 7 (future):** WhatsApp channel adapter, GoReleaser binaries, code signing, demo video.
 
 ## MCP platform (guest agents + Conduit)
 

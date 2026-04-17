@@ -75,6 +75,7 @@ type frame struct {
 	SuggestGuest    *suggestGuestFrame  `json:"suggest_guest,omitempty"`
 	ActivateGuest   *activateGuestFrame `json:"activate_guest,omitempty"`
 	Kind            string              `json:"kind,omitempty"`
+	CurrentMode     string              `json:"current_mode,omitempty"`
 }
 
 type frameFile struct {
@@ -115,6 +116,7 @@ type Adapter struct {
 	threads         map[string]*connEntry
 	guestAgents     []guestAgentInfo
 	maxActiveGuests int
+	currentMode     string
 
 	cancel context.CancelFunc
 }
@@ -140,6 +142,13 @@ func (a *Adapter) SetMaxActiveGuests(n int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.maxActiveGuests = n
+}
+
+// SetCurrentMode updates the cached mode string included in auth_ok and outgoing frames.
+func (a *Adapter) SetCurrentMode(mode string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.currentMode = mode
 }
 
 func (a *Adapter) Start(ctx context.Context) error {
@@ -271,9 +280,10 @@ func (a *Adapter) authenticate(conn *websocket.Conn) bool {
 	a.mu.RLock()
 	agents := a.guestAgents
 	maxActive := a.maxActiveGuests
+	mode := a.currentMode
 	a.mu.RUnlock()
 
-	_ = a.writeFrameRaw(conn, frame{Type: "auth_ok", GuestAgents: agents, MaxActiveGuests: maxActive})
+	_ = a.writeFrameRaw(conn, frame{Type: "auth_ok", GuestAgents: agents, MaxActiveGuests: maxActive, CurrentMode: mode})
 	return true
 }
 
@@ -349,6 +359,12 @@ func (a *Adapter) removeConn(entry *connEntry) {
 }
 
 func (a *Adapter) Send(_ context.Context, msg channel.OutgoingMessage) error {
+	if msg.CurrentMode == "" {
+		a.mu.RLock()
+		msg.CurrentMode = a.currentMode
+		a.mu.RUnlock()
+	}
+
 	if msg.StreamDelta != "" || msg.StreamDone {
 		return a.sendStream(msg)
 	}
@@ -387,7 +403,7 @@ func (a *Adapter) Send(_ context.Context, msg channel.OutgoingMessage) error {
 }
 
 func (a *Adapter) buildResFrame(msg channel.OutgoingMessage) frame {
-	f := frame{Type: "res", ID: msg.ThreadID, Text: msg.Text, Ack: msg.Ack}
+	f := frame{Type: "res", ID: msg.ThreadID, Text: msg.Text, Ack: msg.Ack, CurrentMode: msg.CurrentMode}
 	if msg.GuestID != "" {
 		f.GuestID = msg.GuestID
 	}
@@ -502,7 +518,7 @@ func (a *Adapter) sendDisplay(msg channel.OutgoingMessage) error {
 }
 
 func (a *Adapter) sendStream(msg channel.OutgoingMessage) error {
-	f := frame{Type: "stream", Text: msg.StreamDelta, Thread: msg.ThreadID, Done: msg.StreamDone, GuestID: msg.GuestID, Kind: msg.StreamKind}
+	f := frame{Type: "stream", Text: msg.StreamDelta, Thread: msg.ThreadID, Done: msg.StreamDone, GuestID: msg.GuestID, Kind: msg.StreamKind, CurrentMode: msg.CurrentMode}
 
 	if msg.ThreadID != "" {
 		a.mu.RLock()

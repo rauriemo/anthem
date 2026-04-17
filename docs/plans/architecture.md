@@ -1,33 +1,69 @@
-# Anthem -- Claude Agent Orchestrator
+# Anthem -- Architecture
 
-An open-source alternative to OpenAI Symphony, built in Go, designed for Claude Code users.
+Anthem is a **project agent runtime**. Each project gets one Anthem instance that exposes a persistent orchestrator and a roster of guest specialist agents. All interaction runs through one of four explicit modes: **Chat**, **Plan**, **Execute**, **Loop**. This document describes the runtime planes, interfaces, and cross-cutting services that back them.
+
+The canonical per-mode reference lives in [`docs/architecture/modes.md`](../architecture/modes.md). This document focuses on how the pieces underneath the modes are wired.
+
+> **Note on historical content.** Sections tagged "Phase 3a / 3b / 4 / frontier" below describe internal build phases that predate the reframing to a project agent runtime. They remain accurate for the code they describe (orchestrator agent, audit log, agent profiles, guest dispatch, etc.), but the top-level narrative — "Anthem polls GitHub and dispatches workers" — has been superseded. Loop mode is now one opt-in execution backend rather than the core identity.
 
 ## Design Decisions (Locked In)
 
 - **Language**: Go (latest stable)
 - **Module path**: `github.com/rauriemo/anthem`
-- **Cross-platform**: Windows-first, all three OS from day 1 (build tags for process management)
-- **Hybrid architecture**: Go daemon handles the mechanical reliability layer (polling, process management, workspace isolation, retry, state persistence). An AI orchestrator agent (Phase 3) sits on top for intelligence -- user communication, task decomposition, parallel planning. The Go daemon exposes a tool interface for the orchestrator agent to call.
-- **VOICE.md**: Global at `~/.anthem/VOICE.md`. Applies only to the orchestrator agent (Phase 3), not executor agents. Executors get project context from WORKFLOW.md, skills, and MCP tools -- harnesses, not personality. Voice gives the orchestrator personality for user communication and helps it learn the user's preferences for better task management.
-- **WORKFLOW.md location**: Per-project, typically `./WORKFLOW.md` in repo root
-- **Global state root**: `~/.anthem/` (VOICE.md, constraints.yaml, state.json, voice-changelog.md)
-- **GitHub auth**: `GITHUB_TOKEN` env var, fallback to `gh auth token` command. No custom credential storage.
-- **Dashboard**: Fulfilled by Prism (separate repo -- React frontend + FastAPI backend, A2UI component protocol, mDNS discovery). No embedded dashboard in the Anthem binary.
-- **Voice changelog**: Changelog file at `~/.anthem/voice-changelog.md`, wired in Phase 3a via the `update_voice` contract action
-- **Testing**: Interface-based mocks (no mocking framework), table-driven tests, `//go:build integration` tagged tests for external services, `testdata/` fixtures, CI from day 1
-- **Logging**: Use `log/slog` (stdlib) for structured logging
-- **Orchestrator-as-allocator (Phase 3a)**: The orchestrator agent is a stateless allocator -- it proposes actions, the Go daemon validates and executes them. The daemon is the authority. If the orchestrator fails, the daemon falls back to Phase 2 mechanical dispatch.
-- **Contract-first tool surface (Phase 3a)**: Orchestrator-daemon communication uses a stable contract of explicitly defined action types with schemas, risk levels, and idempotency guarantees. No read-actions -- the daemon pushes state via compact snapshots. Transport is JSON structured output now, MCP later.
-- **Three-layer state model (Phase 3a)**: (1) Event Log -- append-only SQLite audit log at `~/.anthem/audit.db`. (2) State Snapshot -- compact in-memory view pushed to orchestrator. (3) Knowledge Artifacts -- curated summaries in repo `docs/exec-plans/`. Operations log lives with the daemon; reasoning memory lives with the repo.
-- **SQLite audit log (Phase 3a)**: `modernc.org/sqlite` (pure Go, no CGo). Records dispatches, retries, cancellations, cost events, wave transitions, orchestrator actions, voice updates.
-- **Wave model (Phase 3a)**: Orchestrator plans tasks in waves. Wave boundary = current planned frontier exhausted (all tasks terminal or non-runnable). Daemon detects exhaustion, prompts orchestrator to replan.
-- **Task lifecycle state machine (Phase 3a)**: Formalized states: queued, planned, running, blocked, retryQueued, needsApproval, completed, failed, canceled, skipped. Explicit `Transition(from, to)` validation enforced by daemon. `StatusToLabel()` / `LabelToStatus()` mapping between internal states and tracker labels.
-- **Modular channel system (Phase 3b)**: Two-way communication between orchestrator agent and user via pluggable channel adapters. `Channel` interface (`Kind`, `Start`, `Send`, `Incoming`, `Close`) mirrors the `IssueTracker` adapter pattern. Global credentials in `~/.anthem/channels.yaml`, per-project channel targets in WORKFLOW.md `channels:` block. One conversation per project (chat history scoped to repo). Two adapters shipped: Slack (Socket Mode) and Dispatch (WebSocket server). WhatsApp deferred to Phase 4.
-- **Dispatch channel adapter**: WebSocket server adapter for the [Dispatch](https://github.com/rauriemo/dispatch) voice-first command channel. Unlike Slack (client-side, Anthem connects out), Dispatch is server-side (Anthem listens, Dispatch connects in). Uses `gorilla/websocket` with JSON text frame protocol. Auth via shared token in `~/.anthem/channels.yaml`. Request-response chat correlated by client-generated UUID. Server-push events include the event type for Dispatch to route to voice notifications. Multiple concurrent clients supported with thread-to-connection mapping for reply routing.
-- **Multi-format task decomposition (Phase 3b)**: User sends feature descriptions through channels as plain text prompts, markdown files, mermaid flowcharts, diagrams, or images. The orchestrator agent decomposes into GitHub issues via the `create_subtasks` contract action. Claude's multimodal capabilities handle image-based inputs.
-- **Audit-log maintenance signals (Phase 3b)**: Periodic scanner queries `audit.db` for health signals (repeated failures, stale tasks, budget anomalies, drift). Notifies user via channel with approval gate. Configurable auto-approve per maintenance type in WORKFLOW.md `maintenance:` block.
+- **Cross-platform**: Windows-first, all three OSes from day 1 (build tags for process management).
+- **Project agent runtime**: The default run does not require a tracker. An Anthem instance boots as a conversational orchestrator with a guest roster and a channel pipe. A tracker-backed Loop is an opt-in `ExecutionBackend`.
+- **Four-mode grammar**: `Mode` enum in `internal/types/task.go` — `ModeChat`, `ModePlan`, `ModeExecute`, `ModeLoop`. `Orchestrator.CurrentMode` is observable state surfaced to channel adapters.
+- **Mode router**: `[system:<mode>]` tag in inbound messages selects the mode. Legacy tags (`fast`, `agent`, `build`) remap for backward compatibility. Untagged messages default to Chat.
+- **Hybrid architecture**: Go daemon = reliability, concurrency, state, audit. Orchestrator agent = intelligence (Claude session with persona + user context, task decomposition, plan synthesis). The two are split by contract, not by policy.
+- **Execute = mechanical handoff runner**: Code owns step advancement, dependency resolution, gate state, artifact registration, and event emission. Agents own content (plan compilation, step prompts, creative output). No autonomous retries in v1.
+- **ExecutionBackend abstraction** (`internal/backend/backend.go`): `Start`/`Stop`/`QueueWork`/`ActiveWork`/`OnProgress` + a `LoopHost` callback for tick-based backends. `GitHubLoopBackend` is the current shipping implementation. Additional backends (Linear, webhook-driven, scheduled) live behind the same interface.
+- **ArtifactProvider abstraction** (`internal/execute/artifacts.go`): `Collect`/`Inject` for step outputs and upstream context. `ContextArtifactProvider` reads `.context/features/<feature>/artifacts.yaml`; `FilesystemArtifactProvider` is the fallback for projects without `.context/`.
+- **Stable execution event protocol**: `execution.plan_loaded / step_queued / step_started / step_completed / step_failed / gate_opened / gate_resolved / plan_completed / plan_aborted`. Emitted on the same channel pipe as chat; Prism routes by `EventType`.
+- **Two-file identity model**: `agents/orchestrator.md` is project-specific (Identity, Personality, Focus, Coordination). `~/.anthem/VOICE.md` is global user knowledge. Both are injected into orchestrator prompts. Guest agents get `VOICE.md` user context; the orchestrator persona is theirs and theirs alone.
+- **Guest registry**: `internal/guests/` scans `agents/*.md` (skipping `orchestrator.md`), parses frontmatter, caches `.agents-index.json`, and loads personas on demand. Both Chat (`@mentions`, `active_guests`) and Execute (`PlanStep.AgentID`) use the same registry.
+- **Channel system**: Pluggable adapters (Prism, Dispatch, Slack, Voice Room) behind the `Channel` interface. Global credentials in `~/.anthem/channels.yaml`; per-project targets in `WORKFLOW.md`.
+- **Constraints**: Two-tier (`~/.anthem/constraints.yaml` + `system.constraints` in `WORKFLOW.md`) with meta-constraint protection. Personality evolves; constraints do not.
+- **Audit log**: Append-only SQLite at `~/.anthem/audit.db` via `modernc.org/sqlite` (pure Go, no CGo). Every dispatch, action, gate resolution, voice update, and execution event is recorded.
+- **Three-layer state model**: (1) Event log — `audit.db`. (2) State snapshot — compact in-memory view pushed into the orchestrator. (3) Knowledge artifacts — `.context/` + `docs/exec-plans/` in the repo.
+- **GitHub auth** (Loop mode only): `GITHUB_TOKEN` env var, fallback to `gh auth token`.
+- **Template engine**: sprig (`github.com/Masterminds/sprig/v3`) for `WORKFLOW.md` body rendering.
+- **Testing**: Interface-based mocks, table-driven tests, `//go:build integration` tagged tests, `testdata/` fixtures.
+- **Logging**: `log/slog` (Go stdlib) for structured logging.
+- **Error handling**: Wrap with `fmt.Errorf("context: %w", err)`. Never swallow errors.
 
-## Architecture Overview
+## Runtime planes
+
+The runtime has four planes. They share one set of primitives (channels, guests, context, audit) but decide "what runs next" differently.
+
+```mermaid
+flowchart TD
+  In["Inbound frame\n(req + optional [system:<mode>])"] --> Router["Mode router\ndetectMode()"]
+  Router -->|chat| ChatH["Chat handler"]
+  Router -->|plan| PlanH["Plan pipeline\nscout / explore / synthesize"]
+  Router -->|execute| ExecH["PlanRunner\ninternal/execute"]
+  Router -->|loop| LoopH["ExecutionBackend\ninternal/backend"]
+
+  ChatH --> Orch["Orchestrator agent"]
+  PlanH --> PlanStore["plans/ store"]
+  ExecH --> Guests["Guest roster"]
+  LoopH --> Guests
+
+  Orch --> Guests
+  Guests --> Runner["AgentRunner\nClaude Code"]
+  ExecH --> Artifacts["ArtifactProvider\n.context/ or FS"]
+  ExecH --> Events["Execution event emitter"]
+
+  subgraph shared [Shared substrate]
+    Channel["Channel manager\n(Prism / Dispatch / Slack / Voice)"]
+    Audit["Audit log"]
+    Context[".context/ + VOICE.md"]
+    Config["Config loader + hot reload"]
+  end
+```
+
+Historical note: the "Six layers" model below (Policy / Config / Coordination / Execution / Integration / Observability) remains a useful view of the component boundaries. Read it as the material that backs the four-plane runtime above.
+
+## Architecture Overview (Historical layered view)
 
 Six layers (mirroring Symphony's proven design, adapted for Claude):
 
@@ -650,6 +686,92 @@ Built-in skills are copied into each workspace's `.claude/skills/` directory dur
 
 Agents can also create new skills during their work. For example, after noticing a recurring pattern in how the user wants tests written, an agent might create `.claude/skills/test-patterns/SKILL.md`. This pairs with VOICE.md: the voice captures *who* the agent is, skills capture *how* it works. Skill creation follows the same guardrail pattern -- protected by approval if configured.
 
+### 16. Mode Router
+
+Anthem's top-level dispatch is driven by an explicit `Mode` enum (`internal/types/task.go`):
+
+```go
+type Mode string
+
+const (
+    ModeChat    Mode = "chat"
+    ModePlan    Mode = "plan"
+    ModeExecute Mode = "execute"
+    ModeLoop    Mode = "loop"
+)
+```
+
+- `Orchestrator.CurrentMode` is observable state broadcast to channels so Prism and Dispatch can render the active mode.
+- `detectMode()` in `internal/orchestrator/orchestrator.go` parses a leading `[system:<mode>]` tag on incoming frames. Untagged messages default to `ModeChat`.
+- Legacy tags (`fast`, `agent`, `build`) are remapped for backward compatibility: `fast` and `agent` -> `ModeChat`; `build` -> `ModeExecute` when a plan is attached, otherwise `ModePlan`.
+- `HandleUserMessage` dispatches to `handleChat`, `handlePlan`, `handleExecute`, or `handleLoop` based on the detected mode. Plan and Execute persist artifacts under `plans/` and `.context/`.
+
+### 17. ExecutionBackend Abstraction
+
+Loop-style execution is no longer baked into the orchestrator. It lives behind the `ExecutionBackend` interface (`internal/backend/backend.go`):
+
+```go
+type ExecutionBackend interface {
+    Kind() string
+    Start(ctx context.Context, host LoopHost) error
+    Stop(ctx context.Context) error
+    QueueWork(ctx context.Context, item WorkItem) error
+    ActiveWork(ctx context.Context) ([]WorkItem, error)
+    OnProgress(fn ProgressFunc)
+}
+
+type LoopHost interface {
+    Tick(ctx context.Context) error
+    PollingIntervalMS() int
+}
+```
+
+- Loop mode is activated by `[system:loop]` or by `orchestrator.enabled: true` + a `tracker:` block in `WORKFLOW.md`.
+- The shipping implementation is `GitHubLoopBackend` (`internal/backend/github.go`), which extracts the historical `tick()` polling loop (reconcile -> snapshot -> consult -> dispatch) into a standalone backend.
+- Additional backends (Linear, webhook-driven, scheduled cron, manifest-driven) implement the same interface without touching the orchestrator core.
+- The orchestrator's default `Run()` path no longer requires any backend. A project with no tracker configured boots straight into Chat/Plan/Execute mode.
+
+### 18. Execute Runtime (`internal/execute`)
+
+Execute is Anthem's mechanical handoff runner. It takes an approved `ExecutionPlan` and drives it step by step, emitting events as it goes.
+
+```
+internal/execute/
+  plan.go         ExecutionPlan / PlanStep / ApprovalGate / StepArtifact + Validate + NextPendingStep
+  runner.go       PlanRunner: dependency resolution, status transitions, gate blocking, artifact hand-off
+  events.go       Stable JSON event protocol (plan_loaded, step_started, gate_opened, ...)
+  artifacts.go    ArtifactProvider interface + ContextArtifactProvider + FilesystemArtifactProvider
+```
+
+**Control split** (v1, frozen):
+
+| Code owns | Agent owns |
+|-----------|------------|
+| Step state, advancement, dependency checks | Compiling human intent into an `ExecutionPlan` |
+| Gate opening, blocking, resolution | Assembling per-step context |
+| Artifact registration & injection | Drafting per-step prompts |
+| Event emission to Prism | Optional guest-agent selection within an already-allowed roster |
+| Failure / pause semantics | Producing the actual content/artifacts |
+
+**ArtifactProvider** normalizes how outputs flow between steps:
+
+- `ContextArtifactProvider` reads `.context/features/<feature>/artifacts.yaml` for declared outputs and writes `step-<id>-upstream.yaml` as input to the next step.
+- `FilesystemArtifactProvider` is the fallback for projects without `.context/` — scans the workspace by mtime and surfaces new/modified files as artifacts.
+
+**Execution event protocol** (emitted on channels alongside chat):
+
+| Event | Purpose |
+|-------|---------|
+| `execution.plan_loaded` | Plan accepted, overall topology |
+| `execution.step_queued` / `step_started` / `step_completed` / `step_failed` | Step lifecycle |
+| `execution.gate_opened` / `gate_resolved` | Human approval gates |
+| `execution.plan_completed` / `plan_aborted` | Terminal states |
+
+Each event carries a stable JSON payload. Prism routes by `EventType` and renders progress + approval UI without needing Anthem's internal types.
+
+**v1 scope**: linear handoff chains, simple artifact refs, coarse batch-level approval gates, no autonomous retries.
+**v2 scope** (deferred): parallel DAG branches, `for_each` fan-out over manifest artifacts, richer artifact taxonomy, review templates, per-item revision actions.
+
 ## Project Structure
 
 ```
@@ -770,7 +892,28 @@ Competitive gap analysis against OpenHands, CrewAI, CC Mirror, SWE-agent, Aider,
 10. Specialist agent profiles -- `AgentProfile` struct with `PromptPrefix`/`PromptSuffix`/`AllowedTools`/`Model`/`MaxTurns`/`ReviewEnabled`. Default profiles: coder, architect, tester, debugger. Orchestrator selects via `profile` field on dispatch action
 11. Decision trace system -- `traces` table in audit DB captures every LLM interaction with prompt/response previews, tokens, cost, duration, linked task/wave/session IDs. Query methods for post-hoc debugging
 
-### Phase 5: Polish + Community
+### Phase 5: Mode Refactor + Execute v1 (COMPLETE)
+
+Shifts Anthem from "agentic loop orchestrator" to "project agent runtime" with four explicit modes. See [`docs/architecture/modes.md`](../architecture/modes.md) for the canonical mode reference.
+
+1. **Mode enum** — `Mode` type in `internal/types/task.go` with Chat/Plan/Execute/Loop. `Orchestrator.CurrentMode` observable state.
+2. **ExecutionBackend** — `internal/backend/backend.go` interface. `GitHubLoopBackend` extracted from the old `tick()` loop. Default `Run()` no longer requires a backend.
+3. **Mode router** — `detectMode()` parses `[system:<mode>]`, legacy tags remapped, Chat is the default. `HandleUserMessage` dispatches per mode.
+4. **Execute v1 runtime** — `internal/execute/` package: `ExecutionPlan` schema + `Validate`, `PlanRunner` (linear handoff chains, dependency resolution, gate state, artifact registration), stable event protocol, `ArtifactProvider` interface with `.context/` and filesystem implementations.
+5. **Prism updates** — mode indicator, plan/execute panels, generic approval-gate UI (HTML content + Prism-owned Approve/Revise/Abort controls).
+6. **Forge updates** — conversational Chat scaffold is the default; `--mode loop` remains for tracker-backed projects; `.context/` scaffolding on by default.
+
+### Phase 6: Execute v2 (DEFERRED)
+
+Expands Execute into a full DAG engine once v1 has run in anger.
+
+1. Parallel branches & `for_each` fan-out over manifest artifacts
+2. Richer artifact taxonomy (review templates, typed review surfaces)
+3. Per-item revision actions in approval gates (regenerate-one, reorder, partial approve)
+4. Native Prism renderers for image-gallery / animation-preview / scene-review kinds (currently fall back to generic HTML)
+5. Optional autonomous retry policy with explicit budget
+
+### Phase 7: Polish + Community
 
 1. WhatsApp channel adapter
 2. Example WORKFLOW.md + VOICE.md templates

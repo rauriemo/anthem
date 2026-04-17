@@ -5,6 +5,18 @@ import (
 	"time"
 )
 
+// Mode represents the operating mode of the orchestrator.
+type Mode string
+
+const (
+	ModeChat    Mode = "chat"
+	ModePlan    Mode = "plan"
+	ModeExecute Mode = "execute"
+	ModeLoop    Mode = "loop"
+)
+
+func (m Mode) String() string { return string(m) }
+
 type Status string
 
 const (

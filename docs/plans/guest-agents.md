@@ -2,7 +2,14 @@
 
 ## Overview
 
-Guest agents are lightweight persona definitions (markdown files with YAML frontmatter) that live in a project's `agents/` directory. Anthem scans this directory on boot, generates a `.agents-index.json` cache, advertises the roster to Prism via WebSocket, and performs persona injection into the orchestrator prompt when a guest is @-mentioned or selected.
+Guest agents are lightweight persona definitions (markdown files with YAML frontmatter) that live in a project's `agents/` directory. Anthem scans this directory on boot, generates a `.agents-index.json` cache, advertises the roster to Prism via WebSocket, and injects the persona into the orchestrator prompt or dispatches the guest directly depending on the active mode.
+
+**Mode integration (current):**
+
+- **Chat mode** — `@mention` or `active_guests` selects which guests participate in the current round. Routing call decides directed text; guests run concurrently (semaphore 3).
+- **Plan mode** — orchestrator may author structured `ExecutionPlan`s that reference specific `agent_id`s from the guest roster; no dispatch yet.
+- **Execute mode** — `PlanRunner` looks up `PlanStep.AgentID` in the same guest registry and runs it through the standard guest prompt + harness pipeline. Step artifacts feed the next step via the `ArtifactProvider`.
+- **Loop mode** — optional; guest roster is available to the `GitHubLoopBackend` just like in the pre-refactor orchestrator.
 
 This spec covers all Anthem-side changes across all phases. Prism and Forge have their own specs.
 

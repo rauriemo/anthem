@@ -36,7 +36,7 @@ type RoutingResult struct {
 }
 
 type GuestPromptOpts struct {
-	Mode           string
+	Mode           types.Mode
 	ChannelKind    string
 	PlanContent    string
 	StoryContext   *StoryContext
@@ -236,7 +236,7 @@ func buildGuestPrompt(persona, projectSummary, sharedCtx, history, userMsg strin
 		sb.WriteString("\n")
 	}
 
-	if opts.Mode == "plan" && opts.PlanContent != "" {
+	if opts.Mode == types.ModePlan && opts.PlanContent != "" {
 		sb.WriteString("## Current Plan\n\n")
 		sb.WriteString(opts.PlanContent)
 		sb.WriteString("\n\n## Your Task\n\n")
@@ -334,7 +334,7 @@ func buildGuestPrompt(persona, projectSummary, sharedCtx, history, userMsg strin
 		sb.WriteString("Respond to this specific instruction. The full message above is provided for context.\n")
 	}
 
-	if opts.Mode == "fast" {
+	if opts.Mode == types.ModeChat {
 		sb.WriteString("\nBe concise.\n")
 	}
 
@@ -369,7 +369,7 @@ type guestDispatchParams struct {
 	projectSummary   string
 	featureContext   string
 	userContext      string
-	mode             string
+	mode             types.Mode
 	channelKind      string
 	planContent      string
 	planStore        *plans.Store
@@ -638,7 +638,7 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 
 			// Handle plan edits
 			chatText := responseText
-			if p.mode == "plan" && p.planStore != nil {
+			if p.mode == types.ModePlan && p.planStore != nil {
 				explanation, planMd, hasEdit := extractPlanEdit(responseText)
 				if hasEdit {
 					planEditMu.Lock()

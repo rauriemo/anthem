@@ -5,6 +5,25 @@ import (
 	"testing"
 )
 
+func TestModeString(t *testing.T) {
+	tests := []struct {
+		mode Mode
+		want string
+	}{
+		{ModeChat, "chat"},
+		{ModePlan, "plan"},
+		{ModeExecute, "execute"},
+		{ModeLoop, "loop"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			if got := tt.mode.String(); got != tt.want {
+				t.Fatalf("Mode.String() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTransition_Legal(t *testing.T) {
 	tests := []struct {
 		from Status

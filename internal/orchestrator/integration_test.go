@@ -105,14 +105,14 @@ func TestTick_DirtySnapshotGating(t *testing.T) {
 	})
 
 	// First tick — should consult orchestrator
-	orch.tick(context.Background())
+	orch.Tick(context.Background())
 	firstCalls := consultCalls
 
 	// Wait for dispatch goroutine to complete
 	time.Sleep(100 * time.Millisecond)
 
 	// Second tick with same state — snapshot hash unchanged, should skip
-	orch.tick(context.Background())
+	orch.Tick(context.Background())
 
 	if consultCalls != firstCalls {
 		t.Errorf("orchestrator consulted %d times on unchanged snapshot, expected %d", consultCalls, firstCalls)
@@ -167,7 +167,7 @@ func TestTick_FiltersReplyAndDisplayFromPollingCycle(t *testing.T) {
 		ChannelManager: mgr,
 	})
 
-	orch.tick(context.Background())
+	orch.Tick(context.Background())
 	time.Sleep(100 * time.Millisecond)
 
 	sent := ch.sentMessages()
@@ -279,7 +279,7 @@ func TestTick_OrchestratorFallback(t *testing.T) {
 		OrchAgent:    orchAgent,
 	})
 
-	orch.tick(context.Background())
+	orch.Tick(context.Background())
 	time.Sleep(200 * time.Millisecond)
 
 	if !fallbackDispatched {

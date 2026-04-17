@@ -4,241 +4,195 @@
 [![Go](https://img.shields.io/badge/Go-1.26.1+-00ADD8?logo=go)](https://go.dev/dl/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Anthem** is an agentic loop orchestrator for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It runs two layers: an **intelligence layer** (an AI orchestrator that plans, decomposes features, and communicates in your chosen voice) and a **harness layer** (headless Claude Code workers that execute tasks inside isolated workspaces with constraints and guardrails).
+**Anthem** is a project agent runtime. Each project you work on gets its own Anthem instance -- a persistent orchestrator plus a roster of guest specialist agents -- that you talk to conversationally, plan alongside, and hand off multi-agent pipelines to. Anthem is the daemon that keeps those agents coordinated, the context in sync, and the pipelines moving.
 
-Describe a feature -- by voice, Slack message, or GitHub issue -- and Anthem breaks it into tasks, dispatches concurrent coding agents, tracks cost and progress, retries failures, and closes issues when done. The orchestrator makes the decisions; the daemon enforces the rules.
+Autonomous issue-driven execution (the original "agentic loop") is now one of four modes, not the headline identity.
 
-[Design docs](docs/plans/architecture.md) | [Build plan](docs/plans/implementation.md) | [WORKFLOW.md schema](#configuration-reference) | [Dispatch](https://github.com/rauriemo/dispatch) (voice-first client)
+[Modes reference](docs/architecture/modes.md) | [Architecture](docs/plans/architecture.md) | [Guest agents](docs/plans/guest-agents.md) | [Prism](https://github.com/rauriemo/prism) (visual workstation) | [Forge](https://github.com/rauriemo/forge) (project scaffolder) | [Dispatch](https://github.com/rauriemo/dispatch) (voice channel)
 
-> **Safety note:** Anthem runs a coding agent that can edit files and execute commands. Start in a trusted repo, keep `permission_mode: dontAsk` (the default) until you're comfortable, and use [constraints](#constraints) to define non-negotiables. See the [safety model](#permission-model) below.
+> **Safety note:** Anthem runs coding agents that can edit files and execute commands. Start in a trusted repo, keep `permission_mode: dontAsk` (the default) until you're comfortable, and use [constraints](#constraints) to define non-negotiables. See the [permission model](#permission-model) below.
+
+## The Four Modes
+
+Every message you send Anthem runs in exactly one mode. Mode is selected explicitly via a `[system:<mode>]` tag; the default is Chat.
+
+| Mode | Purpose | Who runs | Artifacts |
+|------|---------|---------|-----------|
+| **Chat** | Conversational replies, quick questions, @-mentions of guest specialists, reasoning and small edits | Orchestrator (+ any `active_guests`) | Text + optional display frames |
+| **Plan** | Iterative planning with exploration, evidence-backed markdown plans, plan-card handoff | Plan agent (three-phase explorer pipeline, read-only) | Markdown plan in `~/.anthem/plans/` |
+| **Execute** | Run an approved multi-agent handoff chain -- a sequence of guest agents producing and consuming artifacts, with human approval gates between steps | `PlanRunner` over guest agents | Structured artifacts in `.context/` + execution events |
+| **Loop** | Opt-in autonomous backend. Polls a work source (GitHub issues), claims tasks, dispatches Claude Code workers, retries, and closes on completion | Configured `ExecutionBackend` (e.g. GitHub loop) | Tracker updates + audit log |
+
+Loop is what Anthem used to be by default. It is now one explicit mode that you turn on for issue-driven projects -- most project agents never touch it.
+
+See [docs/architecture/modes.md](docs/architecture/modes.md) for the canonical description of how each mode is wired.
 
 ## Quick Start
+
+For a conversational project agent (default):
 
 ```bash
 # 1. Install
 go install github.com/rauriemo/anthem/cmd/anthem@latest
 
-# 2. Initialize (in the repo you want Anthem to work on)
+# 2. Initialize (in the repo you want an agent for)
 cd /path/to/your-repo
 anthem init
 
-# 3. Edit WORKFLOW.md -- set tracker.repo to your GitHub repo
-#    (this is the only line you must change)
-
-# 4. Authenticate GitHub
-gh auth login          # or: export GITHUB_TOKEN="ghp_..."
-
-# 5. Create a test issue on GitHub with the label "todo"
-
-# 6. Run
+# 3. Run
 anthem run --log-level info
 ```
 
-**You're done when:**
-1. You see a `dispatching task` log line
-2. Your issue gets the `in-progress` label while the agent works
-3. On completion the issue receives your terminal label (e.g. `done`) and closes
-4. A workspace directory appears under `./workspaces/`
+That's it -- Anthem starts in Chat mode, listens on the configured channels (Prism, Dispatch, Slack...), and waits for messages. No GitHub issues, no polling, no tracker configuration required.
 
-<details>
-<summary>Expected log output</summary>
+To enable Loop mode, keep the default scaffold and add a tracker block to `WORKFLOW.md`:
 
+```yaml
+tracker:
+  kind: github
+  repo: "owner/repo"
+  labels:
+    active: ["todo", "in-progress"]
+    terminal: ["done"]
 ```
-{"level":"INFO","msg":"starting anthem","tracker":"github"}
-{"level":"INFO","msg":"orchestrator started","interval_ms":10000,"max_concurrent":3}
-{"level":"INFO","msg":"dispatching task","task_id":"1","identifier":"GH-1","title":"Add a CONTRIBUTING.md file"}
-{"level":"INFO","msg":"task completed","task_id":"1","exit_code":0,"cost_usd":0.058,...}
-```
-</details>
 
-Press `Ctrl+C` to stop. Anthem drains active agents (up to 10s), releases all claims, and saves state for next startup.
+Then start Loop mode by sending a `[system:loop]` message, or use a WORKFLOW-level opt-in (see [modes.md](docs/architecture/modes.md)).
 
 ## How It Works
 
 ```mermaid
-flowchart LR
-  U["You\n(Voice / Slack / GitHub)"] -->|describe feature| OA["Orchestrator agent\n(Claude + orchestrator.md\n+ VOICE.md)"]
-  OA -->|create issues| GH["GitHub Issues"]
-  GH -->|poll| D["Anthem daemon\n(Go)"]
-  D -->|dispatch| W[Workspace per task]
-  W -->|run| EA["Executor agents\n(Claude Code)"]
-  EA -->|"result + cost"| D
-  D -->|"label + close"| GH
-  D -->|events| AUD["audit.db"]
-  D -->|notifications| U
+flowchart TD
+  User["User\n(Prism / Dispatch / Slack)"] -->|"message + [system:<mode>]"| Router["Mode router"]
+  Router -->|chat| Chat["Chat handler\norchestrator + active guests"]
+  Router -->|plan| Plan["Plan pipeline\nscout -> explore -> synthesize"]
+  Router -->|execute| Exec["PlanRunner\nstep -> gate -> artifact -> next step"]
+  Router -->|loop| Loop["ExecutionBackend\npoll tracker -> dispatch Claude Code"]
+  Exec -->|guest runs| Guests["Guest agents\n(headless Claude Code)"]
+  Loop -->|tasks| Guests
+  Chat --> Stream["stream / res / display"]
+  Plan --> Card["plan-card in chat"]
+  Exec --> Events["execution.* events\n(Prism consumes)"]
+  Loop --> Tracker["Tracker updates"]
 ```
 
-1. You describe a feature or goal -- by voice command, Slack message, or GitHub issue with a label (e.g. `todo`)
-2. The orchestrator agent (intelligence layer) decomposes it into tasks, creates GitHub issues, and plans dispatch in waves
-3. Anthem's Go daemon polls for labeled issues, builds a state snapshot, and validates the orchestrator's proposed actions against a typed contract
-4. For each dispatched task: create an isolated workspace, run hooks, render the prompt with constraints, spawn a headless Claude Code worker (harness layer)
-5. Claude Code runs autonomously. Anthem streams output, tracks cost, and detects stalls
-6. On success: labels updated, issue closed, retry state cleared
-7. On failure: exponential backoff, retry comment posted
-8. Everything is recorded in the SQLite audit log. Events pushed to connected channels (voice, Slack)
+All four modes share the same underlying primitives: guest agent roster, `.context/` for shared state, the channel protocol, and the audit log. What changes is who decides what runs next.
 
-If the orchestrator is disabled or fails, Anthem falls back to mechanical dispatch -- every eligible issue gets dispatched directly.
+- **Chat / Plan**: the orchestrator (a Claude session) decides.
+- **Execute**: code decides, following an approved `ExecutionPlan`. Agents own content; the runner owns control flow.
+- **Loop**: an `ExecutionBackend` decides by polling a work source.
 
-### Label Lifecycle
+## Execute Mode (v1)
 
-```mermaid
-stateDiagram-v2
-  state "todo" as Todo
-  state "in-progress" as InProgress
-  state "done" as Done
-  [*] --> Todo: issue labeled
-  Todo --> InProgress: Anthem claims task\n(adds in-progress, removes other active labels)
-  InProgress --> Done: success\n(adds terminal label, closes issue)
-  InProgress --> Todo: failure/abort\n(removes in-progress)
-```
+Execute runs linear handoff chains of guest agents with optional human approval gates. Shipping today:
 
-The `in-progress` label is hard-coded. Include it in your `labels.active` list so Anthem can see tasks that were mid-flight if it restarts.
+- **ExecutionPlan schema** -- ordered `PlanStep` list, optional `DependsOn` for explicit linear order, optional `ApprovalGate` after any step, plan metadata. Validated for duplicate IDs, unknown agents, cycles, and missing dependencies.
+- **PlanRunner** -- runs steps mechanically: `pending -> running -> completed/failed`. On failure it pauses the plan. It does not retry on its own; humans or revision gates drive recovery.
+- **ArtifactProvider** -- `ContextArtifactProvider` reads `.context/features/<feature>/artifacts.yaml` (and writes upstream manifests for the next step). `FilesystemArtifactProvider` is the fallback for projects without `.context/`, using file modtime snapshots.
+- **Approval gates** -- when a gate is configured after a step, the runner emits `execution.gate_opened` with the collected artifacts, blocks, and waits for a `GateResolution` (`approve` / `revise` / `abort`). Prism renders the gate UI; Anthem owns the state.
+- **Execution event protocol** -- stable JSON events consumed by Prism:
+
+  | Event | When |
+  |-------|------|
+  | `execution.plan_loaded` | Plan accepted and validated |
+  | `execution.step_queued` | Step eligible to run |
+  | `execution.step_started` | Step dispatched to its guest |
+  | `execution.step_completed` | Step finished, artifacts collected |
+  | `execution.step_failed` | Step error, plan paused |
+  | `execution.gate_opened` | Approval gate active, waiting for human |
+  | `execution.gate_resolved` | Human resolved the gate |
+  | `execution.plan_completed` | Every step completed |
+  | `execution.plan_aborted` | Plan aborted at a gate or by error |
+
+Design principles locked in for v1:
+
+- Code owns control flow: step advancement, dependency resolution, gate state, artifact registration, event emission.
+- Agents own content: prompts, analysis, file output.
+- No autonomous retries. The runner stops on failure and waits for human intervention.
+- Linear chains only in v1. Parallel DAG branches and for-each fan-out are deferred to Execute v2.
 
 ## Installation
 
-**Recommended** (Go install):
 ```bash
 go install github.com/rauriemo/anthem/cmd/anthem@latest
 ```
 
-**From source** (for contributors):
-```bash
-git clone https://github.com/rauriemo/anthem
-cd anthem
-go build -o anthem ./cmd/anthem
-```
+**Requires:** Go 1.26.1+, Claude Code CLI (`claude --version`). Loop mode also requires GitHub auth (`gh auth status` or `GITHUB_TOKEN`).
 
 On Windows, if Smart App Control blocks `go run`, build and run the binary directly (`go build ./cmd/anthem` then `.\anthem.exe`).
 
-**Requires:** Go 1.26.1+, Claude Code CLI (`claude --version`), GitHub auth (`gh auth status` or `GITHUB_TOKEN`).
-
-**Optional (for video-to-spritesheet post-processing):**
+**Optional (for video-to-spritesheet post-processing in guest pipelines):**
 
 ```bash
-# ffmpeg -- frame extraction from generated videos
 winget install Gyan.FFmpeg          # Windows
 brew install ffmpeg                 # macOS
-
-# rembg -- AI background removal from sprite frames
 pip install "rembg[cli,cpu]"        # CPU inference
 pip install "rembg[cli,gpu]"        # NVIDIA/CUDA GPU (faster)
 ```
 
-Both must be on PATH when Anthem starts. The post-process pipeline degrades gracefully: if either tool is missing, the corresponding step is skipped and the raw artifact is kept.
-
-**Post-process operation config keys:**
-
-| Op | Key | Default | Description |
-|----|-----|---------|-------------|
-| `extract_video_frames` | `fps` | `8` | Frame extraction rate |
-| `remove_background` | `model` | `isnet-anime` | rembg model name |
-| `normalize_frames` | `padding` | `4` | Transparent padding (px) around content |
-| `normalize_frames` | `alpha_threshold` | `4096` | Alpha floor (0–65535). Pixels at or below this opacity are treated as transparent. Cleans up rembg residue halos |
-| `normalize_frames` | `alpha_snap` | `0` (disabled) | Alpha binarization threshold (0–65535). Pixels above become fully opaque, at or below become transparent. 0 disables. Eliminates rembg soft-edge bleeding on character limbs |
-| `stitch_spritesheet` | `columns` | `4` | Grid columns in output sheet |
-| `stitch_spritesheet` | `keep_video` | `false` | Retain source MP4 after stitching |
-
-## Features
-
-- **GitHub issue-driven**: poll by label, claim, dispatch, update status, close on completion
-- **AI orchestrator agent**: persistent Claude session that plans dispatch in waves, proposes actions via a validated contract, falls back to mechanical dispatch on failure
-- **Voice commands via [Dispatch](https://github.com/rauriemo/dispatch)**: say "hey anthem, build a login page" -- the orchestrator decomposes and dispatches, responds aloud
-- **Two-way Slack integration**: send feature requests, commands, and approvals; orchestrator decomposes into subtasks and replies in-thread
-- **Multi-format input**: plain text, markdown specs, mermaid diagrams, or images -- decomposed into GitHub issues
-- **Concurrent agents**: configurable global and per-label concurrency
-- **Rules engine**: label/title matching, approval gates, auto-assign, budget caps
-- **Two-tier constraints**: user-level + project-level safety rules injected into every prompt, protected by a meta-constraint agents cannot remove
-- **Per-task workspaces**: isolated directories with lifecycle hooks
-- **SQLite audit log**: append-only event log for dispatches, retries, wave transitions, orchestrator actions, voice updates
-- **Maintenance scanner**: detects repeated failures, stale tasks, budget anomalies, and drift -- notifies via channel
-- **Two-file identity model**: orchestrator character lives in project-specific `agents/orchestrator.md`; shared user knowledge in `~/.anthem/VOICE.md`. `update_voice` routes character sections (Identity, Personality, Your Focus, Coordination) to the orchestrator file and user sections to VOICE.md. Changes logged to `~/.anthem/voice-changelog.md`
-- **Retry with backoff**: failed tasks retry with exponential delays
-- **State persistence**: retry queue and cost data survive restarts
-- **Config hot-reload**: edit WORKFLOW.md while running
-- **Graceful shutdown**: drains agents, releases claims, saves state on Ctrl+C
-- **Cross-platform**: Windows (Job Objects), macOS/Linux (process groups)
-- **Plan / Agent / Build modes**: orchestrator supports three channel modes — Plan (markdown-only planning using a dedicated prompt that omits JSON actions and HTML display), Agent (full JSON actions with plan context), and Build (approved plan → GitHub issue creation). Mode selected by `[system:plan]` / `[system:build]` tags; default is agent
-- **Plan-card in chat**: after plan finalization, the orchestrator sends a structured plan-card to the channel — rendered in Prism as a UI card with title, task list, "View Plan" link, model dropdown, and "Build" button for one-click dispatch
-- **Model selection**: `[model:claude-xxx]` tags in messages select the Claude model for any path (lean, plan, build, agent). Supports Sonnet, Opus, Haiku across versions
-- **Plan storage**: markdown plans saved to `~/.anthem/plans/{project-slug}/` with YAML frontmatter. Plan history and latest draft injected into agent-mode context for seamless plan-to-agent handoff
-- **Auto-label on subtask creation**: newly created subtasks auto-receive the first configured active label (e.g. `todo`) if not already present, ensuring immediate visibility in kanban and dispatch
-- **Dependency ordinal remapping**: `depends_on` in `create_subtasks` uses 1-based ordinals (e.g. `[1, 2]`); the daemon remaps to real GitHub issue IDs after creation
-- **Agent respec flow**: conversational `/respec` command for creating or updating any agent's `.md` file. The orchestrator walks through 5 phases (identity, personality, focus, coordination, flavor), writing changes after each phase. Supports orchestrator (`/respec`) and guest agents (`/respec <name>`). Cancel mid-flow with `/respec cancel`; all changes written so far are kept
-- **`update_agent_meta` action**: writes YAML frontmatter fields (name, description, role, capabilities, icon, quotes) to any agent file. Path-safe validation prevents writes outside `agents/`
+Both must be on PATH when Anthem starts. The post-process pipeline degrades gracefully: missing tools cause the corresponding step to be skipped.
 
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `anthem init` | Create starter WORKFLOW.md, `agents/orchestrator.md`, and bootstrap `~/.anthem/` |
-| `anthem run` | Start the orchestrator |
+| `anthem init` | Create starter `WORKFLOW.md`, `agents/orchestrator.md`, `.context/`, and bootstrap `~/.anthem/` |
+| `anthem run` | Start the runtime (Chat mode by default; Loop starts if enabled in config) |
 | `anthem run -w path/to/WORKFLOW.md` | Use a specific workflow file |
 | `anthem run --log-level debug` | Verbose logging |
-| `anthem validate` | Check WORKFLOW.md syntax without starting |
+| `anthem validate` | Check `WORKFLOW.md` syntax without starting |
 | `anthem version` | Print version |
 
 ## Configuration Reference
 
-### Minimal WORKFLOW.md
-
-If you only change one line, change `tracker.repo`:
+### Minimal WORKFLOW.md (Chat / Plan / Execute only)
 
 ```yaml
 ---
-tracker:
-  kind: github
-  repo: "owner/repo"
-  labels:
-    # Issues with ANY of these labels are eligible.
-    # Anthem adds "in-progress" while working and removes other active labels.
-    active: ["todo", "in-progress"]
-    terminal: ["done"]
-
-polling:
-  interval_ms: 10000
-
 workspace:
   root: "./workspaces"
-
-hooks:
-  after_create: "git clone {{issue.repo_url}} ."
-  before_run: "git pull origin main"
 
 agent:
   command: "claude"
   max_turns: 5
   max_concurrent: 3
   stall_timeout_ms: 300000
-  max_retry_backoff_ms: 300000
+
+channels:
+  - kind: prism
+    target: "localhost:3101"
 
 system:
   constraints:
     - "Never commit secrets or credentials"
-    - "Run tests before opening a PR"
-
-server:
-  port: 8080
 ---
 
 You are an expert software engineer working on {{.issue.title}}.
 
-Repository: {{.issue.repo_url}}
-Branch: anthem/{{.issue.identifier}}
-
 ## Task
 {{.issue.body}}
-
-## Rules
-- Create a branch named `anthem/{{.issue.identifier}}`
-- Make small, focused commits
-- When done, open a PR and comment a summary on the issue
 ```
 
-The file has two parts separated by `---`:
-- **YAML front matter** -- tracker, polling, agent, rules, constraints, channels
-- **Go template body** -- the prompt sent to Claude Code, with access to `{{.issue.title}}`, `{{.issue.body}}`, `{{.issue.identifier}}`, `{{.issue.repo_url}}`, and `{{.issue.labels}}`
+### Adding Loop mode
 
-The template engine supports [sprig functions](http://masterminds.github.io/sprig/).
+Add a `tracker:` block and (optionally) `polling:` to run an autonomous backend alongside the conversational modes:
+
+```yaml
+tracker:
+  kind: github
+  repo: "owner/repo"
+  labels:
+    active: ["todo", "in-progress"]
+    terminal: ["done"]
+
+polling:
+  interval_ms: 10000
+
+hooks:
+  after_create: "git clone {{issue.repo_url}} ."
+  before_run: "git pull origin main"
+```
+
+Once configured, send `[system:loop]` to start the backend, or wire WORKFLOW-level auto-start (see modes.md).
 
 ### Permission Model
 
@@ -252,7 +206,7 @@ agent:
     - "Glob"
     - "Bash(git *)"
     - "Bash(go test *)"
-  denied_tools:                 # Explicit deny (overrides allow)
+  denied_tools:
     - "Bash(git push --force *)"
 ```
 
@@ -262,25 +216,17 @@ In `dontAsk` mode (the default), only tools in `allowed_tools` are auto-approved
 
 ```yaml
 orchestrator:
-  enabled: true                 # false = mechanical dispatch only
-  max_context_tokens: 80000     # Token threshold before session refresh
-  max_turns: 10                 # Turn budget for agent/build mode consults
+  enabled: true                 # false = skip the agent layer entirely
+  max_context_tokens: 80000     # Session refresh threshold
+  max_turns: 10                 # Turn budget for chat/execute consults
   plan_max_turns: 25            # Fallback turn budget for simple plan requests
   explorer_max_turns: 10        # Turn budget per explorer subagent
   max_explorers: 5              # Max parallel explorer subagents
 ```
 
-When enabled, the orchestrator agent (a persistent Claude session) plans task dispatch in waves. When disabled or on failure, Anthem falls back to mechanical dispatch.
+Plan mode uses a three-phase explorer architecture: **scout** (read file tree, identify 1-5 areas) → **explore** (parallel read-only Claude Code subagents) → **synthesize** (evidence-backed markdown plan). Write tools are denied across the entire plan pipeline. For trivial requests (scout returns 0 explores), plan mode falls back to a single-run consultation using `plan_max_turns`.
 
-Plan mode uses a **three-phase explorer architecture** for deep, evidence-based planning:
-
-1. **Scout** (8 turns) -- the plan agent reads the file tree, identifies 1-5 areas needing focused research
-2. **Explore** (parallel) -- the Go daemon spawns parallel Claude Code processes, one per area, each with a focused research question and read-only tools
-3. **Synthesize** (10 turns) -- the plan agent receives all explorer findings and produces a plan backed by verified evidence
-
-For trivial requests (scout returns 0 explores), plan mode falls back to a single-run consultation using `plan_max_turns`. All plan mode agents are read-only -- write tools (Write, Edit, MultiEdit) are denied.
-
-Plan output is **markdown-only**: plan mode uses `buildPlanSystemPrompt` which omits JSON actions and HTML display instructions, ensuring the LLM produces structured markdown via `anthem-plan` fenced blocks. After finalization, a **plan-card** is sent to the channel for rendering in Prism's chat UI with a "Build" button for one-click dispatch. All plans are saved to `~/.anthem/plans/`, ensuring plan context is always available when switching to agent or build mode.
+Plan output is markdown-only, saved to `~/.anthem/plans/{project-slug}/` with YAML frontmatter. A **plan-card** is then sent to the channel so Prism can render structured controls (View / Refine / Execute).
 
 ### Agent Profiles and Harnesses
 
@@ -288,26 +234,18 @@ Anthem uses a three-layer "Registry + Reference" architecture for agent configur
 
 ```yaml
 agent:
-  # Layer 1: MCP Server Registry (capabilities — define once)
   mcp_servers:
-    # Unity: prefer Unity's official MCP relay (com.unity.ai.assistant 2.x), not npx.
-    # Example (Windows path — use your %USERPROFILE%\.unity\relay\relay_win.exe):
-    # unity:
-    #   command: "C:/Users/You/.unity/relay/relay_win.exe"
-    #   args: ["--mcp"]
     unity:
-      command: "npx"
-      args: ["-y", "@anthropic/unity-mcp-server"]
+      command: "C:/Users/You/.unity/relay/relay_win.exe"
+      args: ["--mcp"]
     semgrep:
       command: "semgrep-mcp"
       args: ["--config", "auto"]
 
-  # Layer 2: Skill Registry (knowledge — define once)
   skills:
     - "anthem://owasp-checklist"
     - "./skills/unity-patterns"
 
-  # Layer 3: Profiles (compose by reference)
   profiles:
     coder:
       prompt_prefix: "You are a coding agent. Write clean, tested code."
@@ -319,22 +257,15 @@ agent:
       mcp_refs: ["semgrep"]
       skill_refs: ["anthem://owasp-checklist"]
       denied_tools: ["Write", "Edit", "MultiEdit"]
-    unity-designer:
-      prompt_prefix: "You are a Unity game designer agent..."
-      mcp_refs: ["unity"]
-      skill_refs: ["./skills/unity-patterns"]
-      model: "opus"
 
   review_enabled: true
   review_max_turns: 3
   review_max_retries: 1
 ```
 
-**MCP servers** are external tools (Unity Editor via [Unity MCP](https://docs.unity3d.com/Packages/com.unity.ai.assistant@2.0/manual/unity-mcp-overview.html), semgrep, databases) registered by name. **Skills** are SKILL.md knowledge packages (OWASP checklists, coding patterns) Claude Code discovers automatically. **Profiles** compose these by reference — `mcp_refs` and `skill_refs` point to registry entries. Adding a new agent type (animator, database agent, image generator) requires only a YAML profile entry.
+**MCP servers** are external tools (Unity Editor, semgrep, databases) registered by name. **Skills** are `SKILL.md` knowledge packages. **Profiles** compose these by reference — `mcp_refs` and `skill_refs` point to registry entries.
 
 **Guest agents** (project `agents/*.md`) can declare their own `mcp_servers` and `allowed_tools`; Anthem merges them with this global registry when dispatching a guest and writes the combined **`{workspace}/.mcp.json`** so Claude Code can attach to Unity and other stdio/HTTP MCP servers.
-
-Before each agent launch, Anthem writes `.mcp.json` and copies skills to `.claude/skills/` in the workspace. Claude Code auto-discovers both via its native three-level progressive loading.
 
 #### Built-in Skills
 
@@ -349,99 +280,20 @@ Anthem ships 6 core skills compiled into the binary via `go:embed`. These are au
 | `anthem://go-cli` | Go CLI doctrine: command grammar, exit codes, agent-friendly design | coder |
 | `anthem://commit-hygiene` | Conventional commits, separation of concerns, PR quality | coder |
 
-Global skills apply to every agent. Profile-specific skills are loaded only when that profile is active. User-added skills in `~/.anthem/skills/` are also supported as a filesystem fallback.
-
 ### Channels
 
-Two-way communication with the orchestrator via pluggable channel adapters. Global credentials live in `~/.anthem/channels.yaml`; per-project channel targets go in WORKFLOW.md.
+Two-way communication with the runtime via pluggable channel adapters. Global credentials live in `~/.anthem/channels.yaml`; per-project channel targets go in `WORKFLOW.md`.
 
-#### Dispatch (voice)
+- **Prism** -- primary UI. Visual canvas, chat, mode selector, approval gate UI, artifact viewer. Anthem runs a WebSocket server; Prism connects in.
+- **Dispatch** -- voice channel. WebSocket server, voice notifications, chat via voice.
+- **Slack** -- two-way Slack integration via Socket Mode.
+- **Voice Room** -- always-on LiveKit voice chat with the orchestrator (Deepgram STT + ElevenLabs TTS).
 
-[Dispatch](https://github.com/rauriemo/dispatch) is a voice-first command channel that connects to Anthem over WebSocket. Say "hey anthem" followed by a command -- the orchestrator processes it and speaks the response aloud.
-
-Anthem acts as the server; Dispatch connects in and authenticates with a shared token.
-
-`~/.anthem/channels.yaml`:
-```yaml
-dispatch:
-  token: "your-shared-secret"
-```
-
-WORKFLOW.md:
-```yaml
-channels:
-  - kind: dispatch
-    target: "localhost:8081"     # Address Anthem listens on
-    events: [task.completed, task.failed, maintenance.suggested]
-```
-
-#### Slack
-
-`~/.anthem/channels.yaml`:
-```yaml
-slack:
-  bot_token: "xoxb-your-bot-token"
-  app_token: "xapp-your-app-token"
-```
-
-WORKFLOW.md:
-```yaml
-channels:
-  - kind: slack
-    target: "C0123456789"       # Channel ID
-    events: [task.completed, task.failed, maintenance.suggested]
-```
-
-Requires a Slack app with Socket Mode enabled, `message.channels` event subscription, and bot scopes: `channels:history`, `channels:read`, `chat:write`, `files:read`.
-
-#### Voice Room (always-on voice chat)
-
-The voice channel provides an always-on voice room where users converse with the orchestrator via WebRTC audio (LiveKit). The orchestrator speaks responses via ElevenLabs TTS and manages guest agents silently in the background.
-
-**Strategy note:** The original architecture doc reserved ElevenLabs for Phase 3 (per-agent voice identity), with Google Cloud TTS for Phase 1. This was changed intentionally -- ElevenLabs ships from Phase 1 because its WebSocket streaming API is lower-latency than Google's REST endpoint, the API key and agent voice IDs were already configured, and building a Google TTS provider would be throwaway work.
-
-**Provider choices:**
-- **STT:** Deepgram `nova-3` (not `nova-3-agent`). We disable Deepgram's built-in endpointing (`endpointing=false`) because our own `TurnDetector` handles silence timeout, utterance length, and confidence filtering. This avoids conflicting turn-commit logic.
-- **TTS:** ElevenLabs `eleven_flash_v2_5` via WebSocket stream-input. ~75ms first-byte latency. Per-agent voice IDs are configured in agent frontmatter (`voice_id`, `voice_model`, `voice_priority`).
-- **Transport:** LiveKit WebRTC SFU. Anthem joins as a bot participant, subscribes to user audio, publishes TTS audio.
-
-**Audio format contract:**
-
-| Stage | Format | Sample Rate | Channels |
-|-------|--------|-------------|----------|
-| LiveKit inbound (user audio) | Opus -> PCM16 LE | 48kHz | mono |
-| Deepgram STT input | PCM16 linear16 | 48kHz | mono |
-| ElevenLabs TTS output | PCM16 | 24kHz | mono |
-| LiveKit outbound (agent audio) | PCM16 -> Opus | 24kHz | mono |
-
-No resampling anywhere in the pipeline. Inbound audio passes through at 48kHz; outbound at 24kHz. The publish loop slices variable-length TTS chunks into 20ms frames (480 samples at 24kHz).
-
-`~/.anthem/channels.yaml`:
-```yaml
-voice:
-  livekit_url: "wss://your-project.livekit.cloud"
-  livekit_api_key: "your-api-key"
-  livekit_api_secret: "your-api-secret"
-  deepgram_api_key: "your-deepgram-key"
-  elevenlabs_api_key: "your-elevenlabs-key"
-```
-
-WORKFLOW.md:
-```yaml
-channels:
-  - kind: voice
-    target: "anthem-voice"   # LiveKit room name (optional, defaults to "anthem-voice")
-```
-
-All 5 credentials are required. If any are missing, Anthem logs a warning and skips the voice channel (it does not crash). This matches how Slack handles missing bot tokens -- voice is optional infrastructure.
-
-The voice channel implements `channel.Channel` as `internal/channel/voice/adapter.go`. It uses pluggable provider interfaces (`StreamingSTT`, `StreamingTTS`) so STT/TTS providers can be swapped without changing room logic.
-
-Run `anthem init` to generate a `channels.yaml` template with setup instructions for all adapters.
+See [docs/plans/architecture.md](docs/plans/architecture.md) for credential formats and wire protocol details.
 
 ### Maintenance
 
-Periodic audit log analysis detects health issues and notifies via channels:
+Periodic audit log analysis detects health issues (Loop mode only; requires an audit trail of tasks):
 
 ```yaml
 maintenance:
@@ -454,36 +306,20 @@ maintenance:
 
 Signal types: `repeated_failure`, `stale_task`, `budget_anomaly`, `drift`.
 
-### Rules
-
-```yaml
-rules:
-  - match:
-      labels: ["planning"]
-    action: require_approval
-    approval_label: "approved"
-  - match:
-      labels: ["bug"]
-    action: auto_assign
-    auto_assignee: "alice"
-  - match:
-      title_pattern: "^fix:"
-    action: max_cost
-    max_cost: 5.00
-```
-
 ### Constraints
 
 Safety guardrails separate from personality, cannot be modified by agents.
 
 **User-level** (`~/.anthem/constraints.yaml`):
+
 ```yaml
 constraints:
   - "Never force-push to main or master"
   - "Never commit secrets, credentials, API keys, or tokens"
 ```
 
-**Project-level** (`system.constraints` in WORKFLOW.md):
+**Project-level** (`system.constraints` in `WORKFLOW.md`):
+
 ```yaml
 system:
   constraints:
@@ -496,63 +332,36 @@ Both levels combine into a `## Constraints (non-negotiable)` block in the prompt
 
 Anthem uses a two-file identity model:
 
-- **`agents/orchestrator.md`** -- Project-specific orchestrator character (Identity, Personality, Your Focus, Coordination). Lives alongside guest agent files in the project's `agents/` directory. Each project's orchestrator develops a unique personality over time. Created by `anthem init` or Forge scaffolding.
-- **`~/.anthem/VOICE.md`** -- Global user knowledge shared across all projects. Contains facts and stable preferences about the user (communication style, working habits, expertise) -- not project state and not agent self-description. Acts as an onboarding brief so new agents don't start blind.
+- **`agents/orchestrator.md`** -- Project-specific orchestrator character. Lives alongside guest agent files in the project's `agents/` directory. Each project's orchestrator develops a unique personality over time. Created by `anthem init` or Forge scaffolding.
+- **`~/.anthem/VOICE.md`** -- Global user knowledge shared across all projects. Facts and stable preferences about the user (communication style, working habits, expertise).
 
-```markdown
-# agents/orchestrator.md
----
-name: "MyProject"
-description: "Orchestrator for the MyProject workspace"
-role: orchestrator
----
-
-## Identity
-Name: Aria
-Role: Senior engineer
-
-## Personality
-- Direct and opinionated. Skip pleasantries.
-- Prefer shipping over perfection.
-```
-
-```markdown
-# ~/.anthem/VOICE.md
-## Communication Style
-- Prefers concise responses with code examples over walls of text.
-
-## Working Habits
-- Likes to review plans before implementation.
-```
-
-The orchestrator evolves both files via the `update_voice` action. Character sections (Identity, Personality, Your Focus, Coordination) route to `agents/orchestrator.md`; user-knowledge sections route to `~/.anthem/VOICE.md`. All routing decisions are logged. Changes to VOICE.md are also logged to `~/.anthem/voice-changelog.md`.
-
-**Migration**: On first run after upgrading, Anthem automatically migrates existing Identity/Personality sections from `~/.anthem/VOICE.md` to `agents/orchestrator.md`. If `orchestrator.md` already exists, migration is a no-op (a warning is logged if stale personality sections remain in VOICE.md).
+Character sections (Identity, Personality, Your Focus, Coordination) route to `agents/orchestrator.md`; user-knowledge sections route to `~/.anthem/VOICE.md`. All routing decisions are logged. Changes to VOICE.md are also logged to `~/.anthem/voice-changelog.md`.
 
 > **Note**: `orchestrator.md` is not a guest agent. It lives in `agents/` for authoring consistency but is explicitly excluded from the `GuestIndex` and never appears in Prism's guest roster.
 
 #### Agent Respec
 
-The `/respec` command starts a conversational flow for creating or updating an agent's `.md` file. The orchestrator walks through 5 phases (Core Identity, Personality, Focus & Scope, Coordination, Flavor), presenting 2-4 questions per phase and writing changes to the file immediately after each answer.
+The `/respec` command starts a conversational flow for creating or updating an agent's `.md` file. The orchestrator walks through 5 phases (Core Identity, Personality, Focus & Scope, Coordination, Flavor), writing changes to the file after each answer.
 
 - `/respec` -- respec the project's orchestrator agent
 - `/respec <name>` -- respec a guest agent (creates the file if new)
 - `/respec cancel` -- stop the flow (all changes written so far are kept)
 
-During a respec session, all messages in the channel are automatically routed to the respec handler. Only one respec can be active per channel at a time. The flow uses `update_agent_meta` for YAML frontmatter and `update_voice` (with `agent_file`) for markdown body sections.
-
-### State Files
+### State and Project Files
 
 | File | Purpose |
 |------|---------|
-| `agents/orchestrator.md` | Project-specific orchestrator character (Identity, Personality, Focus, Coordination) |
-| `~/.anthem/VOICE.md` | Shared user knowledge (communication style, habits, expertise) |
+| `agents/orchestrator.md` | Project-specific orchestrator character |
+| `agents/<slug>.md` | Guest agent personas |
+| `.context/artifacts.yaml` | Feature-level artifact registry (used by Execute) |
+| `.context/features/<feature>/` | Per-feature plans, artifacts, task-state, changelog |
+| `WORKFLOW.md` | Project config (YAML frontmatter + prompt template) |
+| `~/.anthem/VOICE.md` | Shared user knowledge |
 | `~/.anthem/constraints.yaml` | User-level safety rules |
-| `~/.anthem/channels.yaml` | Channel credentials (Slack tokens, Dispatch shared secret) |
-| `~/.anthem/state.json` | Persisted retry queue and cost data |
+| `~/.anthem/channels.yaml` | Channel credentials |
+| `~/.anthem/state.json` | Persisted retry queue and cost data (Loop mode) |
 | `~/.anthem/audit.db` | SQLite audit log |
-| `~/.anthem/voice-changelog.md` | Log of VOICE.md changes |
-| `~/.anthem/plans/` | Stored plan artifacts (markdown with YAML frontmatter) |
+| `~/.anthem/plans/` | Stored plan artifacts |
 
 ## Troubleshooting
 
@@ -560,35 +369,30 @@ During a respec session, all messages in the channel are automatically routed to
 |---------|-----|
 | `anthem: command not found` | Add `$GOPATH/bin` (or `$GOBIN`) to your PATH |
 | `claude` not found | Install Claude Code CLI, verify with `claude --version` |
-| No tasks picked up | Ensure your issue has a label from `tracker.labels.active` |
+| Nothing happens when I message Anthem | Verify the channel credentials in `~/.anthem/channels.yaml` and the `channels:` block in `WORKFLOW.md` |
+| Loop mode isn't picking up tasks | Ensure `tracker:` is configured and the issue has a label from `tracker.labels.active` |
 | Tasks stuck as `in-progress` after crash | Rerun Anthem -- it reconciles on startup. Include `in-progress` in `labels.active` |
-| Agent can't run a command | Add the command pattern to `allowed_tools` in WORKFLOW.md |
+| Execute plan fails mid-chain | Check `execution.step_failed` event in Prism for the error; plan is paused -- fix and resume, or abort |
+| Approval gate never opens in Prism | Verify the Prism channel is connected and the gate's step completed -- check the audit log for `execution.gate_opened` |
+| Agent can't run a command | Add the command pattern to `allowed_tools` in `WORKFLOW.md` |
 | GitHub auth fails | Check `gh auth status` or verify `GITHUB_TOKEN` has `repo` scope |
-| Slack not connecting | Verify Socket Mode is enabled on your Slack app and `app_token` starts with `xapp-` |
-| Dispatch not connecting | Check that Anthem is running first (it's the server), tokens match in both `channels.yaml` files, and the `target` address/port is reachable |
-| Video pipeline skips all steps | `ffmpeg` and/or `rembg` not on PATH. Install them (see Installation) and restart Anthem so the new PATH is inherited |
 
 ## Architecture
 
-Anthem uses a **hybrid architecture** inspired by [OpenAI Symphony](https://github.com/openai/symphony):
+Anthem's runtime has four main planes:
 
-- **Go daemon** (Phases 1-2): polling, process management, workspace isolation, retry, state persistence, config hot-reload. Validates and executes actions — never makes judgment calls.
-- **Orchestrator agent** (Phase 3a+): three modes of operation — **Plan** (markdown-only planning stored to `~/.anthem/plans/`; sends a plan-card to chat with Build button), **Agent** (JSON actions with full plan + project context, can edit code directly via Claude Code), and **Build** (plan → subtask issue creation). Falls back to mechanical dispatch on failure.
-- **Channel system** (Phase 3b): two-way communication via pluggable adapters (Slack, [Dispatch](https://github.com/rauriemo/dispatch) voice, and [Prism](https://github.com/rauriemo/prism) visual workstation). Users send feature requests by text, voice, or file attachment; orchestrator decomposes into subtasks.
-- **Executor agents**: headless Claude Code workers with specialist profiles (coder, architect, tester, debugger). Post-execution reviewer loop with automatic debugger retry.
-- **Audit log + maintenance**: append-only SQLite at `~/.anthem/audit.db` with decision traces. Scanner detects health signals and notifies via channels.
+- **Mode router** -- `internal/orchestrator/orchestrator.go` parses `[system:<mode>]` tags, routes to the matching handler, and tracks `CurrentMode` as observable state.
+- **Chat / Plan handlers** -- conversational pipeline backed by the orchestrator agent, guest dispatch, ConvoBuffer, and SharedContext.
+- **Execute subsystem** -- `internal/execute/` (PlanRunner, ArtifactProvider, event emitters) + `internal/plans/` (plan storage + schema).
+- **Execution backends** -- `internal/backend/` defines the `ExecutionBackend` interface; `GitHubLoopBackend` is the Loop mode implementation. Additional backends (Linear, webhook-driven, scheduled) can be added behind the same interface.
 
-See [architecture.md](docs/plans/architecture.md) for the full system design with component diagrams and interface definitions.
+Cross-cutting services:
 
-## Project Status
+- **Channel system** -- pluggable adapters (Prism, Dispatch, Slack, Voice) behind a common `Channel` interface. Execute events flow through the same pipe as chat and status updates.
+- **Audit log** -- append-only SQLite at `~/.anthem/audit.db`. Every dispatch, action, gate resolution, voice update, and execution event is recorded.
+- **Guest registry** -- `internal/guests/` scans `agents/`, parses frontmatter, caches the index, and exposes personas on demand. Both Chat (`@mentions` + `active_guests`) and Execute (`PlanStep.AgentID`) use the same registry.
 
-| Phase | Status | Highlights |
-|-------|--------|------------|
-| **1** | Complete | Core loop, GitHub tracker, Claude Code driver, CLI, ETag caching, constraints |
-| **2** | Complete | Rules engine, workspace manager, retry/backoff, shutdown, state persistence, hot-reload |
-| **3a** | Complete | Contract actions (10 types), SQLite audit, task state machine, orchestrator agent, wave dispatch |
-| **3b** | Complete | Slack + Dispatch (voice) channels, task decomposition, maintenance scanner, project context for orchestrator |
-| **4** | Complete | Frontier -- audit fixes, multi-LLM driver, DAG edges, promote_knowledge, reviewer loop, agent profiles, decision traces, orchestrator codebase awareness |
+See [architecture.md](docs/plans/architecture.md) for the full system design, interfaces, and data flow diagrams.
 
 ## Development
 
@@ -601,9 +405,9 @@ golangci-lint run ./...      # Lint (matches CI)
 
 ## Contributing
 
-Contributions welcome. If you're fixing a bug or adding a feature, please open an issue first so we can align on behavior -- especially around safety defaults, permissions, and label semantics.
+Contributions welcome. If you're fixing a bug or adding a feature, please open an issue first so we can align on behavior -- especially around safety defaults, permissions, mode semantics, and the Execute event protocol.
 
-See [architecture.md](docs/plans/architecture.md) and [implementation.md](docs/plans/implementation.md) for the canonical design.
+See [architecture.md](docs/plans/architecture.md) and [modes.md](docs/architecture/modes.md) for the canonical design.
 
 ## License
 

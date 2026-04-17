@@ -20,7 +20,9 @@ import (
 
 	"github.com/rauriemo/anthem/internal/agent"
 	"github.com/rauriemo/anthem/internal/audit"
+	backendpkg "github.com/rauriemo/anthem/internal/backend"
 	"github.com/rauriemo/anthem/internal/channel"
+	"github.com/rauriemo/anthem/internal/execute"
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/cost"
 	"github.com/rauriemo/anthem/internal/guests"
@@ -68,6 +70,10 @@ type Orchestrator struct {
 	storyStore      *StoryStore
 	proposalStore   *ProposalStore
 	activeRespecs   map[string]*respecSession
+	backend         backendpkg.ExecutionBackend
+	activePlanRunner *execute.PlanRunner
+
+	CurrentMode types.Mode
 
 	wg            sync.WaitGroup
 	mu            sync.Mutex
@@ -109,6 +115,11 @@ func New(opts Opts) *Orchestrator {
 	if ct == nil {
 		ct = cost.NewTracker()
 	}
+	defaultMode := types.ModeChat
+	if opts.Config.Tracker.Kind != "" {
+		defaultMode = types.ModeLoop
+	}
+
 	o := &Orchestrator{
 		cfg:             opts.Config,
 		body:            opts.TemplateBody,
@@ -132,6 +143,7 @@ func New(opts Opts) *Orchestrator {
 		convoBuf:        NewConvoBuffer(),
 		sharedCtx:       NewSharedContext(),
 		proposalStore:   NewProposalStore(30 * time.Minute),
+		CurrentMode:     defaultMode,
 	}
 
 	return o
@@ -140,10 +152,10 @@ func New(opts Opts) *Orchestrator {
 const shutdownDrainTimeout = 10 * time.Second
 const shutdownCleanupTimeout = 5 * time.Second
 
-// Run starts the orchestrator polling loop. Blocks until ctx is canceled,
-// then performs graceful shutdown (drain active dispatches, release claims).
+// Run starts the orchestrator. If a tracker is configured it starts a
+// GitHubLoopBackend that polls for work; otherwise it runs in channel-only
+// mode. Blocks until ctx is canceled, then performs graceful shutdown.
 func (o *Orchestrator) Run(ctx context.Context) error {
-	// Load and reconcile persisted state before first tick
 	if o.statePath != "" {
 		if err := o.LoadAndReconcile(ctx); err != nil {
 			o.logger.Warn("failed to load persisted state, starting fresh", "error", err)
@@ -162,38 +174,31 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.publish(types.Event{Type: "orchestrator.started"})
 
 	if o.tracker != nil {
-		interval := time.Duration(o.cfg.Polling.IntervalMS) * time.Millisecond
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		// Run first tick immediately
-		o.tick(ctx)
-
-		for {
-			select {
-			case <-ctx.Done():
-				o.logger.Info("orchestrator stopping, starting graceful shutdown")
-				o.Shutdown()
-				o.publish(types.Event{Type: "orchestrator.stopped"})
-				return ctx.Err()
-			case <-ticker.C:
-				o.tick(ctx)
-			}
+		b := backendpkg.NewGitHubLoopBackend(o, o.logger)
+		o.backend = b
+		if err := b.Start(ctx); err != nil {
+			return fmt.Errorf("starting execution backend: %w", err)
 		}
 	} else {
 		o.logger.Info("no tracker configured, running in channel-only mode")
-		<-ctx.Done()
-		o.logger.Info("orchestrator stopping, starting graceful shutdown")
-		o.Shutdown()
-		o.publish(types.Event{Type: "orchestrator.stopped"})
-		return ctx.Err()
 	}
+
+	<-ctx.Done()
+	o.logger.Info("orchestrator stopping, starting graceful shutdown")
+	o.Shutdown()
+	o.publish(types.Event{Type: "orchestrator.stopped"})
+	return ctx.Err()
 }
 
-// Shutdown drains active dispatches, releases all claims, and saves state.
+// Shutdown stops the execution backend (if running), drains active
+// dispatches, releases all claims, saves state, and closes the audit logger.
 // Safe to call after the polling context has been canceled.
 func (o *Orchestrator) Shutdown() {
-	// Wait for active dispatch goroutines to finish
+	if o.backend != nil {
+		o.backend.Stop()
+		o.backend = nil
+	}
+
 	done := make(chan struct{})
 	go func() {
 		o.wg.Wait()
@@ -207,10 +212,7 @@ func (o *Orchestrator) Shutdown() {
 		o.logger.Warn("shutdown timeout, force-killing active agents")
 	}
 
-	// Release all active claims and remove in-progress labels
 	o.releaseClaims()
-
-	// Save state for next startup
 	o.saveState()
 
 	if o.auditLogger != nil {
@@ -351,6 +353,13 @@ func (o *Orchestrator) configSnapshot() cfgSnapshot {
 	return cfgSnapshot{cfg: o.cfg, body: o.body}
 }
 
+// PollingIntervalMS returns the configured polling interval, satisfying backend.LoopHost.
+func (o *Orchestrator) PollingIntervalMS() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.cfg.Polling.IntervalMS
+}
+
 // ReloadConfig safely swaps the orchestrator's config and template body.
 // Goroutine-safe — called from the watcher goroutine while the orchestrator runs.
 func (o *Orchestrator) ReloadConfig(cfg *config.Config, body string) {
@@ -430,7 +439,10 @@ func (o *Orchestrator) projectRoot() string {
 	return root
 }
 
-func (o *Orchestrator) tick(ctx context.Context) {
+// Tick runs a single polling cycle: reconcile active runs, fetch tasks,
+// consult the orchestrator agent (or fall back to mechanical dispatch),
+// execute actions, and check wave exhaustion.
+func (o *Orchestrator) Tick(ctx context.Context) {
 	o.logger.Debug("tick start")
 
 	if throttler, ok := o.tracker.(interface{ ShouldThrottle() (bool, time.Duration) }); ok {
@@ -1777,8 +1789,12 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	}
 
 	// --- Guest dispatch for ALL modes (runs in parallel with mode handler) ---
+	// Exception: Plan mode first-draft. When the user is kicking off a new plan
+	// and no draft exists yet, guests stay silent so the orchestrator can draft
+	// cleanly. Once a draft exists, guests may contribute via plan-edit blocks.
 	var guestWg *sync.WaitGroup
 	var includeOrchestrator bool
+	planFirstDraft := false
 	if len(msg.ActiveGuests) > 0 && o.guestIndex != nil {
 		channelKey := msg.ChannelKind
 		o.convoBuf.RecordUserMessage(channelKey, msg.Text)
@@ -1787,23 +1803,31 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 
 		mode := o.detectMode(msg.Text)
 		planContent := ""
-		if mode == "plan" && o.planStore != nil {
+		if mode == types.ModePlan && o.planStore != nil {
 			slug := o.projectSlug()
 			if draft, draftErr := o.planStore.LatestDraft(slug); draftErr == nil && draft != nil {
 				planContent = draft.Body
 			}
 		}
-
-		summaries := o.buildGuestSummaries(msg.ActiveGuests)
-		result := routeToGuests(ctx, o.runner, msg.Text, summaries, history, sharedCtxText, o.logger)
-		selectedGuests := result.Guests
-		directedText := result.DirectedText
-		includeOrchestrator = result.IncludeOrchestrator
-		if result.ContextUpdate != "" {
-			o.sharedCtx.Update(channelKey, result.ContextUpdate)
+		planFirstDraft = mode == types.ModePlan && planContent == ""
+		if planFirstDraft {
+			o.logger.Debug("plan mode first draft; skipping guest dispatch")
 		}
-		if len(selectedGuests) == 0 && !includeOrchestrator {
-			o.logger.Debug("router returned empty guests and no orchestrator", "user_msg", msg.Text[:min(len(msg.Text), 80)])
+
+		var selectedGuests []string
+		var directedText map[string]string
+		if !planFirstDraft {
+			summaries := o.buildGuestSummaries(msg.ActiveGuests)
+			result := routeToGuests(ctx, o.runner, msg.Text, summaries, history, sharedCtxText, o.logger)
+			selectedGuests = result.Guests
+			directedText = result.DirectedText
+			includeOrchestrator = result.IncludeOrchestrator
+			if result.ContextUpdate != "" {
+				o.sharedCtx.Update(channelKey, result.ContextUpdate)
+			}
+			if len(selectedGuests) == 0 && !includeOrchestrator {
+				o.logger.Debug("router returned empty guests and no orchestrator", "user_msg", msg.Text[:min(len(msg.Text), 80)])
+			}
 		}
 
 		if len(selectedGuests) > 0 {
@@ -1855,38 +1879,61 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 		}
 	}
 
+	// Resolve per-message mode (system tags override default, respec already intercepted above).
+	msgMode := o.detectMode(msg.Text)
+
 	// When guests are dispatched and routing says orchestrator is not needed,
 	// let guests be the primary responders — skip orchestrator LLM response.
-	// Only action tags (build, status) force the orchestrator; mode hints
-	// (fast, plan) respect the routing decision so guests answer alone.
+	// Plan and Execute always force the orchestrator because it owns the plan
+	// document and pipeline dispatch; a guest alone cannot advance those modes.
+	// Chat and Loop respect the router's decision; status tag forces for legacy.
 	if guestWg != nil && !includeOrchestrator {
-		needsOrchestrator := strings.Contains(msg.Text, "[system:build]") ||
+		forceOrchestrator := msgMode == types.ModePlan ||
+			msgMode == types.ModeExecute ||
 			strings.Contains(msg.Text, "[system:status]")
-		if !needsOrchestrator {
+		if !forceOrchestrator {
 			o.finalizeGuestRound(ctx, msg, guestWg)
 			return
 		}
 	}
 
-	// Plan/build routing -- must be checked before fast path
-	if strings.Contains(msg.Text, "[system:build]") {
-		o.handleBuildMessage(ctx, msg, model)
+	// Route by mode enum
+	switch msgMode {
+	case types.ModeExecute:
+		if o.activePlanRunner != nil && isGateResolution(msg.Text) {
+			o.routeGateResolution(ctx, msg)
+			o.finalizeGuestRound(ctx, msg, guestWg)
+			return
+		}
+		if plan := o.tryLoadExecutionPlan(msg.Text); plan != nil {
+			o.handleExecuteMessage(ctx, msg, plan)
+			o.finalizeGuestRound(ctx, msg, guestWg)
+			return
+		}
+		// No structured plan. Execute v1 only dispatches structured
+		// ExecutionPlans via PlanRunner. Markdown plans, legacy [system:build]
+		// payloads, and ad-hoc execute messages all land here — reply with a
+		// clear pointer and do NOT fall through to tracker-issue minting.
+		o.sendFollowUp(ctx, msg,
+			"Execute mode requires a structured ExecutionPlan (YAML with steps/gates). "+
+				"Markdown plans from Plan mode cannot be executed directly in v1. "+
+				"To dispatch work, either compile this plan into a structured ExecutionPlan, "+
+				"or switch this runtime to Loop mode with a tracker configured for issue-based workflows.")
+		o.recordAudit(ctx, "channel.execute_unstructured", "", strPtr("execute"))
 		o.finalizeGuestRound(ctx, msg, guestWg)
 		return
-	}
-	if strings.Contains(msg.Text, "[system:plan]") {
+	case types.ModePlan:
 		o.handlePlanMessage(ctx, msg, model)
 		o.finalizeGuestRound(ctx, msg, guestWg)
 		return
-	}
-
-	// Fast path for lightweight queries (status checks, /fast messages)
-	if strings.Contains(msg.Text, "[system:status]") || strings.Contains(msg.Text, "[system:fast]") {
+	case types.ModeChat:
 		o.handleLeanMessage(ctx, msg, model)
 		o.finalizeGuestRound(ctx, msg, guestWg)
 		return
 	}
 
+	// ModeLoop: full orchestrator consult with tracker integration.
+	// Falls back to Chat if no tracker or orchestrator agent is configured.
 	if o.tracker == nil {
 		o.handleLeanMessage(ctx, msg, model)
 		o.finalizeGuestRound(ctx, msg, guestWg)
@@ -2141,19 +2188,26 @@ func (o *Orchestrator) sendFollowUp(ctx context.Context, original channel.Incomi
 	})
 }
 
-// detectMode returns the mode tag in the message text.
-func (o *Orchestrator) detectMode(text string) string {
+// detectMode returns the orchestrator mode for the given message text.
+// System tags override the orchestrator's default mode for a single message.
+// Canonical tags (chat, plan, execute, loop) are matched alongside legacy
+// aliases (fast -> chat, build -> execute, status -> chat) for back-compat.
+func (o *Orchestrator) detectMode(text string) types.Mode {
 	switch {
 	case strings.Contains(text, "[system:respec"):
-		return "respec"
-	case strings.Contains(text, "[system:build]"):
-		return "build"
+		return types.ModeExecute
+	case strings.Contains(text, "[system:execute]"), strings.Contains(text, "[system:build]"):
+		return types.ModeExecute
 	case strings.Contains(text, "[system:plan]"):
-		return "plan"
-	case strings.Contains(text, "[system:fast]"), strings.Contains(text, "[system:status]"):
-		return "fast"
+		return types.ModePlan
+	case strings.Contains(text, "[system:loop]"):
+		return types.ModeLoop
+	case strings.Contains(text, "[system:chat]"),
+		strings.Contains(text, "[system:fast]"),
+		strings.Contains(text, "[system:status]"):
+		return types.ModeChat
 	default:
-		return "agent"
+		return o.CurrentMode
 	}
 }
 
@@ -2193,7 +2247,7 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 
 	mode := o.detectMode(msg.Text)
 	planContent := ""
-	if mode == "plan" && o.planStore != nil {
+	if mode == types.ModePlan && o.planStore != nil {
 		slug := o.projectSlug()
 		if draft, draftErr := o.planStore.LatestDraft(slug); draftErr == nil && draft != nil {
 			planContent = draft.Body
@@ -2330,7 +2384,7 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 	}
 
 	chatText := responseText
-	if mode == "plan" && o.planStore != nil {
+	if mode == types.ModePlan && o.planStore != nil {
 		explanation, planMd, hasEdit := extractPlanEdit(responseText)
 		if hasEdit {
 			planEditMu.Lock()
@@ -2519,6 +2573,120 @@ func (o *Orchestrator) suggestFollowUp(ctx context.Context, msg channel.Incoming
 			ThreadID:     msg.ThreadID,
 		})
 	}
+}
+
+// --- Execute v1 pipeline ---
+
+var gateTagRe = regexp.MustCompile(`\[gate:(approve|revise|abort)\]`)
+
+func isGateResolution(text string) bool {
+	return gateTagRe.MatchString(text)
+}
+
+func parseGateResolution(text string) execute.GateResolution {
+	m := gateTagRe.FindStringSubmatch(text)
+	if len(m) < 2 {
+		return execute.GateResolution{Action: execute.GateApprove}
+	}
+	action := execute.GateAction(m[1])
+	feedback := strings.TrimSpace(gateTagRe.ReplaceAllString(text, ""))
+	return execute.GateResolution{Action: action, Feedback: feedback}
+}
+
+func (o *Orchestrator) routeGateResolution(ctx context.Context, msg channel.IncomingMessage) {
+	res := parseGateResolution(msg.Text)
+	plan := o.activePlanRunner.Plan()
+
+	// Find any failed step to route failure resolutions
+	for _, s := range plan.Steps {
+		if s.Status == execute.StepFailed {
+			o.activePlanRunner.ResolveFailure(s.ID, res)
+			o.sendFollowUp(ctx, msg, fmt.Sprintf("Step %q: %s", s.ID, res.Action))
+			return
+		}
+	}
+
+	// Otherwise route to the first gate that's after a completed step
+	for _, g := range plan.Gates {
+		stepDone := false
+		for _, s := range plan.Steps {
+			if s.ID == g.AfterStep && s.Status == execute.StepCompleted {
+				stepDone = true
+				break
+			}
+		}
+		if stepDone {
+			o.activePlanRunner.ResolveGate(g.ID, res)
+			o.sendFollowUp(ctx, msg, fmt.Sprintf("Gate %q: %s", g.ID, res.Action))
+			return
+		}
+	}
+
+	o.sendFollowUp(ctx, msg, "No active gate or failed step to resolve.")
+}
+
+var executePlanTagRe = regexp.MustCompile(`\[execute:plan\]([\s\S]*?)\[/execute:plan\]`)
+
+func (o *Orchestrator) tryLoadExecutionPlan(text string) *execute.ExecutionPlan {
+	m := executePlanTagRe.FindStringSubmatch(text)
+	if len(m) < 2 {
+		return nil
+	}
+	var plan execute.ExecutionPlan
+	if err := json.Unmarshal([]byte(strings.TrimSpace(m[1])), &plan); err != nil {
+		o.logger.Warn("failed to parse execution plan", "error", err)
+		return nil
+	}
+
+	var guestIDs []string
+	if o.guestIndex != nil {
+		for id := range o.guestIndex.Agents {
+			guestIDs = append(guestIDs, id)
+		}
+	}
+	if err := plan.Validate(guestIDs); err != nil {
+		o.logger.Warn("execution plan validation failed", "error", err)
+		return nil
+	}
+
+	return &plan
+}
+
+func (o *Orchestrator) handleExecuteMessage(ctx context.Context, msg channel.IncomingMessage, plan *execute.ExecutionPlan) {
+	var artifactProvider execute.ArtifactProvider
+	if o.cfg.ActiveFeature != "" {
+		artifactProvider = execute.NewContextArtifactProvider(o.projectRoot(), o.cfg.ActiveFeature)
+	} else {
+		artifactProvider = execute.NewFilesystemArtifactProvider(o.projectRoot())
+	}
+
+	pr := execute.NewPlanRunner(execute.RunnerOpts{
+		GuestIndex:       o.guestIndex,
+		Runner:           o.runner,
+		ChannelMgr:       o.channelMgr,
+		Artifacts:        artifactProvider,
+		ProjectRoot:      o.projectRoot(),
+		AgentsDir:        o.guestsDir(),
+		GlobalMCPServers: o.cfg.Agent.MCPServers,
+		GuestMCPMaxTurns: o.cfg.Orchestrator.GuestMCPMaxTurns,
+		Logger:           o.logger,
+	})
+
+	o.activePlanRunner = pr
+
+	o.sendFollowUp(ctx, msg, fmt.Sprintf("Starting execution plan: %s (%d steps)", plan.Metadata.Title, len(plan.Steps)))
+
+	go func() {
+		err := pr.Run(ctx, plan, msg.ThreadID)
+		if err != nil {
+			o.logger.Warn("execution plan finished with error", "error", err)
+		}
+		o.mu.Lock()
+		if o.activePlanRunner == pr {
+			o.activePlanRunner = nil
+		}
+		o.mu.Unlock()
+	}()
 }
 
 // guestsDir returns the path to the project's agents/ directory.
@@ -3435,161 +3603,6 @@ func (o *Orchestrator) runExplorers(ctx context.Context, reqs []ExploreRequest, 
 
 	wg.Wait()
 	return results
-}
-
-func (o *Orchestrator) handleBuildMessage(ctx context.Context, msg channel.IncomingMessage, model string) {
-	o.logger.Info("handling build message", "sender", msg.SenderID, "text_len", len(msg.Text))
-
-	cleanText := strings.Replace(msg.Text, "[system:build]", "", 1)
-	cleanText = strings.TrimSpace(cleanText)
-
-	// The build message may carry inline content after the path (newline-separated).
-	// Format: "<planPath>\n<content>" or just "<planPath>"
-	var planPath, inlineContent string
-	if idx := strings.Index(cleanText, "\n"); idx != -1 {
-		planPath = strings.TrimSpace(cleanText[:idx])
-		inlineContent = strings.TrimSpace(cleanText[idx+1:])
-	} else {
-		planPath = cleanText
-	}
-
-	if o.orchAgent == nil {
-		o.sendFollowUp(ctx, msg, "Build mode requires the orchestrator agent to be configured.")
-		return
-	}
-
-	// Load the plan content — prefer inline content, then disk, then latest draft
-	var planContent string
-	if inlineContent != "" {
-		planContent = inlineContent
-		if o.planStore != nil && planPath != "" {
-			_ = o.planStore.SetStatus(planPath, plans.StatusBuilding)
-		}
-	} else if o.planStore != nil && planPath != "" {
-		plan, err := o.planStore.Load(planPath)
-		if err != nil {
-			o.logger.Warn("failed to load plan for build", "path", planPath, "error", err)
-			o.sendFollowUp(ctx, msg, "Could not load the plan file. Please try again.")
-			return
-		}
-		planContent = plan.Body
-		_ = o.planStore.SetStatus(planPath, plans.StatusBuilding)
-	} else if o.planStore != nil {
-		draft, err := o.planStore.LatestDraft(o.projectSlug())
-		if err != nil || draft == nil {
-			o.sendFollowUp(ctx, msg, "No plan found to build. Create a plan first using Plan mode.")
-			return
-		}
-		planContent = draft.Body
-		planPath = draft.Path
-		_ = o.planStore.SetStatus(draft.Path, plans.StatusBuilding)
-	}
-
-	onStream := func(delta string) {
-		if o.channelMgr != nil {
-			_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
-				StreamDelta: delta,
-				ThreadID:    msg.ThreadID,
-			})
-		}
-	}
-
-	// Build snapshot with plan injected
-	var tasks []types.Task
-	if o.tracker != nil {
-		var err error
-		tasks, err = o.tracker.ListActive(ctx)
-		if err != nil {
-			o.logger.Warn("build mode: failed to list tasks", "error", err)
-		}
-	}
-	snap := o.buildStateSnapshot(tasks)
-	snap.UserMessage = &UserMessageContext{Text: "Build the approved plan."}
-	snap.SourceChannel = msg.ChannelKind
-	snap.ActivePlan = &PlanContext{
-		Path:    planPath,
-		Content: planContent,
-		Status:  string(plans.StatusBuilding),
-	}
-
-	actions, err := o.orchAgent.ConsultBuild(ctx, snap, model, onStream)
-	o.recordOrchCost()
-
-	if o.channelMgr != nil {
-		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
-			StreamDone: true,
-			ThreadID:   msg.ThreadID,
-		})
-	}
-
-	if err != nil {
-		o.logger.Warn("build consult failed", "error", err)
-		o.sendFollowUp(ctx, msg, fmt.Sprintf("Build failed: %v", err))
-		if o.planStore != nil && planPath != "" {
-			_ = o.planStore.SetStatus(planPath, plans.StatusDraft)
-		}
-		return
-	}
-
-	// Execute all actions (create_subtasks, reply, display)
-	o.executePlanBuildActions(ctx, msg, tasks, actions)
-
-	// Mark plan as done
-	if o.planStore != nil && planPath != "" {
-		_ = o.planStore.SetStatus(planPath, plans.StatusDone)
-	}
-
-	o.recordAudit(ctx, "channel.plan_built", "", strPtr("build"))
-}
-
-// executePlanBuildActions handles actions from a build consult, which uses
-// the same action types as HandleUserMessage (reply, display, create_subtasks).
-func (o *Orchestrator) executePlanBuildActions(ctx context.Context, msg channel.IncomingMessage, tasks []types.Task, actions []Action) {
-	for i := range actions {
-		switch actions[i].Type {
-		case ActionReply:
-			if o.channelMgr != nil {
-				o.sendFollowUp(ctx, msg, actions[i].Body)
-			}
-		case ActionDisplay:
-			if o.channelMgr != nil {
-				component := map[string]any{"kind": actions[i].DisplayKind}
-				if actions[i].DisplayContent != "" {
-					component["content"] = actions[i].DisplayContent
-				}
-				if actions[i].DisplayTitle != "" {
-					component["title"] = actions[i].DisplayTitle
-				}
-				if actions[i].DisplayLanguage != "" {
-					component["language"] = actions[i].DisplayLanguage
-				}
-				if actions[i].DisplayData != nil {
-					if m, ok := actions[i].DisplayData.(map[string]any); ok {
-						for k, v := range m {
-							component[k] = v
-						}
-					} else {
-						component["data"] = actions[i].DisplayData
-					}
-				}
-				_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
-					Display:   component,
-					DisplayID: newDisplayID(),
-					ThreadID:  msg.ThreadID,
-				})
-			}
-		default:
-			// create_subtasks and others go through standard execution
-		}
-	}
-
-	var otherActions []Action
-	for _, a := range actions {
-		if a.Type != ActionReply && a.Type != ActionDisplay {
-			otherActions = append(otherActions, a)
-		}
-	}
-	o.executeActions(ctx, tasks, otherActions)
 }
 
 // extractPlanTitle pulls the first H1 heading from plan markdown.

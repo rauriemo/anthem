@@ -48,6 +48,7 @@ type OutgoingMessage struct {
 	GuestID       string         `json:"guest_id,omitempty"`
 	SuggestGuest  *SuggestGuest  `json:"suggest_guest,omitempty"`
 	ActivateGuest *ActivateGuest `json:"activate_guest,omitempty"`
+	CurrentMode   string         `json:"current_mode,omitempty"`
 }
 
 type Channel interface {

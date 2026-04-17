@@ -646,30 +646,6 @@ After thorough research, produce a structured markdown plan:
 - Wrap the plan in: ` + "```anthem-plan\n...\n```" + `
 - You may include conversational commentary outside the fenced block.`
 
-const buildModePromptSuffix = `
-
-## Build Mode
-
-The user has approved the plan below and wants to start building. Your job is ONLY to create GitHub issues — you do NOT execute the work yourself.
-
-CRITICAL RULES:
-- You MUST emit a create_subtasks action. This is mandatory. Without it, nothing happens.
-- You MUST NOT pretend the work is already done. You are a planner, not an executor.
-- You MUST NOT show completion summaries or checkmarks. The work has NOT been done yet.
-- Even for a single small task, you MUST create at least one subtask issue.
-
-Steps:
-1. Read the plan content carefully.
-2. Break it into one or more concrete GitHub issues using the create_subtasks action.
-   - Use clear, actionable titles (e.g. "Remove /fast slash command from slashCommands.ts and update tests")
-   - Write detailed implementation instructions in the body including file paths, line numbers, and acceptance criteria
-   - Always include "todo" as the first label, then any descriptive labels (e.g. "type:cleanup", "priority:high")
-   - Use 1-based ordinal numbers for depends_on; the daemon remaps ordinals to real issue IDs
-3. After the create_subtasks action, include a reply action confirming what issues were created.
-4. Respond in the normal JSON actions format: {"reasoning": "...", "actions": [...]}
-
-The create_subtasks action is the ONLY way work gets dispatched to executors. If you skip it, nothing will be built.`
-
 // ConsultPlan runs a plan-mode consultation.
 func (o *OrchestratorAgent) ConsultPlan(ctx context.Context, state StateSnapshot, model string, onStream func(string)) (string, error) {
 	prompt := buildPlanSystemPrompt(o.orchPersona, o.userContext) + planModePromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
@@ -689,32 +665,6 @@ func (o *OrchestratorAgent) ConsultPlan(ctx context.Context, state StateSnapshot
 	o.recordResult(result)
 	o.warnIfHighTokens(result)
 	return result.Output, nil
-}
-
-// ConsultBuild runs a build-mode consultation with the approved plan injected.
-func (o *OrchestratorAgent) ConsultBuild(ctx context.Context, state StateSnapshot, model string, onStream func(string)) ([]Action, error) {
-	prompt := buildSystemPrompt(o.orchPersona, o.userContext) + buildModePromptSuffix + "\n\n## Current State\n\n" + state.Serialize()
-
-	result, err := o.runner.Run(ctx, types.RunOpts{
-		Prompt:         prompt,
-		Model:          model,
-		PermissionMode: "bypassPermissions",
-		MaxTurns:       o.maxTurns,
-		OnStream:       onStream,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("build consult: %w", err)
-	}
-
-	o.recordResult(result)
-	o.warnIfHighTokens(result)
-
-	actions, resp, err := parseActions(result.Output)
-	if err != nil {
-		return nil, fmt.Errorf("build consult: parsing actions: %w", err)
-	}
-	o.lastResp = resp
-	return actions, nil
 }
 
 // --- Explorer subagent prompts ---

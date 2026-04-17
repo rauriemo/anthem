@@ -69,6 +69,38 @@ func TestOrchestratorDispatchesTasks(t *testing.T) {
 	}
 }
 
+func TestNew_CurrentModeDefault(t *testing.T) {
+	tests := []struct {
+		name        string
+		trackerKind string
+		want        types.Mode
+	}{
+		{"no tracker defaults to ModeChat", "", types.ModeChat},
+		{"github tracker defaults to ModeLoop", "github", types.ModeLoop},
+		{"linear tracker defaults to ModeLoop", "linear", types.ModeLoop},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Tracker.Kind = tt.trackerKind
+			if tt.trackerKind != "" {
+				cfg.Tracker.Repo = "test/repo"
+			}
+			orch := New(Opts{
+				Config:       &cfg,
+				TemplateBody: "",
+				Runner:       agent.NewMockRunner(),
+				Workspace:    workspace.NewMockWorkspaceManager(),
+				EventBus:     NewMockEventBus(),
+				Logger:       testLogger(),
+			})
+			if orch.CurrentMode != tt.want {
+				t.Errorf("CurrentMode = %q, want %q", orch.CurrentMode, tt.want)
+			}
+		})
+	}
+}
+
 func TestOrchestratorRespectsMaxConcurrent(t *testing.T) {
 	tasks := []types.Task{
 		{ID: "1", Identifier: "GH-1", Title: "T1", Labels: []string{"todo"}, Status: types.StatusQueued, Priority: 1, CreatedAt: time.Now()},

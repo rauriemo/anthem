@@ -103,15 +103,52 @@ func TestDetectMode_Respec(t *testing.T) {
 
 	tests := []struct {
 		input string
-		want  string
+		want  types.Mode
 	}{
-		{"[system:respec] Start", "respec"},
-		{"[system:respec:miyazaki] Start", "respec"},
-		{"[system:respec:cancel] Cancel", "respec"},
-		{"[system:plan] Make a plan", "plan"},
-		{"[system:build] Build it", "build"},
-		{"[system:fast] Quick", "fast"},
-		{"Just a message", "agent"},
+		{"[system:respec] Start", types.ModeExecute},
+		{"[system:respec:miyazaki] Start", types.ModeExecute},
+		{"[system:respec:cancel] Cancel", types.ModeExecute},
+		{"[system:plan] Make a plan", types.ModePlan},
+		{"[system:execute] Go", types.ModeExecute},
+		{"[system:build] Build it", types.ModeExecute},
+		{"[system:chat] Hey", types.ModeChat},
+		{"[system:loop] Poll", types.ModeLoop},
+		{"[system:fast] Quick", types.ModeChat},
+		{"Just a message", types.ModeLoop},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := orch.detectMode(tt.input)
+			if got != tt.want {
+				t.Errorf("detectMode(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDetectMode_FallbackToCurrentMode(t *testing.T) {
+	// No tracker -> CurrentMode defaults to ModeChat.
+	cfg := config.DefaultConfig()
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "test",
+		Runner:       newNoopRunner(),
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+	if orch.CurrentMode != types.ModeChat {
+		t.Fatalf("precondition: CurrentMode = %q, want %q", orch.CurrentMode, types.ModeChat)
+	}
+
+	tests := []struct {
+		input string
+		want  types.Mode
+	}{
+		{"Just a message", types.ModeChat},
+		{"[system:status] What's happening?", types.ModeChat},
+		{"[system:build] Build it", types.ModeExecute},
+		{"[system:plan] Plan it", types.ModePlan},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
