@@ -342,6 +342,13 @@ func (p *NormalizeFramesProcessor) Run(artifactPath string, cfg map[string]strin
 		}
 	}
 
+	var alphaSnap uint32
+	if s := cfg["alpha_snap"]; s != "" {
+		if v, err := strconv.ParseUint(s, 10, 32); err == nil {
+			alphaSnap = uint32(v)
+		}
+	}
+
 	frames, err := listPNGs(frameDir)
 	if err != nil || len(frames) == 0 {
 		return PostProcessResult{Op: "normalize_frames", Status: PostProcessSkipped, Message: "no frames to normalize"}
@@ -363,6 +370,7 @@ func (p *NormalizeFramesProcessor) Run(artifactPath string, cfg map[string]strin
 		}
 		if nrgba, ok := img.(*image.NRGBA); ok {
 			floorAlpha(nrgba, alphaThreshold)
+			binarizeAlpha(nrgba, alphaSnap)
 		}
 		bbox := contentBoundingBox(img, alphaThreshold)
 		if first {
@@ -452,6 +460,29 @@ func floorAlpha(img *image.NRGBA, threshold uint32) {
 			continue
 		}
 		if uint32(a8)*0x101 <= threshold {
+			pix[i] = 0
+		}
+	}
+}
+
+// binarizeAlpha snaps every pixel's alpha to 0 or 255 based on threshold
+// (uint32 scale, 0–0xFFFF). Pixels with alpha above the threshold become fully
+// opaque; those at or below become fully transparent. A threshold of 0 is a
+// no-op, allowing opt-out. This eliminates rembg's soft-edge bleeding where
+// limb boundaries retain mid-range partial transparency.
+func binarizeAlpha(img *image.NRGBA, threshold uint32) {
+	if threshold == 0 {
+		return
+	}
+	pix := img.Pix
+	for i := 3; i < len(pix); i += 4 {
+		a8 := pix[i]
+		if a8 == 0 {
+			continue
+		}
+		if uint32(a8)*0x101 > threshold {
+			pix[i] = 255
+		} else {
 			pix[i] = 0
 		}
 	}

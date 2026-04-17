@@ -976,6 +976,102 @@ func TestFloorAlpha_ZeroThreshold(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// binarizeAlpha
+// ---------------------------------------------------------------------------
+
+func TestBinarizeAlpha(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 5, 1))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 255, A: 0})   // fully transparent
+	img.SetNRGBA(1, 0, color.NRGBA{R: 255, A: 50})  // below 50%
+	img.SetNRGBA(2, 0, color.NRGBA{R: 255, A: 128}) // above 50%
+	img.SetNRGBA(3, 0, color.NRGBA{R: 255, A: 200}) // well above
+	img.SetNRGBA(4, 0, color.NRGBA{R: 255, A: 255}) // fully opaque
+
+	binarizeAlpha(img, 0x8000) // 50% threshold
+
+	cases := []struct {
+		px   int
+		want uint8
+		desc string
+	}{
+		{0, 0, "transparent stays 0"},
+		{1, 0, "A=50 snaps to 0"},
+		{2, 255, "A=128 snaps to 255"},
+		{3, 255, "A=200 snaps to 255"},
+		{4, 255, "A=255 stays 255"},
+	}
+	for _, tc := range cases {
+		got := img.Pix[tc.px*4+3]
+		if got != tc.want {
+			t.Errorf("pixel %d (%s): alpha = %d, want %d", tc.px, tc.desc, got, tc.want)
+		}
+	}
+}
+
+func TestBinarizeAlpha_PreservesRGB(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 2, 1))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 100, G: 150, B: 200, A: 180}) // above threshold
+	img.SetNRGBA(1, 0, color.NRGBA{R: 50, G: 60, B: 70, A: 30})     // below threshold
+
+	binarizeAlpha(img, 0x8000)
+
+	c0 := img.NRGBAAt(0, 0)
+	if c0.R != 100 || c0.G != 150 || c0.B != 200 {
+		t.Errorf("pixel 0 RGB changed: got (%d,%d,%d), want (100,150,200)", c0.R, c0.G, c0.B)
+	}
+	if c0.A != 255 {
+		t.Errorf("pixel 0 alpha = %d, want 255", c0.A)
+	}
+
+	c1 := img.NRGBAAt(1, 0)
+	if c1.R != 50 || c1.G != 60 || c1.B != 70 {
+		t.Errorf("pixel 1 RGB changed: got (%d,%d,%d), want (50,60,70)", c1.R, c1.G, c1.B)
+	}
+	if c1.A != 0 {
+		t.Errorf("pixel 1 alpha = %d, want 0", c1.A)
+	}
+}
+
+func TestBinarizeAlpha_ZeroThreshold(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 3, 1))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 255, A: 1})
+	img.SetNRGBA(1, 0, color.NRGBA{R: 255, A: 128})
+	img.SetNRGBA(2, 0, color.NRGBA{R: 255, A: 255})
+
+	binarizeAlpha(img, 0)
+
+	if img.Pix[0*4+3] != 1 {
+		t.Errorf("pixel 0: alpha = %d, want 1 (zero threshold is no-op)", img.Pix[0*4+3])
+	}
+	if img.Pix[1*4+3] != 128 {
+		t.Errorf("pixel 1: alpha = %d, want 128 (zero threshold is no-op)", img.Pix[1*4+3])
+	}
+	if img.Pix[2*4+3] != 255 {
+		t.Errorf("pixel 2: alpha = %d, want 255 (zero threshold is no-op)", img.Pix[2*4+3])
+	}
+}
+
+func TestFloorThenBinarize_Ordering(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 3, 1))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 255, A: 3})   // below floor threshold
+	img.SetNRGBA(1, 0, color.NRGBA{R: 255, A: 100}) // above floor, below binarize 50%
+	img.SetNRGBA(2, 0, color.NRGBA{R: 255, A: 200}) // above both
+
+	floorAlpha(img, defaultAlphaThreshold)
+	binarizeAlpha(img, 0x8000)
+
+	if img.Pix[0*4+3] != 0 {
+		t.Errorf("pixel 0: alpha = %d, want 0 (floored to 0, binarize should not resurrect)", img.Pix[0*4+3])
+	}
+	if img.Pix[1*4+3] != 0 {
+		t.Errorf("pixel 1: alpha = %d, want 0 (above floor but below binarize snap)", img.Pix[1*4+3])
+	}
+	if img.Pix[2*4+3] != 255 {
+		t.Errorf("pixel 2: alpha = %d, want 255 (above both thresholds)", img.Pix[2*4+3])
+	}
+}
+
 // writeGhostPNG creates a PNG with opaque content at contentRect and ghost
 // pixels (low alpha) at ghostRect. Everything else is fully transparent.
 func writeGhostPNG(t *testing.T, path string, w, h int, contentRect, ghostRect image.Rectangle) {
@@ -1072,6 +1168,103 @@ func TestNormalizeFrames_AlphaThresholdConfig(t *testing.T) {
 	}
 	if state["normalized_height"] != "18" {
 		t.Errorf("normalized_height = %q, want 18 (zero threshold should include ghost pixels)", state["normalized_height"])
+	}
+}
+
+// writeSoftEdgePNG creates a PNG with opaque content at contentRect and
+// mid-range semi-transparent pixels (simulating rembg soft-edge bleeding)
+// at softRect. Everything else is fully transparent.
+func writeSoftEdgePNG(t *testing.T, path string, w, h int, contentRect, softRect image.Rectangle, softAlpha uint8) {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := contentRect.Min.Y; y < contentRect.Max.Y; y++ {
+		for x := contentRect.Min.X; x < contentRect.Max.X; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 255})
+		}
+	}
+	for y := softRect.Min.Y; y < softRect.Max.Y; y++ {
+		for x := softRect.Min.X; x < softRect.Max.X; x++ {
+			if img.NRGBAAt(x, y).A == 0 {
+				img.SetNRGBA(x, y, color.NRGBA{R: 200, G: 100, B: 50, A: softAlpha})
+			}
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("creating soft-edge PNG: %v", err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatalf("encoding soft-edge PNG: %v", err)
+	}
+}
+
+func TestNormalizeFrames_AlphaSnap(t *testing.T) {
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+
+	// Frames with mid-range alpha pixels (A=100) simulating rembg soft-edge
+	writeSoftEdgePNG(t, filepath.Join(frameDir, "frame_0001.png"), 20, 20,
+		image.Rect(5, 5, 10, 10), image.Rect(3, 3, 12, 12), 100)
+	writeSoftEdgePNG(t, filepath.Join(frameDir, "frame_0002.png"), 20, 20,
+		image.Rect(6, 6, 11, 11), image.Rect(4, 4, 13, 13), 120)
+
+	proc := &NormalizeFramesProcessor{}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run("irrelevant", map[string]string{
+		"padding":    "0",
+		"alpha_snap": "32768",
+	}, state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	for _, name := range []string{"frame_0001.png", "frame_0002.png"} {
+		img, err := decodePNG(filepath.Join(frameDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		nrgba, ok := img.(*image.NRGBA)
+		if !ok {
+			t.Fatalf("%s: expected NRGBA output", name)
+		}
+		for y := nrgba.Bounds().Min.Y; y < nrgba.Bounds().Max.Y; y++ {
+			for x := nrgba.Bounds().Min.X; x < nrgba.Bounds().Max.X; x++ {
+				a := nrgba.NRGBAAt(x, y).A
+				if a != 0 && a != 255 {
+					t.Errorf("%s: partial alpha %d at (%d,%d), want 0 or 255", name, a, x, y)
+				}
+			}
+		}
+	}
+}
+
+func TestNormalizeFrames_AlphaSnapBBox(t *testing.T) {
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+
+	// Opaque content at (5,5)-(10,10) = 5x5, soft-edge halo at (2,2)-(13,13)
+	writeSoftEdgePNG(t, filepath.Join(frameDir, "frame_0001.png"), 20, 20,
+		image.Rect(5, 5, 10, 10), image.Rect(2, 2, 13, 13), 100)
+
+	proc := &NormalizeFramesProcessor{}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run("irrelevant", map[string]string{
+		"padding":    "2",
+		"alpha_snap": "32768",
+	}, state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	// Opaque content is 5x5 + 2px padding each side = 9x9
+	if state["normalized_width"] != "9" {
+		t.Errorf("normalized_width = %q, want 9 (soft-edge halo should not inflate bbox)", state["normalized_width"])
+	}
+	if state["normalized_height"] != "9" {
+		t.Errorf("normalized_height = %q, want 9 (soft-edge halo should not inflate bbox)", state["normalized_height"])
 	}
 }
 

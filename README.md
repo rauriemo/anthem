@@ -134,6 +134,7 @@ Both must be on PATH when Anthem starts. The post-process pipeline degrades grac
 | `remove_background` | `model` | `isnet-anime` | rembg model name |
 | `normalize_frames` | `padding` | `4` | Transparent padding (px) around content |
 | `normalize_frames` | `alpha_threshold` | `4096` | Alpha floor (0–65535). Pixels at or below this opacity are treated as transparent. Cleans up rembg residue halos |
+| `normalize_frames` | `alpha_snap` | `0` (disabled) | Alpha binarization threshold (0–65535). Pixels above become fully opaque, at or below become transparent. 0 disables. Eliminates rembg soft-edge bleeding on character limbs |
 | `stitch_spritesheet` | `columns` | `4` | Grid columns in output sheet |
 | `stitch_spritesheet` | `keep_video` | `false` | Retain source MP4 after stitching |
 
