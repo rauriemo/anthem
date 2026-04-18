@@ -487,7 +487,6 @@ func coherenceHint(review *guests.ReviewSpec) string {
 	return "Keep the preserved items' style, palette, and tone consistent with the regenerated ones. The user approved the preserved items; do not contradict them."
 }
 
-
 func (r *PlanRunner) buildStepPrompt(step *PlanStep, upstream []StepArtifact) string {
 	prompt := step.Description
 

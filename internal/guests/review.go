@@ -15,16 +15,16 @@ import (
 // user approval at a gate. It is parsed from the `review:` block in an agent's
 // frontmatter. See docs/architecture/review-kinds.md for the full contract.
 type ReviewSpec struct {
-	Kind                 string       `yaml:"kind" json:"kind"`
-	Title                string       `yaml:"title,omitempty" json:"title,omitempty"`
-	ArtifactGlobs        []string     `yaml:"artifact_globs,omitempty" json:"artifact_globs,omitempty"`
-	ContextFiles         []string     `yaml:"context_files,omitempty" json:"context_files,omitempty"`
-	ShowPrompt           *bool        `yaml:"show_prompt,omitempty" json:"show_prompt,omitempty"`
-	Panels               []PanelSpec  `yaml:"panels,omitempty" json:"panels,omitempty"`
-	NotificationTemplate string       `yaml:"notification_template,omitempty" json:"notification_template,omitempty"`
-	PartialRevise        *bool        `yaml:"partial_revise,omitempty" json:"partial_revise,omitempty"`
-	CoherenceHint        string       `yaml:"coherence_hint,omitempty" json:"coherence_hint,omitempty"`
-	SchemaVersion        string       `yaml:"schema_version,omitempty" json:"schema_version,omitempty"`
+	Kind                 string      `yaml:"kind" json:"kind"`
+	Title                string      `yaml:"title,omitempty" json:"title,omitempty"`
+	ArtifactGlobs        []string    `yaml:"artifact_globs,omitempty" json:"artifact_globs,omitempty"`
+	ContextFiles         []string    `yaml:"context_files,omitempty" json:"context_files,omitempty"`
+	ShowPrompt           *bool       `yaml:"show_prompt,omitempty" json:"show_prompt,omitempty"`
+	Panels               []PanelSpec `yaml:"panels,omitempty" json:"panels,omitempty"`
+	NotificationTemplate string      `yaml:"notification_template,omitempty" json:"notification_template,omitempty"`
+	PartialRevise        *bool       `yaml:"partial_revise,omitempty" json:"partial_revise,omitempty"`
+	CoherenceHint        string      `yaml:"coherence_hint,omitempty" json:"coherence_hint,omitempty"`
+	SchemaVersion        string      `yaml:"schema_version,omitempty" json:"schema_version,omitempty"`
 }
 
 // PanelSpec is a composable widget inside a ReviewSpec. Panels reference a

@@ -434,7 +434,7 @@ func (a *Adapter) handleGateActionFrame(entry *connEntry, f frame) {
 func NewGateActionIncomingMessage(gateID, action, revisionText, threadID string, flagged []FlaggedArtifact) channel.IncomingMessage {
 	refs := make([]flaggedArtifactRef, len(flagged))
 	for i, f := range flagged {
-		refs[i] = flaggedArtifactRef{ArtifactID: f.ArtifactID, Note: f.Note}
+		refs[i] = flaggedArtifactRef(f)
 	}
 	text := fmt.Sprintf("[gate:%s]", strings.ToLower(strings.TrimSpace(action)))
 	if strings.ToLower(action) == "revise" && strings.TrimSpace(revisionText) != "" {
@@ -467,7 +467,7 @@ func GateActionRaw(msg channel.IncomingMessage) (gateID, action, revisionText st
 	}
 	out := make([]FlaggedArtifact, len(f.FlaggedArtifacts))
 	for i, r := range f.FlaggedArtifacts {
-		out[i] = FlaggedArtifact{ArtifactID: r.ArtifactID, Note: r.Note}
+		out[i] = FlaggedArtifact(r)
 	}
 	return f.GateID, f.Action, f.RevisionText, out, true
 }

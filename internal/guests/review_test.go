@@ -423,7 +423,7 @@ kinds:
   - id: beatmap-preview
     extends: structured-data
     description: beatmap editor
-  - id: dialogue-graph
+  - id: dialog-graph
     extends: document
 `
 	if err := os.WriteFile(filepath.Join(prismDir, "review-extensions.yaml"), []byte(yaml), 0644); err != nil {
@@ -440,8 +440,8 @@ kinds:
 	if ids["beatmap-preview"] != "structured-data" {
 		t.Errorf("beatmap-preview extends = %q, want structured-data", ids["beatmap-preview"])
 	}
-	if ids["dialogue-graph"] != "document" {
-		t.Errorf("dialogue-graph extends = %q, want document", ids["dialogue-graph"])
+	if ids["dialog-graph"] != "document" {
+		t.Errorf("dialog-graph extends = %q, want document", ids["dialog-graph"])
 	}
 
 	// Missing file -> empty manifest, no error.

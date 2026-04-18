@@ -11,16 +11,16 @@ import (
 )
 
 const (
-	EventPlanLoaded    = "execution.plan_loaded"
-	EventStepQueued    = "execution.step_queued"
-	EventStepStarted   = "execution.step_started"
-	EventStepCompleted = "execution.step_completed"
-	EventStepFailed    = "execution.step_failed"
+	EventPlanLoaded       = "execution.plan_loaded"
+	EventStepQueued       = "execution.step_queued"
+	EventStepStarted      = "execution.step_started"
+	EventStepCompleted    = "execution.step_completed"
+	EventStepFailed       = "execution.step_failed"
 	EventGateOpened       = "execution.gate_opened"
 	EventGateResolved     = "execution.gate_resolved"
 	EventGateNotification = "execution.gate_notification"
-	EventPlanCompleted = "execution.plan_completed"
-	EventPlanAborted   = "execution.plan_aborted"
+	EventPlanCompleted    = "execution.plan_completed"
+	EventPlanAborted      = "execution.plan_aborted"
 )
 
 type planLoadedPayload struct {
