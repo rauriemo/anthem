@@ -22,6 +22,7 @@ import (
 	"github.com/rauriemo/anthem/internal/audit"
 	backendpkg "github.com/rauriemo/anthem/internal/backend"
 	"github.com/rauriemo/anthem/internal/channel"
+	prismchan "github.com/rauriemo/anthem/internal/channel/prism"
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/cost"
 	"github.com/rauriemo/anthem/internal/execute"
@@ -2639,8 +2640,32 @@ func parseGateResolution(text string) execute.GateResolution {
 	return execute.GateResolution{Action: action, Feedback: feedback}
 }
 
+// gateResolutionFromMessage prefers the structured Prism `gate_action` frame
+// on msg.Raw when present (it carries a stable gate_id and flagged_artifacts
+// that the legacy [gate:*] text path cannot express) and falls back to text
+// parsing so Slack/Dispatch/CLI paths keep working.
+func gateResolutionFromMessage(msg channel.IncomingMessage) (execute.GateResolution, string, bool) {
+	if gateID, action, revisionText, flagged, ok := prismchan.GateActionRaw(msg); ok {
+		res := execute.GateResolution{
+			Action:   execute.GateAction(strings.ToLower(strings.TrimSpace(action))),
+			Feedback: strings.TrimSpace(revisionText),
+		}
+		if len(flagged) > 0 {
+			res.FlaggedArtifacts = make([]execute.FlaggedArtifact, len(flagged))
+			for i, f := range flagged {
+				res.FlaggedArtifacts[i] = execute.FlaggedArtifact{
+					ArtifactID: f.ArtifactID,
+					Note:       f.Note,
+				}
+			}
+		}
+		return res, strings.TrimSpace(gateID), true
+	}
+	return parseGateResolution(msg.Text), "", false
+}
+
 func (o *Orchestrator) routeGateResolution(ctx context.Context, msg channel.IncomingMessage) {
-	res := parseGateResolution(msg.Text)
+	res, targetGateID, structured := gateResolutionFromMessage(msg)
 	plan := o.activePlanRunner.Plan()
 
 	// Find any failed step to route failure resolutions
@@ -2650,6 +2675,23 @@ func (o *Orchestrator) routeGateResolution(ctx context.Context, msg channel.Inco
 			o.sendFollowUp(ctx, msg, fmt.Sprintf("Step %q: %s", s.ID, res.Action))
 			return
 		}
+	}
+
+	// If the caller named a specific gate (Prism's gate_action frame), honor
+	// it directly. This avoids ambiguity when multiple gates are resolvable
+	// at once and is the only way selective-revise resolutions can name
+	// their target without risk of landing on a different gate.
+	if structured && targetGateID != "" {
+		for _, g := range plan.Gates {
+			if g.ID != targetGateID {
+				continue
+			}
+			o.activePlanRunner.ResolveGate(g.ID, res)
+			o.sendFollowUp(ctx, msg, fmt.Sprintf("Gate %q: %s", g.ID, res.Action))
+			return
+		}
+		o.sendFollowUp(ctx, msg, fmt.Sprintf("Gate %q not found in active plan.", targetGateID))
+		return
 	}
 
 	// Otherwise route to the first gate that's after a completed step

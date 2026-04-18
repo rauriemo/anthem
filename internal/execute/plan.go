@@ -184,6 +184,20 @@ const (
 type GateResolution struct {
 	Action   GateAction
 	Feedback string
+	// FlaggedArtifacts, when non-empty on a GateRevise, signals a selective
+	// revise: only the listed artifacts should be regenerated; all others
+	// are preserved in place. Empty (or nil) preserves today's full-revise
+	// behavior. See the plan's Phase 5a for the preserve-and-replace flow.
+	FlaggedArtifacts []FlaggedArtifact
+}
+
+// FlaggedArtifact is one item a user asked to be regenerated during a
+// selective revise. ArtifactID matches the stable ID populated on
+// StepArtifact.ArtifactID by NewArtifactID. Note is an optional per-item
+// revise hint; empty means "produce a different variant, no guidance".
+type FlaggedArtifact struct {
+	ArtifactID string
+	Note       string
 }
 
 // AllCompleted returns true when every step has reached StepCompleted.

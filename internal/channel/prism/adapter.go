@@ -424,6 +424,39 @@ func (a *Adapter) handleGateActionFrame(entry *connEntry, f frame) {
 	}
 }
 
+// NewGateActionIncomingMessage builds the IncomingMessage shape the prism
+// adapter emits when a client sends a gate_action frame. It exists so other
+// packages can assert downstream routing behavior (orchestrator tests in
+// particular) without having to run a live WebSocket connection.
+//
+// Only the fields the orchestrator reads are populated; tests that need the
+// full frame shape should still exercise the adapter directly.
+func NewGateActionIncomingMessage(gateID, action, revisionText, threadID string, flagged []FlaggedArtifact) channel.IncomingMessage {
+	refs := make([]flaggedArtifactRef, len(flagged))
+	for i, f := range flagged {
+		refs[i] = flaggedArtifactRef{ArtifactID: f.ArtifactID, Note: f.Note}
+	}
+	text := fmt.Sprintf("[gate:%s]", strings.ToLower(strings.TrimSpace(action)))
+	if strings.ToLower(action) == "revise" && strings.TrimSpace(revisionText) != "" {
+		text = text + " " + strings.TrimSpace(revisionText)
+	}
+	return channel.IncomingMessage{
+		ChannelKind: "prism",
+		SenderID:    "prism",
+		ThreadID:    threadID,
+		Text:        text,
+		Raw: frame{
+			Type:             "gate_action",
+			GateID:           gateID,
+			Action:           action,
+			RevisionText:     revisionText,
+			Thread:           threadID,
+			FlaggedArtifacts: refs,
+		},
+		Timestamp: time.Now(),
+	}
+}
+
 // GateActionRaw exposes the fields of a gate_action frame to callers that
 // pulled the corresponding IncomingMessage off the channel. Returns zero
 // values + false if the message did not originate from a gate_action frame.

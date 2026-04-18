@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/rauriemo/anthem/internal/agent"
@@ -51,6 +52,17 @@ type PlanRunner struct {
 
 	// collected artifacts indexed by step ID
 	artifacts map[string][]StepArtifact
+
+	// preservedArtifacts holds artifacts kept in place during a selective
+	// revise. When a step is re-queued after a partial revise, the runner
+	// consults this map to merge the preserved set with whatever the agent
+	// produces on the next run (see Phase 5a preserve-and-replace).
+	preservedArtifacts map[string][]StepArtifact
+
+	// consecutivePartialRevises tracks how many partial-revise rounds a
+	// step has been through in a row so callers (tests, UX nudges) can
+	// detect coherence-decay risk. Reset on Approve/Abort/full revise.
+	consecutivePartialRevises map[string]int
 }
 
 func NewPlanRunner(opts RunnerOpts) *PlanRunner {
@@ -59,10 +71,12 @@ func NewPlanRunner(opts RunnerOpts) *PlanRunner {
 		logger = slog.Default()
 	}
 	return &PlanRunner{
-		opts:      opts,
-		logger:    logger,
-		gateCh:    make(chan gateMsg, 1),
-		artifacts: make(map[string][]StepArtifact),
+		opts:                      opts,
+		logger:                    logger,
+		gateCh:                    make(chan gateMsg, 1),
+		artifacts:                 make(map[string][]StepArtifact),
+		preservedArtifacts:        make(map[string][]StepArtifact),
+		consecutivePartialRevises: make(map[string]int),
 	}
 }
 
@@ -154,6 +168,14 @@ func (r *PlanRunner) runStep(ctx context.Context, step *PlanStep, threadID strin
 			r.logger.Warn("artifact collection failed", "step", step.ID, "error", err)
 		}
 	}
+
+	// Selective-revise merge: if a prior gate left a preserved set for this
+	// step, the artifacts just collected are treated as "regenerated" items
+	// and merged with the preserved set (dedup on path, new wins). Newly-
+	// regenerated artifacts are flagged with UpdatedInLastRevise so the UI
+	// can badge them as fresh and the user can compare to what was preserved.
+	collected = r.mergePreservedWithCollected(step.ID, collected)
+
 	r.mu.Lock()
 	r.artifacts[step.ID] = collected
 	r.mu.Unlock()
@@ -216,6 +238,23 @@ func (r *PlanRunner) handleStepFailure(ctx context.Context, step *PlanStep, thre
 
 func (r *PlanRunner) handleGate(ctx context.Context, gate *ApprovalGate, step *PlanStep, artifacts []StepArtifact, threadID string) error {
 	agentID, agentName, review := r.agentReviewContext(step.AgentID)
+
+	// Emit the guest-authored notification *before* gate_opened so the chat
+	// panel picks it up in the same tick as the drawer. If we don't have the
+	// agent in the guest index (legacy seed plans, tests) we fall back to a
+	// minimal guest record built from the step metadata.
+	agent := r.guestForNotification(step.AgentID, agentID, agentName)
+	r.broadcast(ctx, GateNotificationEvent(
+		*gate,
+		step.ID,
+		step.Description,
+		len(artifacts),
+		agent,
+		review,
+		threadID,
+		threadID,
+	))
+
 	r.broadcast(ctx, GateOpenedEvent(
 		*gate,
 		artifacts,
@@ -235,20 +274,13 @@ func (r *PlanRunner) handleGate(ctx context.Context, gate *ApprovalGate, step *P
 
 		switch msg.Resolution.Action {
 		case GateApprove:
+			r.clearPartialReviseState(gate.AfterStep)
 			return nil
 		case GateRevise:
-			// Reset the gate's after-step to pending with revision instructions
-			r.mu.Lock()
-			for i := range r.plan.Steps {
-				if r.plan.Steps[i].ID == gate.AfterStep {
-					r.plan.Steps[i].Description += "\n\nRevision: " + msg.Resolution.Feedback
-					r.plan.Steps[i].Status = StepPending
-					break
-				}
-			}
-			r.mu.Unlock()
+			r.applyRevise(gate.AfterStep, msg.Resolution, artifacts, review)
 			return nil
 		case GateAbort:
+			r.clearPartialReviseState(gate.AfterStep)
 			r.broadcast(ctx, PlanAbortedEvent(r.plan, "aborted at gate", threadID))
 			return fmt.Errorf("plan aborted at gate %q", gate.ID)
 		}
@@ -256,6 +288,205 @@ func (r *PlanRunner) handleGate(ctx context.Context, gate *ApprovalGate, step *P
 
 	return nil
 }
+
+// applyRevise rewrites the step description with revise context and re-queues
+// it. On a selective revise (FlaggedArtifacts non-empty) the runner records
+// the preserved artifacts and builds a structured block that tells the agent
+// exactly which items to preserve, which to regenerate, and any per-item
+// notes. On a full revise it falls back to today's simple "Revision: <text>"
+// append. In both cases the step returns to StepPending so the next
+// NextPendingStep() iteration picks it up.
+func (r *PlanRunner) applyRevise(stepID string, res GateResolution, artifacts []StepArtifact, review *guests.ReviewSpec) {
+	selective := len(res.FlaggedArtifacts) > 0 && reviewSupportsPartial(review)
+
+	if !selective {
+		// Full revise: clear any preserved set + streak so a later
+		// selective revise starts from a clean slate.
+		r.mu.Lock()
+		delete(r.preservedArtifacts, stepID)
+		r.consecutivePartialRevises[stepID] = 0
+		for i := range r.plan.Steps {
+			if r.plan.Steps[i].ID == stepID {
+				r.plan.Steps[i].Description += "\n\nRevision: " + res.Feedback
+				r.plan.Steps[i].Status = StepPending
+				break
+			}
+		}
+		r.mu.Unlock()
+		return
+	}
+
+	flagged := make(map[string]string, len(res.FlaggedArtifacts))
+	for _, f := range res.FlaggedArtifacts {
+		flagged[f.ArtifactID] = f.Note
+	}
+
+	var preserve, regenerate []StepArtifact
+	for _, a := range artifacts {
+		if _, hit := flagged[a.ArtifactID]; hit {
+			regenerate = append(regenerate, a)
+		} else {
+			preserve = append(preserve, a)
+		}
+	}
+
+	block := buildReviseBlock(res.Feedback, preserve, regenerate, flagged, review)
+
+	r.mu.Lock()
+	r.preservedArtifacts[stepID] = preserve
+	r.consecutivePartialRevises[stepID]++
+	for i := range r.plan.Steps {
+		if r.plan.Steps[i].ID == stepID {
+			r.plan.Steps[i].Description += "\n\n" + block
+			r.plan.Steps[i].Status = StepPending
+			break
+		}
+	}
+	r.mu.Unlock()
+}
+
+// clearPartialReviseState wipes the preserve map + streak counter for a step
+// once the gate is definitively approved or aborted. Called from the happy
+// path so a later re-opened gate on the same step does not inherit stale
+// preserve data.
+func (r *PlanRunner) clearPartialReviseState(stepID string) {
+	r.mu.Lock()
+	delete(r.preservedArtifacts, stepID)
+	r.consecutivePartialRevises[stepID] = 0
+	r.mu.Unlock()
+}
+
+// ConsecutivePartialRevises exposes the streak counter so callers (tests,
+// future UX nudges) can observe coherence-decay risk. Reads are locked; safe
+// to call concurrently with Run.
+func (r *PlanRunner) ConsecutivePartialRevises(stepID string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.consecutivePartialRevises[stepID]
+}
+
+// guestForNotification builds the minimum GuestAgent needed for
+// GateNotificationEvent. Falls back gracefully when the guest index is nil
+// (tests) or missing the agent (legacy seed plans).
+func (r *PlanRunner) guestForNotification(agentID, fallbackID, fallbackName string) guests.GuestAgent {
+	if r.opts.GuestIndex != nil {
+		if ag, ok := r.opts.GuestIndex.Agents[agentID]; ok {
+			return ag
+		}
+	}
+	id := agentID
+	if id == "" {
+		id = fallbackID
+	}
+	return guests.GuestAgent{ID: id, Name: fallbackName}
+}
+
+// mergePreservedWithCollected merges the preserved set (if any) with the
+// artifacts just collected from the agent rerun. Artifacts from the
+// collected slice win on conflicting paths (the agent genuinely regenerated
+// them). The returned slice marks newly-regenerated artifacts with
+// UpdatedInLastRevise=true and preserved items with false.
+func (r *PlanRunner) mergePreservedWithCollected(stepID string, collected []StepArtifact) []StepArtifact {
+	r.mu.Lock()
+	preserve := r.preservedArtifacts[stepID]
+	// One-shot: we only want this merge on the iteration right after the
+	// revise; subsequent normal runs should not pick up stale preserves.
+	delete(r.preservedArtifacts, stepID)
+	r.mu.Unlock()
+
+	if len(preserve) == 0 {
+		return collected
+	}
+
+	newPaths := make(map[string]bool, len(collected))
+	for _, a := range collected {
+		newPaths[a.Path] = true
+	}
+
+	out := make([]StepArtifact, 0, len(collected)+len(preserve))
+	for _, a := range collected {
+		a.UpdatedInLastRevise = true
+		out = append(out, a)
+	}
+	for _, a := range preserve {
+		if newPaths[a.Path] {
+			continue
+		}
+		a.UpdatedInLastRevise = false
+		out = append(out, a)
+	}
+	return out
+}
+
+// reviewSupportsPartial returns true when the guest's declared review spec
+// allows partial revise. A missing spec defaults to true (the kind will be
+// checked by Prism); an explicit `partial_revise: false` disables it.
+func reviewSupportsPartial(review *guests.ReviewSpec) bool {
+	if review == nil {
+		return true
+	}
+	if review.PartialRevise != nil && !*review.PartialRevise {
+		return false
+	}
+	if review.Kind != "" && !guests.KindSupportsPartialRevise(review.Kind) {
+		return false
+	}
+	return true
+}
+
+// buildReviseBlock renders the structured revise instructions appended to a
+// step's description when the user asked for a selective revise. Format is
+// markdown-style so guest agents (which read markdown prompts) can parse it
+// naturally. The block is deterministic for stable test assertions.
+func buildReviseBlock(feedback string, preserve, regenerate []StepArtifact, notes map[string]string, review *guests.ReviewSpec) string {
+	var b strings.Builder
+	b.WriteString("## Selective revise\n")
+	if strings.TrimSpace(feedback) != "" {
+		b.WriteString("Overall guidance: ")
+		b.WriteString(feedback)
+		b.WriteString("\n\n")
+	}
+	if len(preserve) > 0 {
+		b.WriteString("### Preserve (do not regenerate)\n")
+		for _, a := range preserve {
+			b.WriteString("- ")
+			b.WriteString(a.Path)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	if len(regenerate) > 0 {
+		b.WriteString("### Regenerate\n")
+		for _, a := range regenerate {
+			b.WriteString("- ")
+			b.WriteString(a.Path)
+			if note := strings.TrimSpace(notes[a.ArtifactID]); note != "" {
+				b.WriteString(" -- ")
+				b.WriteString(note)
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	hint := coherenceHint(review)
+	if hint != "" {
+		b.WriteString("### Coherence hint\n")
+		b.WriteString(hint)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func coherenceHint(review *guests.ReviewSpec) string {
+	if review == nil {
+		return ""
+	}
+	if h := strings.TrimSpace(review.CoherenceHint); h != "" {
+		return h
+	}
+	return "Keep the preserved items' style, palette, and tone consistent with the regenerated ones. The user approved the preserved items; do not contradict them."
+}
+
 
 func (r *PlanRunner) buildStepPrompt(step *PlanStep, upstream []StepArtifact) string {
 	prompt := step.Description

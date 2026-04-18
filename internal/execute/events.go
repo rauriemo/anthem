@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/guests"
@@ -15,8 +16,9 @@ const (
 	EventStepStarted   = "execution.step_started"
 	EventStepCompleted = "execution.step_completed"
 	EventStepFailed    = "execution.step_failed"
-	EventGateOpened    = "execution.gate_opened"
-	EventGateResolved  = "execution.gate_resolved"
+	EventGateOpened       = "execution.gate_opened"
+	EventGateResolved     = "execution.gate_resolved"
+	EventGateNotification = "execution.gate_notification"
 	EventPlanCompleted = "execution.plan_completed"
 	EventPlanAborted   = "execution.plan_aborted"
 )
@@ -173,6 +175,91 @@ func GateOpenedEvent(
 			Review:         review,
 		}),
 	}
+}
+
+// gateNotificationPayload is the JSON shape Prism decodes when it receives
+// an execution.gate_notification event. It is rendered as a guest-authored
+// chat message (so it looks like the agent is telling the user "I need your
+// review"), with a clickable link back to the approval gate and optional
+// metadata for the Voice Gateway so the message can be spoken aloud in the
+// finishing agent's voice.
+type gateNotificationPayload struct {
+	GateID     string `json:"gate_id"`
+	StepID     string `json:"step_id"`
+	PlanID     string `json:"plan_id,omitempty"`
+	AgentID    string `json:"agent_id"`
+	AgentName  string `json:"agent_name,omitempty"`
+	VoiceID    string `json:"voice_id,omitempty"`
+	VoiceModel string `json:"voice_model,omitempty"`
+	Text       string `json:"text"`
+	ReviewLink string `json:"review_link,omitempty"`
+	// VoiceRequest signals the Voice Gateway to speak Text in the guest's
+	// voice. Always true for gate_opened notifications; kept as an explicit
+	// field so future causes (plan_aborted, step_failed) can opt out.
+	VoiceRequest bool `json:"voice_request"`
+	// Cause names the broader event that triggered this notification so
+	// Prism can group related notifications in chat.
+	Cause string `json:"cause"`
+}
+
+// GateNotificationEvent builds a guest-authored chat event announcing a
+// newly-opened approval gate. The runner broadcasts this immediately before
+// GateOpenedEvent so the chat panel and the chain drawer update in the same
+// tick, and the finishing agent's voice can announce the gate without the
+// orchestrator appearing to author the message.
+//
+// If review carries a NotificationTemplate the runner-supplied vars
+// ({agent_name}, {step_title}, {artifact_count}) are substituted in; when
+// the template is empty a sensible default is used.
+func GateNotificationEvent(
+	gate ApprovalGate,
+	stepID string,
+	stepTitle string,
+	artifactCount int,
+	agent guests.GuestAgent,
+	review *guests.ReviewSpec,
+	planID string,
+	threadID string,
+) channel.OutgoingMessage {
+	tpl := ""
+	if review != nil {
+		tpl = review.NotificationTemplate
+	}
+	text := renderNotificationTemplate(tpl, agent.Name, stepTitle, artifactCount)
+	return channel.OutgoingMessage{
+		EventType: EventGateNotification,
+		ThreadID:  threadID,
+		GuestID:   agent.ID,
+		Text: mustJSON(gateNotificationPayload{
+			GateID:       gate.ID,
+			StepID:       stepID,
+			PlanID:       planID,
+			AgentID:      agent.ID,
+			AgentName:    agent.Name,
+			VoiceID:      agent.VoiceID,
+			VoiceModel:   agent.VoiceModel,
+			Text:         text,
+			ReviewLink:   buildReviewLink(planID, gate.ID),
+			VoiceRequest: true,
+			Cause:        "gate_opened",
+		}),
+	}
+}
+
+// renderNotificationTemplate substitutes {agent_name}, {step_title}, and
+// {artifact_count} in tpl. If tpl is empty, returns a sensible default.
+func renderNotificationTemplate(tpl, agentName, stepTitle string, artifactCount int) string {
+	if strings.TrimSpace(tpl) == "" {
+		if stepTitle == "" {
+			return fmt.Sprintf("I've finished and need your review (%d artifact(s)).", artifactCount)
+		}
+		return fmt.Sprintf("I've finished %q and need your review (%d artifact(s)).", stepTitle, artifactCount)
+	}
+	out := tpl
+	out = strings.ReplaceAll(out, "{agent_name}", agentName)
+	out = strings.ReplaceAll(out, "{step_title}", stepTitle)
+	out = strings.ReplaceAll(out, "{artifact_count}", fmt.Sprintf("%d", artifactCount))
+	return out
 }
 
 func GateResolvedEvent(gateID string, action GateAction, feedback string, threadID string) channel.OutgoingMessage {
