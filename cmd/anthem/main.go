@@ -55,6 +55,7 @@ func rootCmd() *cobra.Command {
 		initCmd(),
 		runCmd(),
 		validateCmd(),
+		validateAgentsCmd(),
 		versionCmd(),
 		httpBridgeCmd(),
 	)

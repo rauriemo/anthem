@@ -108,6 +108,16 @@ type GuestAgent struct {
 	VoiceID                 string                            `json:"voice_id,omitempty"`
 	VoiceModel              string                            `json:"voice_model,omitempty"`
 	VoicePriority           int                               `json:"voice_priority,omitempty"`
+	// Review is the parsed `review:` frontmatter block. It declares how this
+	// agent's step output should be rendered for user approval. Nil means
+	// "no declaration" (fallback to artifact-list). See
+	// docs/architecture/review-kinds.md.
+	Review *ReviewSpec `json:"review,omitempty"`
+	// ReviewDiagnostics surfaces authoring-time problems found by
+	// ValidateReviewSpec. Logged at guest load time and forwarded to Prism
+	// via the guest-capability channel so a dev-mode overlay can render
+	// badges. Empty slice = clean.
+	ReviewDiagnostics []ReviewDiagnostic `json:"review_diagnostics,omitempty"`
 }
 
 type GuestIndex struct {
@@ -131,6 +141,7 @@ type frontmatter struct {
 	VoiceID       string                            `yaml:"voice_id"`
 	VoiceModel    string                            `yaml:"voice_model"`
 	VoicePriority int                               `yaml:"voice_priority"`
+	Review        *ReviewSpec                       `yaml:"review"`
 }
 
 const indexFile = ".agents-index.json"
@@ -150,6 +161,15 @@ func ScanDirectory(dir string, logger *slog.Logger) (GuestIndex, error) {
 	if err != nil {
 		return index, fmt.Errorf("scanning agents directory %s: %w", dir, err)
 	}
+
+	// Project root is the parent of the agents directory; used to locate
+	// .prism/review-extensions.yaml for extension-kind resolution.
+	projectRoot := filepath.Dir(dir)
+	extManifest, err := LoadExtensionManifest(projectRoot)
+	if err != nil {
+		logger.Warn("loading review-extensions.yaml", "error", err)
+	}
+	extensionIDs := extManifest.ExtensionKindIDs()
 
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
@@ -183,6 +203,29 @@ func ScanDirectory(dir string, logger *slog.Logger) (GuestIndex, error) {
 				for _, warn := range ValidatePostProcess(tool.ResponseArtifact.PostProcess) {
 					logger.Warn("post_process validation", "agent", slug, "warning", warn)
 				}
+			}
+		}
+
+		// Review-spec authoring-time validation (Phase 1.6.1). Errors drop
+		// the spec but keep the guest loadable; warnings and info ride along.
+		if agent.Review != nil {
+			diags := ValidateReviewSpec(agent.Review, extensionIDs)
+			agent.ReviewDiagnostics = diags
+			for _, d := range diags {
+				switch d.Severity {
+				case SeverityError:
+					logger.Error("review spec error",
+						"agent", slug, "code", d.Code, "message", d.Message)
+				case SeverityWarning:
+					logger.Warn("review spec warning",
+						"agent", slug, "code", d.Code, "message", d.Message)
+				case SeverityInfo:
+					logger.Info("review spec info",
+						"agent", slug, "code", d.Code, "message", d.Message)
+				}
+			}
+			if HasError(diags) {
+				agent.Review = nil
 			}
 		}
 
@@ -328,6 +371,7 @@ func ParseFrontmatter(data []byte) (GuestAgent, error) {
 		VoiceID:                 fm.VoiceID,
 		VoiceModel:              fm.VoiceModel,
 		VoicePriority:           fm.VoicePriority,
+		Review:                  fm.Review,
 	}, nil
 }
 
