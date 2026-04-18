@@ -35,3 +35,4 @@ Thumbs.db
 
 # Anthem runtime
 workspaces/
+.agents-index.json
