@@ -125,9 +125,11 @@ Key Anthem responsibilities:
 ## Reference: Prism Channel Protocol
 
 Prism uses the same WebSocket JSON frame protocol as Dispatch, extended with:
-- `display` frames: `{"type":"display","component":{...},"thread":"<id>"}` for A2UI structured visual content. Display components include `kind:plan` (markdown plan artifacts).
+- `display` frames: `{"type":"display","component":{...},"thread":"<id>"}` for A2UI structured visual content. Display components include `kind:plan` (markdown plan artifacts with stable `displayId = "plan:<UUID>"`, upserted in place across Plan-mode refinements) and `kind:execplan` (compiled `ExecutionPlan` preview emitted by `handleExecuteMarkdown`, with stable `displayId = "execplan:<UUID>"` and fields `planId`, `compileGeneration`, `stepCount`, `gateCount`, and `body` JSON of steps/gates).
 - `stream` frames (Phase C): `{"type":"stream","text":"<delta>","thread":"<id>","done":false}` for incremental LLM output. When `done: true`, Prism knows the stream is complete and can finalize the message.
 - `plan-card` messages: `[plan-card]{"title":"...","overview":"...","tasks":[...],"planPath":"..."}[/plan-card]` embedded in `res` frame text. The Prism backend (`_handle_anthem_message` in `main.py`) converts `res` frames to `chat` type before forwarding to the frontend. Prism's `PlanCard.tsx` parses these and renders a structured card with title, task list, "View Plan" (opens artifact pane), model dropdown, and "Build" button.
+- Execute-mode approval grammar: Prism's `ExecutionPlanView` buttons emit `[gate:<approve|revise|abort>:execplan:<planID>:<compileGeneration>]` which `handleExecutePlanApproval` parses via `execPlanGateRe`. Typed `"approve"/"go"/"dispatch"` text is intentionally **not** honored — buttons are the only control plane for dispatching a compiled plan.
+- `[system:plan:new]` tag: archives the current plan draft (`StatusArchived`, filtered out of `LatestDraft`) and continues the turn as a fresh Plan mode message. Prism exposes this as the `/newplan` slash command.
 
 The Prism adapter at `internal/channel/prism/adapter.go` handles `Send()` for `res`, `event`, `display`, and `stream` frame types.
 

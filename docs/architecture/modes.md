@@ -27,11 +27,12 @@ Modes are selected explicitly. The inbound `req` frame carries the raw text; the
 |-----|------|
 | `[system:chat]` | Chat |
 | `[system:plan]` | Plan |
-| `[system:execute]` | Execute (dispatch a stored plan) |
+| `[system:plan:new]` | Plan (archive the current draft and start a fresh one; stripped before processing) |
+| `[system:execute]` | Execute (compile + dispatch a plan) |
 | `[system:loop]` | Loop (start the configured execution backend) |
 | *(no tag)* | Chat (default) |
 
-Prism's chat-mode dropdown translates its UI selection into the right tag before sending. Legacy tags from the pre-refactor codebase (`[system:fast]`, `[system:agent]`, `[system:build]`) are accepted and remapped for backward compatibility.
+Tag detection is strict: `parseControlTags` only recognises `[system:…]` / `[model:…]` at the leading prefix of the message, ignoring tag-literals that appear inside backticks, fenced code blocks, or the middle of prose. Prism's chat-mode dropdown translates its UI selection into the right tag before sending. Legacy tags from the pre-refactor codebase (`[system:fast]`, `[system:agent]`, `[system:build]`, `[system:status]`) are accepted at the prefix and remapped for backward compatibility.
 
 ## Chat mode
 
@@ -72,18 +73,40 @@ For trivial requests (scout returns 0 explore tasks), Plan falls back to a singl
 
 **Guardrails:** write tools (`Write`, `Edit`, `MultiEdit`) are denied across the entire pipeline. The plan agent uses a dedicated prompt that omits JSON actions and HTML display instructions, so the output is always fenced markdown inside `anthem-plan` blocks.
 
+**Stable plan artifacts:** every plan has a persistent UUIDv4 `ID` in its YAML frontmatter, generated on first save and backfilled for legacy files on load. The Plan mode pipeline derives a stable `DisplayID = "plan:" + plan.Frontmatter.ID` when broadcasting the artifact to Prism. The displayStore upserts artifacts by `displayId`, so iterating on a plan replaces content *in place* in the same artifact slot rather than spamming new cards on every refinement — navigation position and action state are preserved across upserts. Random fallback `DisplayID`s are only used when no plan was persisted (e.g. malformed output).
+
+**Starting a fresh plan:** to archive the current draft and begin a new one, send `[system:plan:new]` (Prism exposes this as the `/newplan` slash command, aliased to `/plan:new`). The handler marks the current draft `StatusArchived` (which is filtered out of `LatestDraft`) and then proceeds as a normal Plan turn on fresh content. Archived plans are kept on disk for audit; they simply stop showing up as the "current" draft.
+
 **Outputs:**
-- Markdown plan saved to `~/.anthem/plans/{project-slug}/` with YAML frontmatter.
-- A **plan-card** message sent to the channel (`[plan-card]{...}[/plan-card]`) for Prism to render with View / Refine / Execute controls.
+- Markdown plan saved to `~/.anthem/plans/{project-slug}/` with YAML frontmatter (`ID`, status, `CompileGeneration`, `CompiledAt`, `RequiredProfiles`).
+- A **plan artifact** broadcast with stable `DisplayID = "plan:<UUID>"`, which Prism upserts into the same slot on each revision.
 - A side-effect: the active plan artifact is kept in the orchestrator's ProjectContext for Chat and Execute handoff.
 
-Relevant code: `internal/orchestrator/planmode.go` (or equivalent), `internal/plans/store.go`.
+Relevant code: `internal/orchestrator/planmode.go` (or equivalent), `internal/plans/store.go`, `internal/orchestrator/orchestrator.go` (`parseControlTags`, `[system:plan:new]` handler).
 
 ## Execute mode
 
 **Purpose:** run an approved multi-agent handoff chain. Execute is the mode that answers "I have a plan with N steps across guests A, B, C -- now do it, and show me each step so I can approve before it advances."
 
-**Who decides what runs:** code. The `PlanRunner` in `internal/execute/runner.go` walks a validated `ExecutionPlan` step-by-step. The runner owns:
+**Markdown-to-ExecutionPlan compiler.** Plan mode produces markdown, but `PlanRunner` consumes a structured `ExecutionPlan`. Execute bridges the two with an orchestrator-agent compile pass (`OrchestratorAgent.ConsultCompilePlan`):
+
+1. An Execute message without an inline `[execute:plan]` YAML block calls `handleExecuteMarkdown`, which resolves a markdown source with **inline-beats-stored-draft** precedence.
+2. A per-plan-ID compile mutex (`compileInFlight`) blocks concurrent compiles of the same plan; overlapping requests get a short guidance reply rather than racing.
+3. `ConsultCompilePlan` is given the markdown, the current active guest roster, and any prior compiled plan (for `revise`). The agent emits JSON for `ExecutionPlan`; the compiler prompt explicitly requires it to **preserve `step.id` and `gate.id` across revisions** so Prism's UI state, button wiring, and approval lineage do not thrash.
+4. The result is validated against the active guest set (missing profile → explicit error reply), then persisted atomically as a **sidecar** next to the markdown: `<planPath>.execute.json` via `planStore.SaveCompiled`. `SaveCompiled` writes `<planPath>.execute.json.tmp`, bumps the plan's `Frontmatter.CompileGeneration`, stamps `CompiledAt` and `RequiredProfiles`, then atomically renames. A frontmatter-update failure rolls back the tmp file; a rename failure leaves a detectable drift state which `LoadCompiled` surfaces via `ErrCompiledSidecarDrift` (comparing embedded `Metadata.PlanGeneration` against current `Frontmatter.CompileGeneration`).
+5. The compiled plan is broadcast as an `execplan` A2UI component with stable `displayId = "execplan:" + plan.Frontmatter.ID` — an independent namespace from `plan:<ID>`, so plan-mode iteration and execplan iteration never accidentally overwrite each other.
+
+**Approval authority.** Prism's `ExecutionPlanView` renders the compiled plan with **Approve and dispatch / Revise / Abort** buttons. Buttons are the *only* way to advance a compiled plan in v1 — typed "approve"/"go"/"dispatch" free-text commands are explicitly **not** honored, so there is a single control plane for the state transition. Buttons emit a window message that the general dashboard rewrites to `[system:execute] [gate:<action>:execplan:<planID>:<compileGeneration>] <optional revision>`. `handleExecutePlanApproval` then:
+
+- Parses the gate tag via `execPlanGateRe` and looks up the plan by stable `ID`.
+- Rejects stale generations (user clicked an old artifact after a revise round-trip).
+- Rejects sidecar drift (`ErrCompiledSidecarDrift`).
+- Rejects rolled-back frontmatter.
+- For `revise`, re-enters `handleExecuteMarkdown` with the user's feedback and the prior `ExecutionPlan` (preserving IDs).
+- For `abort`, stops without dispatch.
+- For `approve`, re-validates that every `RequiredProfile` is still present in the active guest roster (the roster may have changed between compile and approve) and then dispatches to `handleExecuteMessage` which hands off to `PlanRunner`.
+
+**Who decides what runs at runtime.** Code. The `PlanRunner` in `internal/execute/runner.go` walks a validated `ExecutionPlan` step-by-step. The runner owns:
 
 - Step state (`pending -> running -> completed/failed`).
 - Dependency resolution (only steps whose `DependsOn` is completed are runnable).
@@ -119,6 +142,13 @@ type ApprovalGate struct {
     AfterStep string
     Prompt    string
 }
+
+type PlanMetadata struct {
+    Title           string
+    Description     string
+    CreatedAt       time.Time
+    PlanGeneration  int        // matches Plan.Frontmatter.CompileGeneration at compile time; used to detect sidecar drift
+}
 ```
 
 `Validate(guestIDs)` enforces: non-empty steps, unique step IDs, known `AgentID`s, no cycles in `DependsOn`, unique gate IDs, gate `AfterStep` points to an existing step.
@@ -137,6 +167,12 @@ Two providers ship in v1:
 **Approval gates:**
 
 When the step after which a gate is configured completes, the runner emits `execution.gate_opened` with the collected artifacts and blocks. Prism renders the gate using the artifact summary (or, if the guest produced HTML, inside a sandboxed frame). Prism always owns the gate controls (`Approve` / `Revise` / `Abort`) -- never the HTML content. Anthem owns the gate state and records the resolution in the audit log.
+
+**Execplan gate protocol** (stable, emitted by Prism buttons):
+
+`[gate:<action>:execplan:<planID>:<compileGeneration>] <optional revision text>`
+
+Where `<action>` is `approve`, `revise`, or `abort`. The `compileGeneration` prevents stale clicks: if the user clicked an artifact that has since been revised, the server rejects the tag instead of silently dispatching the wrong plan.
 
 **Execution event protocol** (stable, consumed by Prism):
 
@@ -157,11 +193,15 @@ Payloads are JSON-encoded in the `OutgoingMessage.Text` field; the `EventType` f
 **Design principles locked in for Execute v1:**
 
 - Code owns control flow. Agents never decide that a step is "done enough" or that a dependency is satisfied -- the runner does.
+- Compile = agent, dispatch = code. The orchestrator agent is trusted to translate human intent into a structured `ExecutionPlan`. Everything after "approve" (step state, gates, artifact lineage, failure semantics) is deterministic.
+- **Single approval authority.** Prism buttons are the only way to approve a compiled plan. Typed "approve"/"go"/"dispatch" text is explicitly ignored in Execute mode. This eliminates the two-control-planes race.
+- **Generation-checked clicks.** Every button emission includes the `compileGeneration` it was rendered against; stale clicks are rejected server-side.
+- **Stable IDs across revisions.** The compile prompt requires ID preservation so Prism can upsert `execplan:<UUID>` in place, and so button wiring, diffing, and gate state remain coherent across `revise` cycles.
 - No silent retries. Failures pause the plan. Humans (or revision gates) decide whether to retry or abort.
 - Linear chains only. Parallel DAG branches and `for_each` fan-out are deferred to Execute v2.
 - Typed review surfaces are designed at the protocol level (`review_kind`, `template_hint` are reserved on gate payloads) but the v1 UI always falls back to a generic HTML-or-summary view with Prism-owned gate controls.
 
-Relevant code: `internal/execute/plan.go`, `internal/execute/runner.go`, `internal/execute/artifacts.go`, `internal/execute/events.go`.
+Relevant code: `internal/execute/plan.go`, `internal/execute/runner.go`, `internal/execute/artifacts.go`, `internal/execute/events.go`, `internal/orchestrator/orchagent.go` (`ConsultCompilePlan`), `internal/orchestrator/execcompile.go` (`handleExecuteMarkdown`, `handleExecutePlanApproval`), `internal/plans/compiled.go` (`SaveCompiled`, `LoadCompiled`).
 
 ### Execute v2 (deferred)
 

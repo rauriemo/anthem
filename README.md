@@ -19,8 +19,8 @@ Every message you send Anthem runs in exactly one mode. Mode is selected explici
 | Mode | Purpose | Who runs | Artifacts |
 |------|---------|---------|-----------|
 | **Chat** | Conversational replies, quick questions, @-mentions of guest specialists, reasoning and small edits | Orchestrator (+ any `active_guests`) | Text + optional display frames |
-| **Plan** | Iterative planning with exploration, evidence-backed markdown plans, plan-card handoff | Plan agent (three-phase explorer pipeline, read-only) | Markdown plan in `~/.anthem/plans/` |
-| **Execute** | Run an approved multi-agent handoff chain -- a sequence of guest agents producing and consuming artifacts, with human approval gates between steps | `PlanRunner` over guest agents | Structured artifacts in `.context/` + execution events |
+| **Plan** | Iterative planning with exploration, evidence-backed markdown plans, stable plan artifacts (in-place upsert on refinement; `[system:plan:new]` / `/newplan` archives and starts fresh) | Plan agent (three-phase explorer pipeline, read-only) | Markdown plan in `~/.anthem/plans/` with UUID `ID` in frontmatter |
+| **Execute** | Compile an approved markdown plan into an `ExecutionPlan` (agent), persist a compiled sidecar, preview in Prism with Approve / Revise / Abort buttons, then run the approved multi-agent handoff chain (code) | Orchestrator compiler + `PlanRunner` over guest agents | `<plan>.execute.json` sidecar + structured artifacts in `.context/` + execution events |
 | **Loop** | Opt-in autonomous backend. Polls a work source (GitHub issues), claims tasks, dispatches Claude Code workers, retries, and closes on completion | Configured `ExecutionBackend` (e.g. GitHub loop) | Tracker updates + audit log |
 
 Loop is what Anthem used to be by default. It is now one explicit mode that you turn on for issue-driven projects -- most project agents never touch it.
@@ -85,10 +85,13 @@ All four modes share the same underlying primitives: guest agent roster, `.conte
 
 Execute runs linear handoff chains of guest agents with optional human approval gates. Shipping today:
 
-- **ExecutionPlan schema** -- ordered `PlanStep` list, optional `DependsOn` for explicit linear order, optional `ApprovalGate` after any step, plan metadata. Validated for duplicate IDs, unknown agents, cycles, and missing dependencies.
+- **Markdown-to-ExecutionPlan compiler** -- sending `[system:execute]` over a markdown plan calls `OrchestratorAgent.ConsultCompilePlan`, which translates the markdown into a structured `ExecutionPlan` JSON. IDs are preserved across `revise` cycles so Prism's artifact upsert, button wiring, and gate lineage stay stable. A per-plan-ID compile mutex blocks concurrent compiles.
+- **Compiled sidecar persistence** -- the compiled plan is written atomically to `<planPath>.execute.json` via `planStore.SaveCompiled`. The plan's frontmatter tracks `CompileGeneration`, `CompiledAt`, and `RequiredProfiles`; mismatches between the frontmatter and the sidecar surface as `ErrCompiledSidecarDrift` at load time.
+- **Prism-only approval authority** -- the compiled plan broadcasts as an `execplan` A2UI component. Approval happens exclusively through Prism buttons (`Approve and dispatch` / `Revise` / `Abort`) which emit `[gate:<action>:execplan:<planID>:<compileGeneration>]`. Typed "approve"/"go"/"dispatch" text is ignored, eliminating the two-control-planes race. Stale clicks (generation has advanced since render) are rejected server-side.
+- **ExecutionPlan schema** -- ordered `PlanStep` list, optional `DependsOn` for explicit linear order, optional `ApprovalGate` after any step, plan metadata (including `PlanGeneration` for drift detection). Validated for duplicate IDs, unknown agents, cycles, missing dependencies, and changed guest rosters between compile and approve.
 - **PlanRunner** -- runs steps mechanically: `pending -> running -> completed/failed`. On failure it pauses the plan. It does not retry on its own; humans or revision gates drive recovery.
 - **ArtifactProvider** -- `ContextArtifactProvider` reads `.context/features/<feature>/artifacts.yaml` (and writes upstream manifests for the next step). `FilesystemArtifactProvider` is the fallback for projects without `.context/`, using file modtime snapshots.
-- **Approval gates** -- when a gate is configured after a step, the runner emits `execution.gate_opened` with the collected artifacts, blocks, and waits for a `GateResolution` (`approve` / `revise` / `abort`). Prism renders the gate UI; Anthem owns the state.
+- **Approval gates (step-level)** -- when a gate is configured after a step, the runner emits `execution.gate_opened` with the collected artifacts, blocks, and waits for a `GateResolution` (`approve` / `revise` / `abort`). Prism renders the gate UI; Anthem owns the state.
 - **Execution event protocol** -- stable JSON events consumed by Prism:
 
   | Event | When |
@@ -229,7 +232,7 @@ Chat mode hydrates the active feature context (`.context/features/<feature>/`) a
 
 Plan mode uses a three-phase explorer architecture: **scout** (read file tree, identify 1-5 areas) → **explore** (parallel read-only Claude Code subagents) → **synthesize** (evidence-backed markdown plan). Write tools are denied across the entire plan pipeline. For trivial requests (scout returns 0 explores), plan mode falls back to a single-run consultation using `plan_max_turns`.
 
-Plan output is markdown-only, saved to `~/.anthem/plans/{project-slug}/` with YAML frontmatter. A **plan-card** is then sent to the channel so Prism can render structured controls (View / Refine / Execute).
+Plan output is markdown-only, saved to `~/.anthem/plans/{project-slug}/` with YAML frontmatter that includes a stable UUID `ID`. Prism upserts plan artifacts in place by `displayId = "plan:<UUID>"`, so refining a plan updates the same artifact slot rather than spamming the channel with a new card per revision. To archive the current draft and begin a fresh one, send `[system:plan:new]` — Prism exposes this as the `/newplan` slash command (aliased to `/plan:new`).
 
 ### Agent Profiles and Harnesses
 
