@@ -42,7 +42,7 @@ type PlanMetadata struct {
 }
 
 type ExecutionPlan struct {
-	Steps    []PlanStep    `json:"steps"`
+	Steps    []PlanStep     `json:"steps"`
 	Gates    []ApprovalGate `json:"gates,omitempty"`
 	Metadata PlanMetadata   `json:"metadata"`
 }

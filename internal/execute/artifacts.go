@@ -36,9 +36,9 @@ type contextArtifactEntry struct {
 }
 
 type upstreamManifest struct {
-	StepID    string         `yaml:"step_id"`
-	Upstream  []upstreamRef  `yaml:"upstream"`
-	CreatedAt string         `yaml:"created_at"`
+	StepID    string        `yaml:"step_id"`
+	Upstream  []upstreamRef `yaml:"upstream"`
+	CreatedAt string        `yaml:"created_at"`
 }
 
 type upstreamRef struct {
@@ -136,7 +136,7 @@ func (p *ContextArtifactProvider) Inject(stepID string, upstream []StepArtifact)
 
 	refs := make([]upstreamRef, len(upstream))
 	for i, a := range upstream {
-		refs[i] = upstreamRef{StepID: a.StepID, Path: a.Path, Kind: a.Kind, Summary: a.Summary}
+		refs[i] = upstreamRef(a)
 	}
 	manifest := upstreamManifest{
 		StepID:    stepID,
@@ -243,7 +243,7 @@ func (p *FilesystemArtifactProvider) Inject(stepID string, upstream []StepArtifa
 
 	refs := make([]upstreamRef, len(upstream))
 	for i, a := range upstream {
-		refs[i] = upstreamRef{StepID: a.StepID, Path: a.Path, Kind: a.Kind, Summary: a.Summary}
+		refs[i] = upstreamRef(a)
 	}
 	manifest := upstreamManifest{
 		StepID:    stepID,

@@ -19,9 +19,9 @@ const (
 )
 
 type planLoadedPayload struct {
-	Title    string `json:"title"`
-	StepCount int   `json:"step_count"`
-	GateCount int   `json:"gate_count"`
+	Title     string `json:"title"`
+	StepCount int    `json:"step_count"`
+	GateCount int    `json:"gate_count"`
 }
 
 type stepEventPayload struct {
@@ -42,9 +42,9 @@ type gateEventPayload struct {
 }
 
 type planDonePayload struct {
-	Title        string `json:"title"`
-	TotalSteps   int    `json:"total_steps"`
-	CompletedSteps int  `json:"completed_steps"`
+	Title          string `json:"title"`
+	TotalSteps     int    `json:"total_steps"`
+	CompletedSteps int    `json:"completed_steps"`
 }
 
 func mustJSON(v any) string {

@@ -89,7 +89,7 @@ func (r *PlanRunner) ResolveFailure(stepID string, resolution GateResolution) {
 }
 
 // Run drives the plan to completion (or abort). It blocks until the plan
-// finishes, is aborted, or the context is cancelled. Intended to be called
+// finishes, is aborted, or the context is canceled. Intended to be called
 // in its own goroutine.
 func (r *PlanRunner) Run(ctx context.Context, plan *ExecutionPlan, threadID string) error {
 	r.mu.Lock()
