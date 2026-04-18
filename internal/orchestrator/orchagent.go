@@ -976,10 +976,10 @@ type CompilePlanResult struct {
 // compileResponse mirrors the compiler's JSON output shape: either an
 // inline ExecutionPlan, or a single {"error": "missing profile: foo"}.
 type compileResponse struct {
-	Error    string                   `json:"error,omitempty"`
-	Steps    []execute.PlanStep       `json:"steps"`
-	Gates    []execute.ApprovalGate   `json:"gates"`
-	Metadata execute.PlanMetadata     `json:"metadata"`
+	Error    string                 `json:"error,omitempty"`
+	Steps    []execute.PlanStep     `json:"steps"`
+	Gates    []execute.ApprovalGate `json:"gates"`
+	Metadata execute.PlanMetadata   `json:"metadata"`
 }
 
 // ConsultCompilePlan asks the orchestrator to convert a markdown plan into a

@@ -213,4 +213,3 @@ func TestHandlePlanNew_IgnoresBodyLiteral(t *testing.T) {
 		t.Errorf("draft was archived by a body-positioned tag literal; status = %q", p.Frontmatter.Status)
 	}
 }
-

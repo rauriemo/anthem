@@ -111,10 +111,10 @@ func TestRequiredProfilesFromPlan_UniqueSorted(t *testing.T) {
 
 func TestExtractCompileJSON_HandlesBareAndWrapped(t *testing.T) {
 	cases := map[string]string{
-		"bare":     `{"steps":[],"metadata":{}}`,
-		"prefix":   "Thinking... {\"steps\":[],\"metadata\":{}}",
-		"suffix":   "{\"steps\":[],\"metadata\":{}}\nTrailing text ignored",
-		"nested":   `{"a":{"b":1},"c":2}`,
+		"bare":   `{"steps":[],"metadata":{}}`,
+		"prefix": "Thinking... {\"steps\":[],\"metadata\":{}}",
+		"suffix": "{\"steps\":[],\"metadata\":{}}\nTrailing text ignored",
+		"nested": `{"a":{"b":1},"c":2}`,
 	}
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -3,7 +3,6 @@ package plans
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -231,9 +230,7 @@ func TestBackfillPreservesFrontmatterCompileFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	planPath := filepath.Join(dir, "with-compile-fields.md")
-	content := fmt.Sprintf(
-		"---\nproject: owner/repo\nstatus: draft\ntitle: With Fields\ncreated: 2024-01-01T00:00:00Z\nupdated: 2024-01-01T00:00:00Z\ncompile_generation: 3\nrequired_profiles:\n  - artist\n  - animator\n---\n\n# body\n",
-	)
+	content := "---\nproject: owner/repo\nstatus: draft\ntitle: With Fields\ncreated: 2024-01-01T00:00:00Z\nupdated: 2024-01-01T00:00:00Z\ncompile_generation: 3\nrequired_profiles:\n  - artist\n  - animator\n---\n\n# body\n"
 	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

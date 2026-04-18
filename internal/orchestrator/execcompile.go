@@ -306,15 +306,15 @@ func (o *Orchestrator) broadcastExecPlanArtifact(
 		return
 	}
 	component := map[string]any{
-		"kind":               "execplan",
-		"planId":             planID,
-		"compileGeneration":  compileGeneration,
-		"stepCount":          len(plan.Steps),
-		"gateCount":          len(plan.Gates),
-		"title":              plan.Metadata.Title,
-		"description":        plan.Metadata.Description,
-		"body":               string(body),
-		"sourceMode":         source,
+		"kind":              "execplan",
+		"planId":            planID,
+		"compileGeneration": compileGeneration,
+		"stepCount":         len(plan.Steps),
+		"gateCount":         len(plan.Gates),
+		"title":             plan.Metadata.Title,
+		"description":       plan.Metadata.Description,
+		"body":              string(body),
+		"sourceMode":        source,
 	}
 	displayID := "execplan:" + planID
 	_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
