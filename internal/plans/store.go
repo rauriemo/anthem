@@ -1,6 +1,8 @@
 package plans
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,15 +21,29 @@ const (
 	StatusDraft    PlanStatus = "draft"
 	StatusBuilding PlanStatus = "building"
 	StatusDone     PlanStatus = "done"
+	// StatusArchived marks a plan that the user has superseded via /newplan.
+	// LatestDraft filters these out so a fresh draft is started on the next
+	// Plan-mode message.
+	StatusArchived PlanStatus = "archived"
 )
 
 // Frontmatter is the YAML header of a plan file.
+//
+// ID is a stable UUIDv4-shaped identifier generated on first Save and preserved
+// across Update/SetStatus/rename. It decouples plan identity from the filesystem
+// path so UI components (like Prism's display artifacts) can use a durable key.
+// CompileGeneration, CompiledAt, and RequiredProfiles track the lifecycle of the
+// adjacent <path>.execute.json sidecar produced by Execute mode's compiler.
 type Frontmatter struct {
-	Project string     `yaml:"project"`
-	Status  PlanStatus `yaml:"status"`
-	Title   string     `yaml:"title"`
-	Created time.Time  `yaml:"created"`
-	Updated time.Time  `yaml:"updated"`
+	ID                string     `yaml:"id,omitempty"`
+	Project           string     `yaml:"project"`
+	Status            PlanStatus `yaml:"status"`
+	Title             string     `yaml:"title"`
+	Created           time.Time  `yaml:"created"`
+	Updated           time.Time  `yaml:"updated"`
+	CompileGeneration int        `yaml:"compile_generation,omitempty"`
+	CompiledAt        time.Time  `yaml:"compiled_at,omitempty"`
+	RequiredProfiles  []string   `yaml:"required_profiles,omitempty"`
 }
 
 // Plan is a fully loaded plan with parsed frontmatter and markdown body.
@@ -40,6 +56,7 @@ type Plan struct {
 // PlanMeta is a lightweight summary returned by List.
 type PlanMeta struct {
 	Path    string     `json:"path"`
+	ID      string     `json:"id"`
 	Title   string     `json:"title"`
 	Status  PlanStatus `json:"status"`
 	Updated time.Time  `json:"updated"`
@@ -72,7 +89,8 @@ func projectDir(projectSlug string) string {
 	return slugify(strings.ReplaceAll(projectSlug, "/", "-"))
 }
 
-// Save writes a new plan file and returns its path.
+// Save writes a new plan file and returns its path. The new plan gets a fresh
+// UUIDv4-shaped ID in its frontmatter.
 func (s *Store) Save(projectSlug, title, body string) (string, error) {
 	dir := filepath.Join(s.root, projectDir(projectSlug))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -81,6 +99,7 @@ func (s *Store) Save(projectSlug, title, body string) (string, error) {
 
 	now := time.Now().UTC()
 	fm := Frontmatter{
+		ID:      newPlanID(),
 		Project: projectSlug,
 		Status:  StatusDraft,
 		Title:   title,
@@ -112,7 +131,9 @@ func (s *Store) Update(path, body string) error {
 	return writePlan(path, plan.Frontmatter, plan.Body)
 }
 
-// Load reads a plan file, parsing frontmatter and body.
+// Load reads a plan file, parsing frontmatter and body. Legacy plans without
+// an ID in their frontmatter are backfilled with a fresh UUID and persisted
+// back to disk so subsequent loads see the stable identity.
 func (s *Store) Load(path string) (*Plan, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -121,6 +142,14 @@ func (s *Store) Load(path string) (*Plan, error) {
 	fm, body, err := parseFrontmatter(string(data))
 	if err != nil {
 		return nil, fmt.Errorf("plans: parse %s: %w", filepath.Base(path), err)
+	}
+	if fm.ID == "" {
+		fm.ID = newPlanID()
+		if werr := writePlan(path, fm, body); werr != nil {
+			// Non-fatal: surface the in-memory ID even if we couldn't persist.
+			// The next successful write will pin it.
+			_ = werr
+		}
 	}
 	return &Plan{Path: path, Frontmatter: fm, Body: body}, nil
 }
@@ -147,6 +176,7 @@ func (s *Store) List(projectSlug string) ([]PlanMeta, error) {
 		}
 		metas = append(metas, PlanMeta{
 			Path:    p.Path,
+			ID:      p.Frontmatter.ID,
 			Title:   p.Frontmatter.Title,
 			Status:  p.Frontmatter.Status,
 			Updated: p.Frontmatter.Updated,
@@ -185,6 +215,29 @@ func (s *Store) LatestDraft(projectSlug string) (*Plan, error) {
 }
 
 // --- frontmatter helpers ---
+
+// newPlanID generates a UUIDv4-shaped identifier using crypto/rand. No external
+// dependency is required.
+func newPlanID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// rand.Read from crypto/rand should never fail on supported platforms;
+		// fall back to a timestamp-derived ID so callers never see an empty
+		// string rather than crashing the agent.
+		ts := time.Now().UTC().UnixNano()
+		return fmt.Sprintf("plan-%x", ts)
+	}
+	// Set version (4) and variant (RFC 4122) bits.
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%s-%s-%s-%s-%s",
+		hex.EncodeToString(b[0:4]),
+		hex.EncodeToString(b[4:6]),
+		hex.EncodeToString(b[6:8]),
+		hex.EncodeToString(b[8:10]),
+		hex.EncodeToString(b[10:16]),
+	)
+}
 
 func writePlan(path string, fm Frontmatter, body string) error {
 	fmBytes, err := yaml.Marshal(fm)

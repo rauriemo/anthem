@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rauriemo/anthem/internal/agent"
+	"github.com/rauriemo/anthem/internal/execute"
 	"github.com/rauriemo/anthem/internal/types"
 	"github.com/rauriemo/anthem/internal/voice"
 )
@@ -871,6 +872,222 @@ func (o *OrchestratorAgent) ScoutPlan(ctx context.Context, state StateSnapshot, 
 	}
 
 	return resp.Explores, resp.UserMessage, nil
+}
+
+// --- Compile mode: markdown plan -> ExecutionPlan JSON ---
+
+// compilePromptSuffix instructs the orchestrator to compile a markdown plan
+// into an ExecutionPlan JSON body. It emphasizes ID preservation across
+// revises (so Prism gate wiring and action state survive) and restricts
+// agent assignment to the active guest set so missing-profile errors are
+// caught at validate-time rather than dispatch-time.
+const compilePromptSuffix = `
+
+## Compile Mode
+
+You are compiling a structured markdown plan into an ExecutionPlan JSON body.
+Your output is a SINGLE JSON object — no prose, no fenced block, no commentary.
+
+### Input contract
+
+You will receive:
+- The canonical markdown plan body under "## Markdown Plan".
+- The active guest roster under "## Active Guests" as a JSON list of objects
+  with "id" and optional "profile" / "description" fields. These are the ONLY
+  valid values for step.agent_id.
+- (Optional) "## Prior Compilation" carrying the last ExecutionPlan JSON we
+  produced, plus a "## Revise Feedback" section with the user's edit request.
+
+### Hard rules
+
+1. Every step.agent_id MUST appear in the active guest roster. If the markdown
+   requests a role that no active guest can fulfill, emit a top-level
+   "error" field naming the missing profile and nothing else. Example:
+   {"error": "missing profile: animator"}.
+2. When "## Prior Compilation" is provided, REUSE the existing step.id values
+   and gate.id values for any semantically matching step/gate. Generate new
+   ids only for newly added steps/gates. This is what lets Prism preserve
+   gate button state and display identity across revise cycles.
+3. Emit dependencies as step.depends_on referencing another step's id.
+   Collapse multi-dependency intent down to a single linear chain for v1 —
+   if the markdown says step 3 depends on both step 1 and step 2, pick the
+   most semantically relevant predecessor (typically the last one whose
+   artifact is consumed) and record it in depends_on; note the collapse in
+   the step description.
+4. Insert approval gates where the markdown explicitly requests human review
+   or where a step hands off between distinct guest profiles. Each gate
+   MUST reference a real step via after_step. Give gates short, stable ids.
+5. Set metadata.title from the markdown's top-level heading and
+   metadata.description from the plan's first paragraph (trim to <= 240
+   chars). Leave metadata.plan_generation absent — the store will inject it.
+6. Steps MUST be pending on emit (omit status; the runtime initializes it).
+
+### Output shape
+
+{
+  "steps": [
+    {"id": "s1", "agent_id": "artist", "description": "…", "depends_on": ""},
+    {"id": "s2", "agent_id": "animator", "description": "…", "depends_on": "s1"}
+  ],
+  "gates": [
+    {"id": "g1", "after_step": "s1", "prompt": "Review the generated sprites"}
+  ],
+  "metadata": {
+    "title": "Plan title from markdown",
+    "description": "short summary"
+  }
+}
+
+Emit ONLY this object. Do not include backticks. Do not include commentary.`
+
+// GuestProfile is the shape the orchestrator sees when compiling a plan: the
+// active guest roster at compile time. It is intentionally lean — description
+// and profile are hints, id is the canonical handle.
+type GuestProfile struct {
+	ID          string `json:"id"`
+	Profile     string `json:"profile,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// CompilePlanInput carries everything the compiler consult needs.
+//
+// PriorCompilation is the last ExecutionPlan JSON we produced for this plan
+// (empty on first compile). When present, Feedback is the user's revise
+// instruction and the compiler prompt is told to preserve step/gate IDs for
+// anything semantically unchanged.
+type CompilePlanInput struct {
+	MarkdownPlan     string
+	ActiveGuests     []GuestProfile
+	PriorCompilation string
+	Feedback         string
+	Model            string
+}
+
+// CompilePlanResult is the outcome of a compile consult. On success Plan is
+// populated and MissingProfile is empty. On a missing-profile bailout (where
+// the markdown requests a role no active guest can fulfill) the compiler
+// returns MissingProfile set and Plan is nil; callers surface this to the
+// user without dispatching.
+type CompilePlanResult struct {
+	Plan           *execute.ExecutionPlan
+	MissingProfile string
+}
+
+// compileResponse mirrors the compiler's JSON output shape: either an
+// inline ExecutionPlan, or a single {"error": "missing profile: foo"}.
+type compileResponse struct {
+	Error    string                   `json:"error,omitempty"`
+	Steps    []execute.PlanStep       `json:"steps"`
+	Gates    []execute.ApprovalGate   `json:"gates"`
+	Metadata execute.PlanMetadata     `json:"metadata"`
+}
+
+// ConsultCompilePlan asks the orchestrator to convert a markdown plan into a
+// structured ExecutionPlan. It is a fresh runner call each time — the
+// orchestrator's chat session is not reused so compile context stays
+// isolated and cheap to invalidate.
+//
+// The caller is responsible for persistence (plans.Store.SaveCompiled) and
+// for injecting PlanGeneration into the final JSON body. ConsultCompilePlan
+// returns the plan structure as parsed from the model output; callers should
+// call plan.Validate(activeGuests) before trusting it.
+func (o *OrchestratorAgent) ConsultCompilePlan(ctx context.Context, in CompilePlanInput) (*CompilePlanResult, error) {
+	if strings.TrimSpace(in.MarkdownPlan) == "" {
+		return nil, fmt.Errorf("compile plan: markdown plan is empty")
+	}
+	if len(in.ActiveGuests) == 0 {
+		return nil, fmt.Errorf("compile plan: no active guests; cannot assign steps")
+	}
+
+	guestsJSON, err := json.Marshal(in.ActiveGuests)
+	if err != nil {
+		return nil, fmt.Errorf("compile plan: marshal guests: %w", err)
+	}
+
+	var b strings.Builder
+	b.WriteString(buildPlanSystemPrompt(o.orchPersona, o.userContext))
+	b.WriteString(compilePromptSuffix)
+	b.WriteString("\n\n## Markdown Plan\n\n")
+	b.WriteString(in.MarkdownPlan)
+	b.WriteString("\n\n## Active Guests\n\n")
+	b.Write(guestsJSON)
+	if in.PriorCompilation != "" {
+		b.WriteString("\n\n## Prior Compilation\n\n")
+		b.WriteString(in.PriorCompilation)
+	}
+	if in.Feedback != "" {
+		b.WriteString("\n\n## Revise Feedback\n\n")
+		b.WriteString(in.Feedback)
+	}
+
+	result, err := o.runner.Run(ctx, types.RunOpts{
+		Prompt:         b.String(),
+		Model:          in.Model,
+		PermissionMode: "bypassPermissions",
+		MaxTurns:       o.planMaxTurns,
+		DeniedTools:    []string{"Write", "Edit", "MultiEdit"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("compile plan: %w", err)
+	}
+	o.recordResult(result)
+	o.warnIfHighTokens(result)
+
+	jsonStr, err := extractCompileJSON(result.Output)
+	if err != nil {
+		return nil, fmt.Errorf("compile plan: %w", err)
+	}
+
+	var resp compileResponse
+	if err := json.Unmarshal([]byte(jsonStr), &resp); err != nil {
+		return nil, fmt.Errorf("compile plan: parsing JSON: %w", err)
+	}
+	if resp.Error != "" {
+		// Detect the "missing profile: X" bailout so callers can surface a
+		// targeted message without parsing arbitrary errors.
+		const marker = "missing profile:"
+		if idx := strings.Index(strings.ToLower(resp.Error), marker); idx != -1 {
+			missing := strings.TrimSpace(resp.Error[idx+len(marker):])
+			return &CompilePlanResult{MissingProfile: missing}, nil
+		}
+		return nil, fmt.Errorf("compile plan: model returned error: %s", resp.Error)
+	}
+
+	plan := &execute.ExecutionPlan{
+		Steps:    resp.Steps,
+		Gates:    resp.Gates,
+		Metadata: resp.Metadata,
+	}
+	for i := range plan.Steps {
+		if plan.Steps[i].Status == "" {
+			plan.Steps[i].Status = execute.StepPending
+		}
+	}
+	return &CompilePlanResult{Plan: plan}, nil
+}
+
+// extractCompileJSON finds the first balanced top-level JSON object in the
+// model's output. The compiler is instructed to emit a single bare object
+// with no fencing, but we tolerate incidental prose wrappers and keep the
+// parser resilient to whitespace/newlines.
+func extractCompileJSON(output string) (string, error) {
+	start := strings.Index(output, "{")
+	if start == -1 {
+		return "", fmt.Errorf("no JSON object found in compile output")
+	}
+	depth := 0
+	for i := start; i < len(output); i++ {
+		switch output[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return output[start : i+1], nil
+			}
+		}
+	}
+	return "", fmt.Errorf("unmatched braces in compile output")
 }
 
 // SynthesizePlan runs the synthesis phase: produces a plan from explorer findings.

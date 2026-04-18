@@ -39,6 +39,12 @@ type PlanMetadata struct {
 	Title       string    `json:"title"`
 	Description string    `json:"description,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
+	// PlanGeneration is the compile generation recorded by the markdown plan
+	// at the moment this ExecutionPlan JSON was produced. It lets callers
+	// detect frontmatter-vs-sidecar drift (e.g. a frontmatter bump that
+	// succeeded while the subsequent atomic rename of the sidecar failed)
+	// without requiring an extra bookkeeping file.
+	PlanGeneration int `json:"plan_generation,omitempty"`
 }
 
 type ExecutionPlan struct {

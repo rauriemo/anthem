@@ -318,7 +318,7 @@ func TestHandleUserMessage_SystemStatusRoutesToLean(t *testing.T) {
 		ChannelKind: "test",
 		SenderID:    "user-1",
 		ThreadID:    "thread-status",
-		Text:        "check [system:status] please",
+		Text:        "[system:status] check please",
 		Timestamp:   time.Now(),
 	})
 

@@ -46,6 +46,14 @@ func (c *testChannel) sentMessages() []channel.OutgoingMessage {
 	return cp
 }
 
+// reset drops any already-captured outgoing messages so subsequent assertions
+// only see messages produced after the call.
+func (c *testChannel) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sent = nil
+}
+
 func TestHandleUserMessage_ConsultsAndReplies(t *testing.T) {
 	tasks := []types.Task{
 		{ID: "1", Title: "Task 1", Status: types.StatusQueued, Labels: []string{"todo"}, CreatedAt: time.Now()},

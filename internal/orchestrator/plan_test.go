@@ -345,6 +345,83 @@ func TestFinalizePlan_SendsPlanCard(t *testing.T) {
 	}
 }
 
+func TestFinalizePlan_StableDisplayIDPerPlanID(t *testing.T) {
+	planOutputV1 := "```anthem-plan\n# My Plan\n\nFirst draft.\n\n## Tasks\n\n### 1. Do X\n```"
+	planOutputV2 := "```anthem-plan\n# My Plan\n\nRefined second draft.\n\n## Tasks\n\n### 1. Do X better\n```"
+
+	orchRunner := agent.NewMockRunner()
+	callIdx := 0
+	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		if strings.Contains(opts.Prompt, "Scout Mode") {
+			return &types.RunResult{
+				SessionID: "scout-s",
+				Output:    `{"reasoning": "s", "explores": [], "user_message": ""}`,
+			}, nil
+		}
+		callIdx++
+		out := planOutputV1
+		if callIdx >= 2 {
+			out = planOutputV2
+		}
+		return &types.RunResult{SessionID: "plan-s", Output: out}, nil
+	}
+
+	orch, ch := newPlanTestOrch(t, orchRunner)
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "prism",
+		SenderID:    "user-1",
+		ThreadID:    "t1",
+		Text:        "[system:plan] Draft it",
+		Timestamp:   time.Now(),
+	})
+
+	firstID := planDisplayID(t, ch, "first broadcast")
+	ch.reset()
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "prism",
+		SenderID:    "user-1",
+		ThreadID:    "t1",
+		Text:        "[system:plan] Refine it",
+		Timestamp:   time.Now(),
+	})
+
+	secondID := planDisplayID(t, ch, "second broadcast")
+
+	if firstID != secondID {
+		t.Errorf("expected stable DisplayID across refinements, got %q and %q", firstID, secondID)
+	}
+	if !strings.HasPrefix(firstID, "plan:") {
+		t.Errorf("expected plan-prefixed DisplayID, got %q", firstID)
+	}
+}
+
+// planDisplayID pulls the plan artifact's DisplayID from the first broadcast
+// carrying a plan-kind display payload, failing the test otherwise.
+func planDisplayID(t *testing.T, ch *testChannel, label string) string {
+	t.Helper()
+	for _, msg := range ch.sentMessages() {
+		if msg.Display == nil {
+			continue
+		}
+		dm, ok := msg.Display.(map[string]any)
+		if !ok {
+			continue
+		}
+		kind, _ := dm["kind"].(string)
+		if kind != "plan" {
+			continue
+		}
+		if msg.DisplayID == "" {
+			t.Fatalf("%s: plan display broadcast missing DisplayID", label)
+		}
+		return msg.DisplayID
+	}
+	t.Fatalf("%s: no plan display broadcast found", label)
+	return ""
+}
+
 func TestHandlePlanOutput_ConversationalReply(t *testing.T) {
 	orchRunner := agent.NewMockRunner()
 	orchRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {

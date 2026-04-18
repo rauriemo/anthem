@@ -73,6 +73,14 @@ type Orchestrator struct {
 	backend          backendpkg.ExecutionBackend
 	activePlanRunner *execute.PlanRunner
 
+	// compileMu guards compileInFlight below; compileInFlight holds the set of
+	// plan IDs whose ConsultCompilePlan+SaveCompiled round-trip is currently
+	// executing. Execute-mode entry rejects a second compile request for an
+	// in-flight plan ID so the user gets a clear "compile already running"
+	// message instead of a silent race where two sidecar writes interleave.
+	compileMu       sync.Mutex
+	compileInFlight map[string]bool
+
 	CurrentMode types.Mode
 
 	wg            sync.WaitGroup
@@ -143,6 +151,7 @@ func New(opts Opts) *Orchestrator {
 		convoBuf:        NewConvoBuffer(),
 		sharedCtx:       NewSharedContext(),
 		proposalStore:   NewProposalStore(30 * time.Minute),
+		compileInFlight: make(map[string]bool),
 		CurrentMode:     defaultMode,
 	}
 
@@ -1743,6 +1752,22 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	model, cleanedText := extractModelTag(msg.Text)
 	msg.Text = cleanedText
 
+	// --- /newplan archive: when the user sends [system:plan:new], archive
+	// the current draft so the next Plan-mode pass starts a fresh artifact.
+	// Only the prefix-region tag is honored; a literal [system:plan:new]
+	// quoted inside the message body is ignored by parseControlTags and left
+	// intact.
+	if tags, _ := parseControlTags(msg.Text); tags["system:plan:new"] {
+		if o.planStore != nil {
+			if draft, _ := o.planStore.LatestDraft(o.projectSlug()); draft != nil {
+				if err := o.planStore.SetStatus(draft.Path, plans.StatusArchived); err != nil {
+					o.logger.Warn("failed to archive plan draft for /newplan", "error", err, "path", draft.Path)
+				}
+			}
+		}
+		msg.Text = stripLeadingTag(msg.Text, "system:plan:new")
+	}
+
 	// --- Guest agent @-mention fast path ---
 	if len(msg.ActiveGuests) > 0 && msg.Mention != "" {
 		mention := strings.ToLower(msg.Mention)
@@ -1777,13 +1802,21 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	}
 
 	// --- Respec flow: intercept before guest dispatch ---
-	if strings.Contains(msg.Text, "[system:respec") || o.hasActiveRespec(msg.ChannelKind) {
+	msgTags, _ := parseControlTags(msg.Text)
+	respecTagged := false
+	for tag := range msgTags {
+		if strings.HasPrefix(tag, "system:respec") {
+			respecTagged = true
+			break
+		}
+	}
+	if respecTagged || o.hasActiveRespec(msg.ChannelKind) {
 		o.handleRespecMessage(ctx, msg, model)
 		return
 	}
 
 	// --- Context inspection command ---
-	if strings.Contains(msg.Text, "[system:context]") {
+	if msgTags["system:context"] {
 		o.handleContextCommand(ctx, msg)
 		return
 	}
@@ -1888,9 +1921,10 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	// document and pipeline dispatch; a guest alone cannot advance those modes.
 	// Chat and Loop respect the router's decision; status tag forces for legacy.
 	if guestWg != nil && !includeOrchestrator {
+		msgTags, _ := parseControlTags(msg.Text)
 		forceOrchestrator := msgMode == types.ModePlan ||
 			msgMode == types.ModeExecute ||
-			strings.Contains(msg.Text, "[system:status]")
+			msgTags["system:status"]
 		if !forceOrchestrator {
 			o.finalizeGuestRound(ctx, msg, guestWg)
 			return
@@ -1900,6 +1934,14 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	// Route by mode enum
 	switch msgMode {
 	case types.ModeExecute:
+		// Execplan gate actions (Approve/Revise/Abort from Prism buttons)
+		// are checked before the step-level gate path so clicks on a
+		// compiled-plan preview are never mistaken for a step gate.
+		if isExecPlanGateAction(msg.Text) {
+			o.handleExecutePlanApproval(ctx, msg)
+			o.finalizeGuestRound(ctx, msg, guestWg)
+			return
+		}
 		if o.activePlanRunner != nil && isGateResolution(msg.Text) {
 			o.routeGateResolution(ctx, msg)
 			o.finalizeGuestRound(ctx, msg, guestWg)
@@ -1910,16 +1952,14 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 			o.finalizeGuestRound(ctx, msg, guestWg)
 			return
 		}
-		// No structured plan. Execute v1 only dispatches structured
-		// ExecutionPlans via PlanRunner. Markdown plans, legacy [system:build]
-		// payloads, and ad-hoc execute messages all land here — reply with a
-		// clear pointer and do NOT fall through to tracker-issue minting.
-		o.sendFollowUp(ctx, msg,
-			"Execute mode requires a structured ExecutionPlan (YAML with steps/gates). "+
-				"Markdown plans from Plan mode cannot be executed directly in v1. "+
-				"To dispatch work, either compile this plan into a structured ExecutionPlan, "+
-				"or switch this runtime to Loop mode with a tracker configured for issue-based workflows.")
-		o.recordAudit(ctx, "channel.execute_unstructured", "", strPtr("execute"))
+		// No inline ExecutionPlan YAML. Try to compile the markdown plan
+		// (inline beats stored draft) into a structured ExecutionPlan,
+		// broadcast the preview to Prism, and wait for a gate:approve
+		// click to dispatch. handleExecuteMarkdown owns the no-draft reply
+		// path so we never fall through to tracker-issue minting here.
+		feedback := strings.TrimSpace(strings.ReplaceAll(msg.Text, "[system:execute]", ""))
+		feedback = strings.TrimSpace(strings.ReplaceAll(feedback, "[system:build]", ""))
+		o.handleExecuteMarkdown(ctx, msg, feedback)
 		o.finalizeGuestRound(ctx, msg, guestWg)
 		return
 	case types.ModePlan:
@@ -2192,19 +2232,25 @@ func (o *Orchestrator) sendFollowUp(ctx context.Context, original channel.Incomi
 // System tags override the orchestrator's default mode for a single message.
 // Canonical tags (chat, plan, execute, loop) are matched alongside legacy
 // aliases (fast -> chat, build -> execute, status -> chat) for back-compat.
+//
+// Tag detection is scoped to the leading control-tag prefix region via
+// parseControlTags, so a user message that quotes a tag literal in its body or
+// inside a code fence is never misinterpreted as a mode switch.
 func (o *Orchestrator) detectMode(text string) types.Mode {
+	tags, _ := parseControlTags(text)
+	for tag := range tags {
+		if strings.HasPrefix(tag, "system:respec") {
+			return types.ModeExecute
+		}
+	}
 	switch {
-	case strings.Contains(text, "[system:respec"):
+	case tags["system:execute"], tags["system:build"]:
 		return types.ModeExecute
-	case strings.Contains(text, "[system:execute]"), strings.Contains(text, "[system:build]"):
-		return types.ModeExecute
-	case strings.Contains(text, "[system:plan]"):
+	case tags["system:plan"]:
 		return types.ModePlan
-	case strings.Contains(text, "[system:loop]"):
+	case tags["system:loop"]:
 		return types.ModeLoop
-	case strings.Contains(text, "[system:chat]"),
-		strings.Contains(text, "[system:fast]"),
-		strings.Contains(text, "[system:status]"):
+	case tags["system:chat"], tags["system:fast"], tags["system:status"]:
 		return types.ModeChat
 	default:
 		return o.CurrentMode
@@ -2704,6 +2750,79 @@ func extractModelTag(text string) (model, cleaned string) {
 	cleaned = modelTagRe.ReplaceAllString(text, " ")
 	cleaned = strings.Join(strings.Fields(cleaned), " ")
 	return strings.TrimSpace(m[1]), cleaned
+}
+
+// parseControlTags scans the leading control-tag prefix of text and returns
+// the set of recognized [system:...] / [model:...] tags together with the body
+// portion that follows the prefix. Scanning stops as soon as a non-tag,
+// non-whitespace token is encountered, which means control tags quoted inside
+// the user's actual message body (including inside backticks or fenced code
+// blocks) are NOT returned. This is the only way to detect control tags
+// safely; strings.Contains on the whole message is vulnerable to false
+// positives when users discuss a tag literal.
+//
+// The returned map uses the raw tag string ("system:plan", "model:gpt-4",
+// "system:respec:miyazaki", etc.) as the key so callers can match both exact
+// tags and prefixes (e.g. the respec family).
+func parseControlTags(text string) (tags map[string]bool, body string) {
+	tags = make(map[string]bool)
+	i := 0
+	for i < len(text) {
+		// Skip leading whitespace between tags.
+		for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
+			i++
+		}
+		if i >= len(text) || text[i] != '[' {
+			break
+		}
+		rel := strings.IndexByte(text[i:], ']')
+		if rel == -1 {
+			break
+		}
+		inner := text[i+1 : i+rel]
+		if !(strings.HasPrefix(inner, "system:") || strings.HasPrefix(inner, "model:")) {
+			break
+		}
+		tags[inner] = true
+		i += rel + 1
+	}
+	body = text[i:]
+	return tags, body
+}
+
+// stripLeadingTag removes a specific [key] token from the leading control-tag
+// prefix of text, preserving any other prefix tags and the body. The target is
+// only stripped if it appears in the prefix; matches in the body are left
+// alone so user-quoted tag literals survive untouched.
+func stripLeadingTag(text, key string) string {
+	target := "[" + key + "]"
+	i := 0
+	for i < len(text) {
+		for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
+			i++
+		}
+		if i >= len(text) || text[i] != '[' {
+			break
+		}
+		rel := strings.IndexByte(text[i:], ']')
+		if rel == -1 {
+			break
+		}
+		inner := text[i+1 : i+rel]
+		if !(strings.HasPrefix(inner, "system:") || strings.HasPrefix(inner, "model:")) {
+			break
+		}
+		i += rel + 1
+	}
+	prefix := text[:i]
+	body := text[i:]
+	idx := strings.Index(prefix, target)
+	if idx == -1 {
+		return text
+	}
+	newPrefix := prefix[:idx] + prefix[idx+len(target):]
+	result := newPrefix + body
+	return strings.TrimLeft(result, " \t")
 }
 
 const leanCostTaskID = "__lean__"
@@ -3452,13 +3571,22 @@ func (o *Orchestrator) handlePlanOutput(ctx context.Context, msg channel.Incomin
 }
 
 // finalizePlan extracts, saves, and broadcasts the plan artifact (markdown path).
+//
+// The broadcast DisplayID is keyed on the plan's stable frontmatter ID
+// ("plan:<uuid>") so Prism's displayStore can upsert the same artifact in place
+// across iterative refinements. A random fallback ID is only used when no plan
+// was persisted (planStore missing or save failure) to avoid collapsing
+// distinct transient broadcasts into one artifact.
 func (o *Orchestrator) finalizePlan(ctx context.Context, msg channel.IncomingMessage, output string) {
 	planContent := extractPlanBlock(output)
 	if planContent == "" {
 		planContent = output
 	}
 
-	var planPath string
+	var (
+		planPath string
+		planID   string
+	)
 	if o.planStore != nil {
 		slug := o.projectSlug()
 		if draft, _ := o.planStore.LatestDraft(slug); draft != nil {
@@ -3466,6 +3594,7 @@ func (o *Orchestrator) finalizePlan(ctx context.Context, msg channel.IncomingMes
 				o.logger.Warn("failed to update plan", "error", err)
 			}
 			planPath = draft.Path
+			planID = draft.Frontmatter.ID
 		} else {
 			title := extractPlanTitle(planContent)
 			if title == "" {
@@ -3476,6 +3605,11 @@ func (o *Orchestrator) finalizePlan(ctx context.Context, msg channel.IncomingMes
 				o.logger.Warn("failed to save plan", "error", err)
 			}
 			planPath = path
+			if path != "" {
+				if saved, lerr := o.planStore.Load(path); lerr == nil && saved != nil {
+					planID = saved.Frontmatter.ID
+				}
+			}
 		}
 	}
 
@@ -3484,10 +3618,15 @@ func (o *Orchestrator) finalizePlan(ctx context.Context, msg channel.IncomingMes
 			"kind":     "plan",
 			"content":  planContent,
 			"planPath": planPath,
+			"planId":   planID,
+		}
+		displayID := newDisplayID()
+		if planID != "" {
+			displayID = "plan:" + planID
 		}
 		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
 			Display:   component,
-			DisplayID: newDisplayID(),
+			DisplayID: displayID,
 			ThreadID:  msg.ThreadID,
 		})
 
