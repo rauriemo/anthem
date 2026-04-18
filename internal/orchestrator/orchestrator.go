@@ -22,9 +22,9 @@ import (
 	"github.com/rauriemo/anthem/internal/audit"
 	backendpkg "github.com/rauriemo/anthem/internal/backend"
 	"github.com/rauriemo/anthem/internal/channel"
-	"github.com/rauriemo/anthem/internal/execute"
 	"github.com/rauriemo/anthem/internal/config"
 	"github.com/rauriemo/anthem/internal/cost"
+	"github.com/rauriemo/anthem/internal/execute"
 	"github.com/rauriemo/anthem/internal/guests"
 	"github.com/rauriemo/anthem/internal/harness"
 	"github.com/rauriemo/anthem/internal/plans"
@@ -43,34 +43,34 @@ type Wave struct {
 }
 
 type Orchestrator struct {
-	cfg             *config.Config
-	body            string
-	tracker         tracker.IssueTracker
-	runner          agent.AgentRunner
-	ws              workspace.WorkspaceManager
-	events          EventBus
-	rules           *rules.Engine
-	costTracker     *cost.Tracker
-	logger          *slog.Logger
-	voiceContent    string // raw VOICE.md content (user knowledge)
-	userConstraints []string
-	statePath       string
-	orchAgent       *OrchestratorAgent
-	auditLogger     audit.AuditLogger
-	channelMgr      *channel.Manager
-	currentWave     *Wave
-	lastSnapHash    string
-	homeDir         string
-	projectCtx      *ProjectContext
-	planStore       *plans.Store
-	guestIndex      *guests.GuestIndex
-	onGuestUpdate   func(guests.GuestIndex)
-	convoBuf        *ConvoBuffer
-	sharedCtx       *SharedContext
-	storyStore      *StoryStore
-	proposalStore   *ProposalStore
-	activeRespecs   map[string]*respecSession
-	backend         backendpkg.ExecutionBackend
+	cfg              *config.Config
+	body             string
+	tracker          tracker.IssueTracker
+	runner           agent.AgentRunner
+	ws               workspace.WorkspaceManager
+	events           EventBus
+	rules            *rules.Engine
+	costTracker      *cost.Tracker
+	logger           *slog.Logger
+	voiceContent     string // raw VOICE.md content (user knowledge)
+	userConstraints  []string
+	statePath        string
+	orchAgent        *OrchestratorAgent
+	auditLogger      audit.AuditLogger
+	channelMgr       *channel.Manager
+	currentWave      *Wave
+	lastSnapHash     string
+	homeDir          string
+	projectCtx       *ProjectContext
+	planStore        *plans.Store
+	guestIndex       *guests.GuestIndex
+	onGuestUpdate    func(guests.GuestIndex)
+	convoBuf         *ConvoBuffer
+	sharedCtx        *SharedContext
+	storyStore       *StoryStore
+	proposalStore    *ProposalStore
+	activeRespecs    map[string]*respecSession
+	backend          backendpkg.ExecutionBackend
 	activePlanRunner *execute.PlanRunner
 
 	CurrentMode types.Mode

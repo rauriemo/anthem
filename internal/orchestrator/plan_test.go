@@ -1,4 +1,4 @@
-﻿package orchestrator
+package orchestrator
 
 import (
 	"context"
@@ -148,7 +148,6 @@ func TestHandlePlanMessage_SavesPlanFile(t *testing.T) {
 		t.Errorf("plan status = %q, want draft", metas[0].Status)
 	}
 }
-
 
 func TestExtractPlanBlock(t *testing.T) {
 	tests := []struct {
