@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -172,7 +174,7 @@ func TestHandleLeanMessage_RecordsCost(t *testing.T) {
 	}
 }
 
-func TestHandleLeanMessage_MaxTurnsOne(t *testing.T) {
+func TestHandleLeanMessage_RunOptsMaxTurns(t *testing.T) {
 	var capturedOpts types.RunOpts
 	r := agent.NewMockRunner()
 	r.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
@@ -197,11 +199,83 @@ func TestHandleLeanMessage_MaxTurnsOne(t *testing.T) {
 		Text:        "test",
 	}, "")
 
-	if capturedOpts.MaxTurns != 1 {
-		t.Errorf("MaxTurns = %d, want 1", capturedOpts.MaxTurns)
+	if capturedOpts.MaxTurns != cfg.Orchestrator.ChatMaxTurns {
+		t.Errorf("MaxTurns = %d, want ChatMaxTurns=%d", capturedOpts.MaxTurns, cfg.Orchestrator.ChatMaxTurns)
+	}
+	if capturedOpts.MaxTurns != 2 {
+		t.Errorf("MaxTurns = %d, want default 2", capturedOpts.MaxTurns)
 	}
 	if capturedOpts.PermissionMode != "bypassPermissions" {
 		t.Errorf("PermissionMode = %q, want bypassPermissions", capturedOpts.PermissionMode)
+	}
+}
+
+func TestHandleLeanMessage_RunOptsMaxTurnsCustom(t *testing.T) {
+	var capturedOpts types.RunOpts
+	r := agent.NewMockRunner()
+	r.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		capturedOpts = opts
+		return &types.RunResult{ExitCode: 0, Output: "ok"}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = ""
+	cfg.Orchestrator.ChatMaxTurns = 5
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "",
+		Runner:       r,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	orch.handleLeanMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		Text:        "test",
+	}, "")
+
+	if capturedOpts.MaxTurns != 5 {
+		t.Errorf("MaxTurns = %d, want 5 (from custom config)", capturedOpts.MaxTurns)
+	}
+}
+
+func TestHandleLeanMessage_RunOptsDeniedTools(t *testing.T) {
+	var capturedOpts types.RunOpts
+	r := agent.NewMockRunner()
+	r.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		capturedOpts = opts
+		return &types.RunResult{ExitCode: 0, Output: "ok"}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = ""
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "",
+		Runner:       r,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	orch.handleLeanMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		Text:        "test",
+	}, "")
+
+	want := map[string]bool{"Write": false, "Edit": false, "MultiEdit": false}
+	for _, tool := range capturedOpts.DeniedTools {
+		if _, ok := want[tool]; ok {
+			want[tool] = true
+		}
+	}
+	for tool, seen := range want {
+		if !seen {
+			t.Errorf("DeniedTools missing %q; got %v", tool, capturedOpts.DeniedTools)
+		}
 	}
 }
 
@@ -569,7 +643,7 @@ func TestBuildLeanPrompt_IncludesProjectContext(t *testing.T) {
 	projectCtx := &ProjectContext{ProjectSummary: "A test project."}
 	msg := channel.IncomingMessage{Text: "hello"}
 
-	prompt := buildLeanPrompt(projectCtx, msg)
+	prompt := buildLeanPrompt(projectCtx, "", "", "", msg)
 
 	if !strings.Contains(prompt, "A test project.") {
 		t.Error("expected project context in prompt")
@@ -577,19 +651,266 @@ func TestBuildLeanPrompt_IncludesProjectContext(t *testing.T) {
 	if !strings.Contains(prompt, "hello") {
 		t.Error("expected user message in prompt")
 	}
-	if !strings.Contains(prompt, "FAST mode") {
-		t.Error("expected FAST mode constraint in prompt")
+	if !strings.Contains(prompt, "Chat mode") {
+		t.Error("expected Chat mode constraint in prompt")
 	}
-	if !strings.Contains(prompt, "Do NOT use tools") {
-		t.Error("expected no-tools constraint in prompt")
+	if !strings.Contains(prompt, "ONE read-only tool call") {
+		t.Error("expected one-tool-call constraint in prompt")
+	}
+	if strings.Contains(prompt, "FAST mode") {
+		t.Error("legacy 'FAST mode' phrasing should be gone")
+	}
+	if strings.Contains(prompt, "Do NOT use tools") {
+		t.Error("legacy 'Do NOT use tools' phrasing should be gone")
 	}
 }
 
 func TestBuildLeanPrompt_PrismDisplayInstructions(t *testing.T) {
 	msg := channel.IncomingMessage{Text: "test", ChannelKind: "prism"}
-	prompt := buildLeanPrompt(nil, msg)
+	prompt := buildLeanPrompt(nil, "", "", "", msg)
 
 	if !strings.Contains(prompt, "prism-display") {
 		t.Error("expected prism display instructions in prompt")
+	}
+}
+
+func TestBuildLeanPrompt_ToolBudgetLanguage(t *testing.T) {
+	msg := channel.IncomingMessage{Text: "hi"}
+	prompt := buildLeanPrompt(nil, "", "", "", msg)
+
+	if !strings.Contains(prompt, "ONE read-only tool call") {
+		t.Error("expected 'ONE read-only tool call' in prompt")
+	}
+	if !strings.Contains(prompt, "prefer answering from") {
+		t.Error("expected 'prefer answering from' hydrated-context phrasing in prompt")
+	}
+	if !strings.Contains(prompt, "Write tools") {
+		t.Error("expected mention of disabled Write tools")
+	}
+	if !strings.Contains(prompt, "Plan or Execute mode") {
+		t.Error("expected guidance toward Plan/Execute mode for edits")
+	}
+}
+
+func TestBuildLeanPrompt_HydratesFeatureContext(t *testing.T) {
+	msg := channel.IncomingMessage{Text: "what's the plan"}
+	featureCtx := "## Feature Context: demo\n\n### Plan Summary\nBuild a thing."
+
+	prompt := buildLeanPrompt(nil, featureCtx, "", "", msg)
+
+	if !strings.Contains(prompt, "## Feature Context") {
+		t.Error("expected Feature Context header in prompt")
+	}
+	if !strings.Contains(prompt, "Build a thing.") {
+		t.Error("expected hydrated feature content in prompt")
+	}
+}
+
+func TestBuildLeanPrompt_HydratesSharedContext(t *testing.T) {
+	msg := channel.IncomingMessage{Text: "what did we decide"}
+	sharedCtx := "We agreed to ship by Friday."
+
+	prompt := buildLeanPrompt(nil, "", sharedCtx, "", msg)
+
+	if !strings.Contains(prompt, "## Shared Context") {
+		t.Error("expected Shared Context header in prompt")
+	}
+	if !strings.Contains(prompt, "We agreed to ship by Friday.") {
+		t.Error("expected shared context body in prompt")
+	}
+}
+
+func TestBuildLeanPrompt_NoHydratedContext_Graceful(t *testing.T) {
+	msg := channel.IncomingMessage{Text: "hello"}
+	prompt := buildLeanPrompt(nil, "", "", "", msg)
+
+	if strings.Contains(prompt, "## Feature Context") {
+		t.Error("Feature Context section should be omitted when empty")
+	}
+	if strings.Contains(prompt, "## Shared Context") {
+		t.Error("Shared Context section should be omitted when empty")
+	}
+	if !strings.Contains(prompt, "hello") {
+		t.Error("user message should still be present")
+	}
+}
+
+func TestBuildLeanPrompt_WhitespaceOnlyHydrated_Omitted(t *testing.T) {
+	msg := channel.IncomingMessage{Text: "hello"}
+	prompt := buildLeanPrompt(nil, "   \n\t  ", "\n\n", " \t", msg)
+
+	if strings.Contains(prompt, "## Feature Context") {
+		t.Error("Feature Context section should be omitted when whitespace-only")
+	}
+	if strings.Contains(prompt, "## Shared Context") {
+		t.Error("Shared Context section should be omitted when whitespace-only")
+	}
+	if strings.Contains(prompt, "## User Context") {
+		t.Error("User Context section should be omitted when whitespace-only")
+	}
+}
+
+func TestBuildLeanPrompt_HydratesUserContext(t *testing.T) {
+	msg := channel.IncomingMessage{Text: "hi"}
+	userCtx := "Rafael prefers terse, evidence-backed answers."
+
+	prompt := buildLeanPrompt(nil, "", "", userCtx, msg)
+
+	if !strings.Contains(prompt, "## User Context") {
+		t.Error("expected User Context header in prompt")
+	}
+	if !strings.Contains(prompt, "Rafael prefers terse") {
+		t.Error("expected user context body in prompt")
+	}
+}
+
+func TestHandleLeanMessage_HydratesVoiceContentIntoPrompt(t *testing.T) {
+	var capturedOpts types.RunOpts
+	r := agent.NewMockRunner()
+	r.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		capturedOpts = opts
+		return &types.RunResult{ExitCode: 0, Output: "ok"}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = ""
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "",
+		Runner:       r,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+		VoiceContent: "## About Rafael\n\nRafael prefers concise answers and evidence citations.",
+	})
+
+	orch.handleLeanMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		Text:        "hi",
+	}, "")
+
+	if !strings.Contains(capturedOpts.Prompt, "## User Context") {
+		t.Error("prompt missing User Context section from VOICE.md hydration")
+	}
+	if !strings.Contains(capturedOpts.Prompt, "Rafael prefers concise answers") {
+		t.Error("prompt missing voice content body")
+	}
+}
+
+func TestHandleLeanMessage_HydratesFeatureContextIntoPrompt(t *testing.T) {
+	var capturedOpts types.RunOpts
+	r := agent.NewMockRunner()
+	r.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		capturedOpts = opts
+		return &types.RunResult{ExitCode: 0, Output: "ok"}, nil
+	}
+
+	tmp := t.TempDir()
+	featureDir := filepath.Join(tmp, ".context", "features", "demo")
+	if err := os.MkdirAll(featureDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	planContent := "---\nschema_version: \"1\"\nfeature: demo\nphase: scene-layout\nowner: user\n---\n\n# Demo Feature\n\nShip a tower defense level.\n"
+	if err := os.WriteFile(filepath.Join(featureDir, "plan.md"), []byte(planContent), 0o644); err != nil {
+		t.Fatalf("write plan: %v", err)
+	}
+	changelogContent := "schema_version: \"1\"\nentries:\n  - id: log-001\n    timestamp: \"2026-04-10T14:30:00Z\"\n    agent: miyazaki\n    action: asset_created\n    summary: \"Goblin sprite created.\"\n    tags: [sprite]\n"
+	if err := os.WriteFile(filepath.Join(featureDir, "changelog.yaml"), []byte(changelogContent), 0o644); err != nil {
+		t.Fatalf("write changelog: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = tmp
+	cfg.ActiveFeature = "demo"
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "",
+		Runner:       r,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	orch.handleLeanMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		Text:        "what changed recently",
+	}, "")
+
+	if !strings.Contains(capturedOpts.Prompt, "## Feature Context") {
+		t.Error("prompt missing Feature Context section from hydration")
+	}
+	if !strings.Contains(capturedOpts.Prompt, "Goblin sprite created.") {
+		t.Error("prompt missing hydrated changelog entry")
+	}
+}
+
+func TestHandleLeanMessage_MissingFeatureDir_Graceful(t *testing.T) {
+	var capturedOpts types.RunOpts
+	r := agent.NewMockRunner()
+	r.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		capturedOpts = opts
+		return &types.RunResult{ExitCode: 0, Output: "ok"}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = t.TempDir()
+	cfg.ActiveFeature = "nonexistent-feature"
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "",
+		Runner:       r,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	orch.handleLeanMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		Text:        "test",
+	}, "")
+
+	if capturedOpts.Prompt == "" {
+		t.Fatal("expected prompt even with missing feature dir")
+	}
+	if strings.Contains(capturedOpts.Prompt, "## Feature Context") {
+		t.Error("Feature Context section should be omitted when dir missing")
+	}
+}
+
+func TestHandleLeanMessage_HydratesSharedContextIntoPrompt(t *testing.T) {
+	var capturedOpts types.RunOpts
+	r := agent.NewMockRunner()
+	r.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		capturedOpts = opts
+		return &types.RunResult{ExitCode: 0, Output: "ok"}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Workspace.Root = ""
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "",
+		Runner:       r,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	orch.sharedCtx.Update("test", "Shared decision: ship by Friday.")
+
+	orch.handleLeanMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "test",
+		Text:        "ping",
+	}, "")
+
+	if !strings.Contains(capturedOpts.Prompt, "## Shared Context") {
+		t.Error("prompt missing Shared Context section")
+	}
+	if !strings.Contains(capturedOpts.Prompt, "ship by Friday") {
+		t.Error("prompt missing shared context content")
 	}
 }

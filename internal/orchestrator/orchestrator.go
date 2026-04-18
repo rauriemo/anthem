@@ -2708,18 +2708,35 @@ func extractModelTag(text string) (model, cleaned string) {
 
 const leanCostTaskID = "__lean__"
 
-func buildLeanPrompt(projectCtx *ProjectContext, msg channel.IncomingMessage) string {
+func buildLeanPrompt(projectCtx *ProjectContext, featureCtx, sharedCtxText, userContext string, msg channel.IncomingMessage) string {
 	var prompt strings.Builder
 
 	prompt.WriteString("## Constraints\n\n")
-	prompt.WriteString("You are in FAST mode with exactly ONE turn. You MUST respond directly with text. ")
-	prompt.WriteString("Do NOT use tools (Read, Grep, Glob, Bash, Task, etc.) — they will not execute and their raw JSON will leak to the user. ")
-	prompt.WriteString("Answer from the project context below and your general knowledge. ")
-	prompt.WriteString("If the question requires exploring the codebase or running commands, say so clearly and suggest the user switch to Agent mode.\n\n")
+	prompt.WriteString("You are in Chat mode. The User Context, Project Context, Feature Context, and Shared Context below are your source of truth — prefer answering from them. ")
+	prompt.WriteString("You have a strict budget of ONE read-only tool call (Read, Grep, Glob, Bash, or Task) and should only use it when the hydrated context genuinely doesn't cover the question. ")
+	prompt.WriteString("Write tools (Write, Edit, MultiEdit) are disabled. For edits or multi-step work, suggest switching to Plan or Execute mode.\n\n")
+
+	if strings.TrimSpace(userContext) != "" {
+		prompt.WriteString("## User Context\n\n")
+		prompt.WriteString(userContext)
+		prompt.WriteString("\n\n")
+	}
 
 	if projectCtx != nil && projectCtx.ProjectSummary != "" {
 		prompt.WriteString("## Project Context\n\n")
 		prompt.WriteString(projectCtx.ProjectSummary)
+		prompt.WriteString("\n\n")
+	}
+
+	if strings.TrimSpace(featureCtx) != "" {
+		prompt.WriteString("## Feature Context\n\n")
+		prompt.WriteString(featureCtx)
+		prompt.WriteString("\n\n")
+	}
+
+	if strings.TrimSpace(sharedCtxText) != "" {
+		prompt.WriteString("## Shared Context\n\n")
+		prompt.WriteString(sharedCtxText)
 		prompt.WriteString("\n\n")
 	}
 
@@ -2780,7 +2797,21 @@ func (o *Orchestrator) handleContextCommand(ctx context.Context, msg channel.Inc
 func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.IncomingMessage, model string) {
 	o.logger.Info("handling lean message", "sender", msg.SenderID, "text_len", len(msg.Text))
 
-	promptText := buildLeanPrompt(o.projectCtx, msg)
+	featureCtx := ""
+	if o.cfg.ActiveFeature != "" {
+		if fc, err := HydrateFeatureContext(o.projectRoot(), o.cfg.ActiveFeature); err == nil {
+			featureCtx = fc
+		} else {
+			o.logger.Warn("failed to hydrate feature context for chat", "err", err, "feature", o.cfg.ActiveFeature)
+		}
+	}
+
+	sharedCtxText := ""
+	if o.sharedCtx != nil {
+		sharedCtxText = o.sharedCtx.Get(msg.ChannelKind)
+	}
+
+	promptText := buildLeanPrompt(o.projectCtx, featureCtx, sharedCtxText, o.voiceContent, msg)
 
 	root := o.cfg.Workspace.Root
 	wsPath := ""
@@ -2805,12 +2836,18 @@ func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.Incomi
 		}
 	}
 
+	chatMaxTurns := o.cfg.Orchestrator.ChatMaxTurns
+	if chatMaxTurns <= 0 {
+		chatMaxTurns = 2
+	}
+
 	result, err := o.runner.Run(ctx, types.RunOpts{
 		WorkspacePath:  wsPath,
 		Prompt:         promptText,
-		MaxTurns:       1,
+		MaxTurns:       chatMaxTurns,
 		Model:          model,
 		PermissionMode: "bypassPermissions",
+		DeniedTools:    []string{"Write", "Edit", "MultiEdit"},
 		OnStream:       onStream,
 	})
 

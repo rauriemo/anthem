@@ -218,11 +218,14 @@ In `dontAsk` mode (the default), only tools in `allowed_tools` are auto-approved
 orchestrator:
   enabled: true                 # false = skip the agent layer entirely
   max_context_tokens: 80000     # Session refresh threshold
-  max_turns: 10                 # Turn budget for chat/execute consults
+  max_turns: 10                 # Turn budget for loop-mode orchestrator consults
+  chat_max_turns: 2             # Turn budget for chat mode (1 answer + up to 1 read-only tool call)
   plan_max_turns: 25            # Fallback turn budget for simple plan requests
   explorer_max_turns: 10        # Turn budget per explorer subagent
   max_explorers: 5              # Max parallel explorer subagents
 ```
+
+Chat mode hydrates the active feature context (`.context/features/<feature>/`) and the per-channel shared context directly into the prompt, so the agent "sees" the project scope without needing tools. Within its `chat_max_turns` budget it may also make up to one read-only tool call (`Read`, `Grep`, `Glob`, `Bash`, `Task`, MCP) for targeted lookups; write tools (`Write`, `Edit`, `MultiEdit`) are always denied. Edits and multi-step work route to Plan or Execute mode.
 
 Plan mode uses a three-phase explorer architecture: **scout** (read file tree, identify 1-5 areas) → **explore** (parallel read-only Claude Code subagents) → **synthesize** (evidence-backed markdown plan). Write tools are denied across the entire plan pipeline. For trivial requests (scout returns 0 explores), plan mode falls back to a single-run consultation using `plan_max_turns`.
 

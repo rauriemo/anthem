@@ -35,15 +35,28 @@ Prism's chat-mode dropdown translates its UI selection into the right tag before
 
 ## Chat mode
 
-**Purpose:** conversational replies, quick questions, short edits, on-the-fly guest mentions.
+**Purpose:** conversational replies, quick questions, short edits, on-the-fly guest mentions. Chat surfaces the active project scope directly by hydrating feature and shared context into every prompt, so the agent "sees" the project without needing tool calls for most questions.
 
 **Who decides what runs:** the orchestrator agent, a persistent Claude session primed with `orchestrator.md` + `VOICE.md`. If `active_guests` are set, the router decides which guest(s) respond and what focus each gets (`routeToGuests`). Direct `@mentions` bypass the router.
 
-**Guardrails:** no autonomous task dispatch, no tracker writes, no plan commits. Chat can trigger display frames (A2UI), small file edits (via executor tools), and `/respec` flows -- but it does not start Execute or Loop on its own.
+**Context hydration:** before each turn, Chat injects three sources into the prompt:
 
-**Outputs:** `stream` + `res` frames in the chat, optional `display` frames for visual content.
+1. **Project Context** -- `projectCtx.ProjectSummary` (from `project-summary.md`).
+2. **Feature Context** -- `HydrateFeatureContext(projectRoot, activeFeature)`: the plan summary, recent decisions, last ~15 changelog entries, and current agent + artifact state from `.context/features/<feature>/`.
+3. **Shared Context** -- the per-channel `SharedContext.Get(channelKind)` document.
 
-Relevant code: `internal/orchestrator/orchestrator.go` (`HandleUserMessage`, `detectMode`, `routeToGuests`), `internal/orchestrator/guestdispatch.go`.
+Empty sources are omitted cleanly. Missing feature directories degrade silently.
+
+**Guardrails:**
+
+- **Turn budget:** `orchestrator.chat_max_turns` (default `2`) -- enough for the agent to produce a final answer and optionally make a single read-only tool call along the way.
+- **Read-only tools allowed:** `Read`, `Grep`, `Glob`, `Bash`, `Task`, and configured MCP tools. The agent is instructed to prefer the hydrated context and reserve the one tool call for targeted lookups the hydrated context doesn't cover.
+- **Write tools denied:** `Write`, `Edit`, `MultiEdit` are in `DeniedTools`. Edit or multi-step work is routed to Plan or Execute mode.
+- No autonomous task dispatch, no tracker writes, no plan commits. Chat does not start Execute or Loop on its own.
+
+**Outputs:** `stream` + `res` frames in the chat, optional `display` frames for visual content, and tool-call frames when the agent exercises its one read-only tool call.
+
+Relevant code: `internal/orchestrator/orchestrator.go` (`HandleUserMessage`, `detectMode`, `handleLeanMessage`, `buildLeanPrompt`), `internal/orchestrator/featurecontext.go`, `internal/orchestrator/sharedcontext.go`, `internal/orchestrator/guestdispatch.go`.
 
 ## Plan mode
 

@@ -120,6 +120,7 @@ type OrchestratorConfig struct {
 	MaxContextTokens       int  `yaml:"max_context_tokens"`
 	StallTimeoutMS         int  `yaml:"stall_timeout_ms"`
 	MaxTurns               int  `yaml:"max_turns"`
+	ChatMaxTurns           int  `yaml:"chat_max_turns"`
 	PlanMaxTurns           int  `yaml:"plan_max_turns"`
 	ExplorerMaxTurns       int  `yaml:"explorer_max_turns"`
 	MaxExplorers           int  `yaml:"max_explorers"`
@@ -185,6 +186,7 @@ func DefaultConfig() Config {
 			MaxContextTokens:       80000,
 			StallTimeoutMS:         60000,
 			MaxTurns:               10,
+			ChatMaxTurns:           2,
 			PlanMaxTurns:           25,
 			ExplorerMaxTurns:       10,
 			MaxExplorers:           5,
