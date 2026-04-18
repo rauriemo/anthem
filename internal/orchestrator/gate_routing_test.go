@@ -81,3 +81,43 @@ func TestGateResolutionFromMessage_StructuredApproveEmpty(t *testing.T) {
 		t.Error("approve must not carry flagged artifacts")
 	}
 }
+
+// Phase 7.5 round-trip: abort via gate_action frame. Exercises the final
+// primary action over the structured wire (the text fallback is exercised
+// by TestGateResolutionFromMessage_TextFallback and
+// execcompile_test.TestParseExecPlanGate_ExtractsFields).
+func TestGateResolutionFromMessage_StructuredAbort(t *testing.T) {
+	msg := prismchan.NewGateActionIncomingMessage("g-7", "abort", "", "t", nil)
+	res, gateID, structured := gateResolutionFromMessage(msg)
+	if !structured {
+		t.Fatal("expected structured = true for prism gate_action frame")
+	}
+	if gateID != "g-7" {
+		t.Errorf("gateID = %q, want g-7", gateID)
+	}
+	if res.Action != execute.GateAbort {
+		t.Errorf("Action = %v, want abort", res.Action)
+	}
+	if len(res.FlaggedArtifacts) != 0 {
+		t.Error("abort must not carry flagged artifacts")
+	}
+}
+
+// Phase 7.5 round-trip: chat-tag text path still carries Feedback and yields
+// no gate ID (legacy Slack/dispatch channel compatibility).
+func TestGateResolutionFromMessage_TextFallbackAbort(t *testing.T) {
+	msg := channel.IncomingMessage{
+		ChannelKind: "slack",
+		Text:        "[gate:abort]",
+	}
+	res, gateID, structured := gateResolutionFromMessage(msg)
+	if structured {
+		t.Error("text path must not report structured")
+	}
+	if gateID != "" {
+		t.Errorf("text path must not carry gate ID, got %q", gateID)
+	}
+	if res.Action != execute.GateAbort {
+		t.Errorf("Action = %v, want abort", res.Action)
+	}
+}

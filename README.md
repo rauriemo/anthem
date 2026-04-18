@@ -143,7 +143,19 @@ Both must be on PATH when Anthem starts. The post-process pipeline degrades grac
 | `anthem run -w path/to/WORKFLOW.md` | Use a specific workflow file |
 | `anthem run --log-level debug` | Verbose logging |
 | `anthem validate` | Check `WORKFLOW.md` syntax without starting |
+| `anthem validate-agents --dir agents/` | Validate every agent's `review:` frontmatter block. Non-zero exit on error-level diagnostics. See [`docs/architecture/review-kinds.md`](docs/architecture/review-kinds.md). Intended for CI. |
 | `anthem version` | Print version |
+
+### CI integration — review-spec validation
+
+Agents can declare a `review:` block in their frontmatter to tell Prism how to render their approval gate. The block is parsed and validated at guest load time, and can be validated standalone in CI:
+
+```yaml
+- name: Validate agent review specs
+  run: anthem validate-agents --dir agents/
+```
+
+Fails the build on any `error`-level diagnostic (unknown kind, malformed panels, etc.). See [docs/architecture/review-kinds.md](docs/architecture/review-kinds.md) for the full contract.
 
 ## Configuration Reference
 

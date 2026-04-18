@@ -105,6 +105,10 @@ Guest agents are lightweight persona definitions (markdown files with YAML front
 
 Full spec: `docs/plans/guest-agents.md`
 
+### Review specs (per-agent approval UI contract)
+
+Agents can declare a `review:` block in their frontmatter telling Prism how to render the approval gate that follows their step. The block is media-shape-based (`kind: image-gallery | video-preview | document | …`) and composable (`panels: [viewer, metadata-table, …]`). Full contract + cookbook in [`docs/architecture/review-kinds.md`](docs/architecture/review-kinds.md). Validate locally with `anthem validate-agents --dir agents/`.
+
 ### Orchestration runtime (`internal/orchestrator/`)
 
 - **ConvoBuffer** (`convobuffer.go`): Per-channel 10-round ring buffer. `RecordUserMessage` finalizes the current round and starts a new one; `RecordResponse` appends speaker-labeled responses. `FormatHistory` renders 3 most recent rounds with 200-char truncation (backward-compatible default). `FormatHistoryN(rounds, maxRounds, truncLen)` provides parameterized formatting. `HasGuestSpoken(key, guestID)` detects first-turn guests for expanded history context. Fed into routing calls and guest prompts.
