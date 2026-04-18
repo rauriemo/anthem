@@ -1,6 +1,8 @@
 package execute
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"time"
 )
@@ -33,6 +35,24 @@ type StepArtifact struct {
 	Path    string `json:"path"`
 	Kind    string `json:"kind"`
 	Summary string `json:"summary"`
+	// ArtifactID is a stable, deterministic identifier (sha256 prefix of
+	// step_id + path) so deep links and selective-revise can address an
+	// individual artifact without depending on its array position. It is
+	// populated by NewArtifactID when providers emit artifacts.
+	ArtifactID string `json:"artifact_id,omitempty"`
+	// UpdatedInLastRevise marks artifacts produced by the most recent
+	// partial-revise pass so UIs can visually flag "new" items. Managed
+	// by the runner during selective revise (Stage 4).
+	UpdatedInLastRevise bool `json:"updated_in_last_revise,omitempty"`
+}
+
+// NewArtifactID returns the stable artifact ID for a given (stepID, path).
+// It is a truncated sha256 hash so the same (step, path) always maps to the
+// same ID across runs and processes, which is the property deep links and
+// selective revise rely on.
+func NewArtifactID(stepID, path string) string {
+	sum := sha256.Sum256([]byte(stepID + "\x00" + path))
+	return "art-" + hex.EncodeToString(sum[:8])
 }
 
 type PlanMetadata struct {

@@ -167,7 +167,7 @@ func (r *PlanRunner) runStep(ctx context.Context, step *PlanStep, threadID strin
 	r.mu.Unlock()
 
 	if gate != nil {
-		return r.handleGate(ctx, gate, collected, threadID)
+		return r.handleGate(ctx, gate, step, collected, threadID)
 	}
 
 	return nil
@@ -214,8 +214,18 @@ func (r *PlanRunner) handleStepFailure(ctx context.Context, step *PlanStep, thre
 	return nil
 }
 
-func (r *PlanRunner) handleGate(ctx context.Context, gate *ApprovalGate, artifacts []StepArtifact, threadID string) error {
-	r.broadcast(ctx, GateOpenedEvent(*gate, artifacts, threadID))
+func (r *PlanRunner) handleGate(ctx context.Context, gate *ApprovalGate, step *PlanStep, artifacts []StepArtifact, threadID string) error {
+	agentID, agentName, review := r.agentReviewContext(step.AgentID)
+	r.broadcast(ctx, GateOpenedEvent(
+		*gate,
+		artifacts,
+		step.ID,
+		agentID,
+		agentName,
+		review,
+		threadID,
+		threadID,
+	))
 
 	select {
 	case <-ctx.Done():
@@ -345,6 +355,21 @@ func (r *PlanRunner) setStepStatus(stepID string, status StepStatus) {
 			return
 		}
 	}
+}
+
+// agentReviewContext looks up the guest persona's identity and review spec so
+// gate events can surface the right drawer title, notification text, and
+// panel layout. If the guest index is missing the agent, we return just the
+// agent ID so the rest of the payload still renders sensibly.
+func (r *PlanRunner) agentReviewContext(agentID string) (string, string, *guests.ReviewSpec) {
+	if r.opts.GuestIndex == nil {
+		return agentID, "", nil
+	}
+	ag, ok := r.opts.GuestIndex.Agents[agentID]
+	if !ok {
+		return agentID, "", nil
+	}
+	return ag.ID, ag.Name, ag.Review
 }
 
 func (r *PlanRunner) upstreamArtifacts(dependsOn string) []StepArtifact {

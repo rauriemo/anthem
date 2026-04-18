@@ -2,8 +2,11 @@ package execute
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/url"
 
 	"github.com/rauriemo/anthem/internal/channel"
+	"github.com/rauriemo/anthem/internal/guests"
 )
 
 const (
@@ -33,12 +36,36 @@ type stepEventPayload struct {
 }
 
 type gateEventPayload struct {
-	GateID         string         `json:"gate_id"`
-	Prompt         string         `json:"prompt,omitempty"`
-	Artifacts      []StepArtifact `json:"artifacts,omitempty"`
-	AllowedActions []string       `json:"allowed_actions,omitempty"`
-	Resolution     string         `json:"resolution,omitempty"`
-	Feedback       string         `json:"feedback,omitempty"`
+	GateID         string             `json:"gate_id"`
+	Prompt         string             `json:"prompt,omitempty"`
+	Artifacts      []StepArtifact     `json:"artifacts,omitempty"`
+	AllowedActions []string           `json:"allowed_actions,omitempty"`
+	Resolution     string             `json:"resolution,omitempty"`
+	Feedback       string             `json:"feedback,omitempty"`
+	AgentID        string             `json:"agent_id,omitempty"`
+	AgentName      string             `json:"agent_name,omitempty"`
+	StepID         string             `json:"step_id,omitempty"`
+	PlanID         string             `json:"plan_id,omitempty"`
+	ReviewLink     string             `json:"review_link,omitempty"`
+	Review         *guests.ReviewSpec `json:"review,omitempty"`
+}
+
+// buildReviewLink returns a stable, shareable URL that opens the chain
+// screen scrolled to the specified gate. Consumed by Prism's deep-link
+// resolver (/chain?plan=<plan_id>&gate=<gate_id>) so external contexts
+// (chat messages, emails) can link directly to an approval gate.
+func buildReviewLink(planID, gateID string) string {
+	if planID == "" && gateID == "" {
+		return ""
+	}
+	q := url.Values{}
+	if planID != "" {
+		q.Set("plan", planID)
+	}
+	if gateID != "" {
+		q.Set("gate", gateID)
+	}
+	return fmt.Sprintf("/chain?%s", q.Encode())
 }
 
 type planDonePayload struct {
@@ -111,7 +138,25 @@ func StepFailedEvent(stepID, agentID, errMsg string, threadID string) channel.Ou
 	}
 }
 
-func GateOpenedEvent(gate ApprovalGate, artifacts []StepArtifact, threadID string) channel.OutgoingMessage {
+// GateOpenedEvent emits the event Prism uses to render the review drawer.
+//
+// agentID/agentName identify the guest that produced the gated artifacts so
+// the drawer can title itself with the right persona and so chat
+// notifications can be attributed correctly. review carries the agent's
+// declared review spec (kind, panels, context files, etc.) straight from
+// frontmatter. planID + gateID are the stable coordinates that power deep
+// links (/chain?plan=<plan_id>&gate=<gate_id>) and let external contexts
+// jump directly to an approval.
+func GateOpenedEvent(
+	gate ApprovalGate,
+	artifacts []StepArtifact,
+	stepID string,
+	agentID string,
+	agentName string,
+	review *guests.ReviewSpec,
+	planID string,
+	threadID string,
+) channel.OutgoingMessage {
 	return channel.OutgoingMessage{
 		EventType: EventGateOpened,
 		ThreadID:  threadID,
@@ -120,6 +165,12 @@ func GateOpenedEvent(gate ApprovalGate, artifacts []StepArtifact, threadID strin
 			Prompt:         gate.Prompt,
 			Artifacts:      artifacts,
 			AllowedActions: []string{"approve", "revise", "abort"},
+			AgentID:        agentID,
+			AgentName:      agentName,
+			StepID:         stepID,
+			PlanID:         planID,
+			ReviewLink:     buildReviewLink(planID, gate.ID),
+			Review:         review,
 		}),
 	}
 }

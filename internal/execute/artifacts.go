@@ -104,20 +104,22 @@ func (p *ContextArtifactProvider) Collect(stepID string) ([]StepArtifact, error)
 		}
 		if e.CreatedBy == stepID {
 			arts = append(arts, StepArtifact{
-				StepID:  stepID,
-				Path:    e.Path,
-				Kind:    e.Type,
-				Summary: e.Desc,
+				StepID:     stepID,
+				Path:       e.Path,
+				Kind:       e.Type,
+				Summary:    e.Desc,
+				ArtifactID: NewArtifactID(stepID, e.Path),
 			})
 			continue
 		}
 		if !marker.IsZero() && e.CreatedAt != "" {
 			if t, err := time.Parse(time.RFC3339, e.CreatedAt); err == nil && t.After(marker) {
 				arts = append(arts, StepArtifact{
-					StepID:  stepID,
-					Path:    e.Path,
-					Kind:    e.Type,
-					Summary: e.Desc,
+					StepID:     stepID,
+					Path:       e.Path,
+					Kind:       e.Type,
+					Summary:    e.Desc,
+					ArtifactID: NewArtifactID(stepID, e.Path),
 				})
 			}
 		}
@@ -136,7 +138,7 @@ func (p *ContextArtifactProvider) Inject(stepID string, upstream []StepArtifact)
 
 	refs := make([]upstreamRef, len(upstream))
 	for i, a := range upstream {
-		refs[i] = upstreamRef(a)
+		refs[i] = upstreamRef{StepID: a.StepID, Path: a.Path, Kind: a.Kind, Summary: a.Summary}
 	}
 	manifest := upstreamManifest{
 		StepID:    stepID,
@@ -221,10 +223,11 @@ func (p *FilesystemArtifactProvider) Collect(stepID string) ([]StepArtifact, err
 		if !existed || info.ModTime().After(prevMod) {
 			rel, _ := filepath.Rel(p.projectRoot, path)
 			arts = append(arts, StepArtifact{
-				StepID:  stepID,
-				Path:    rel,
-				Kind:    kindFromExt(filepath.Ext(path)),
-				Summary: "",
+				StepID:     stepID,
+				Path:       rel,
+				Kind:       kindFromExt(filepath.Ext(path)),
+				Summary:    "",
+				ArtifactID: NewArtifactID(stepID, rel),
 			})
 		}
 		return nil
@@ -243,7 +246,7 @@ func (p *FilesystemArtifactProvider) Inject(stepID string, upstream []StepArtifa
 
 	refs := make([]upstreamRef, len(upstream))
 	for i, a := range upstream {
-		refs[i] = upstreamRef(a)
+		refs[i] = upstreamRef{StepID: a.StepID, Path: a.Path, Kind: a.Kind, Summary: a.Summary}
 	}
 	manifest := upstreamManifest{
 		StepID:    stepID,

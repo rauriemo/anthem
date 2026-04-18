@@ -906,3 +906,147 @@ func TestStreamFrameKindPropagation(t *testing.T) {
 		t.Errorf("expected kind=chat, got %q", sf.Kind)
 	}
 }
+
+// Stage 2 coverage: gate_action intake.
+//
+// The review drawer sends {type: gate_action, gate_id, action, ...} instead
+// of the legacy chat-style [gate:*] command. The adapter must translate
+// each valid action into a channel.IncomingMessage the orchestrator's
+// existing gate router can consume (i.e. with a [gate:<action>] text tag),
+// preserve the raw frame on IncomingMessage.Raw so downstream code can
+// read gate_id and flagged_artifacts without re-parsing, and reject
+// frames whose action isn't approve/revise/abort.
+
+func TestGateAction_Approve_EmitsIncomingMessage(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	gateFrame := frame{
+		Type:   "gate_action",
+		GateID: "gate-miyazaki-1",
+		Action: "approve",
+		Thread: "thread-42",
+	}
+	data, _ := json.Marshal(gateFrame)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write gate_action: %v", err)
+	}
+
+	select {
+	case msg := <-a.Incoming():
+		if msg.Text != "[gate:approve]" {
+			t.Errorf("text = %q, want %q", msg.Text, "[gate:approve]")
+		}
+		if msg.ThreadID != "thread-42" {
+			t.Errorf("thread_id = %q, want %q", msg.ThreadID, "thread-42")
+		}
+		gateID, action, rev, flagged, ok := GateActionRaw(msg)
+		if !ok {
+			t.Fatalf("GateActionRaw returned ok=false")
+		}
+		if gateID != "gate-miyazaki-1" {
+			t.Errorf("gate_id = %q", gateID)
+		}
+		if action != "approve" {
+			t.Errorf("action = %q", action)
+		}
+		if rev != "" {
+			t.Errorf("expected empty revision_text, got %q", rev)
+		}
+		if len(flagged) != 0 {
+			t.Errorf("expected no flagged artifacts, got %d", len(flagged))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for gate_action incoming message")
+	}
+}
+
+func TestGateAction_Revise_CarriesTextAndFlaggedArtifacts(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	gateFrame := frame{
+		Type:         "gate_action",
+		GateID:       "gate-walt-3",
+		Action:       "revise",
+		RevisionText: "make the intro shorter",
+		Thread:       "thread-77",
+		FlaggedArtifacts: []flaggedArtifactRef{
+			{ArtifactID: "art-aaaa0001", Note: "looks blurry"},
+			{ArtifactID: "art-aaaa0002"},
+		},
+	}
+	data, _ := json.Marshal(gateFrame)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write gate_action: %v", err)
+	}
+
+	select {
+	case msg := <-a.Incoming():
+		if msg.Text != "[gate:revise] make the intro shorter" {
+			t.Errorf("text = %q", msg.Text)
+		}
+		gateID, action, rev, flagged, ok := GateActionRaw(msg)
+		if !ok {
+			t.Fatalf("GateActionRaw returned ok=false")
+		}
+		if gateID != "gate-walt-3" || action != "revise" {
+			t.Errorf("gate_id=%q action=%q", gateID, action)
+		}
+		if rev != "make the intro shorter" {
+			t.Errorf("revision_text = %q", rev)
+		}
+		if len(flagged) != 2 {
+			t.Fatalf("expected 2 flagged artifacts, got %d", len(flagged))
+		}
+		if flagged[0].ArtifactID != "art-aaaa0001" || flagged[0].Note != "looks blurry" {
+			t.Errorf("flagged[0] = %+v", flagged[0])
+		}
+		if flagged[1].ArtifactID != "art-aaaa0002" || flagged[1].Note != "" {
+			t.Errorf("flagged[1] = %+v", flagged[1])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for gate_action incoming message")
+	}
+}
+
+func TestGateAction_InvalidAction_EmitsErrorAndNoMessage(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	bad := frame{Type: "gate_action", GateID: "gate-bad", Action: "nuke", Thread: "t1"}
+	data, _ := json.Marshal(bad)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write gate_action: %v", err)
+	}
+
+	errFrame := readFrame(t, conn)
+	if errFrame.Type != "error" {
+		t.Fatalf("expected error frame, got %s", errFrame.Type)
+	}
+
+	select {
+	case msg := <-a.Incoming():
+		t.Fatalf("unexpected incoming message for invalid action: %+v", msg)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestGateActionRaw_NonGateMessageReturnsFalse(t *testing.T) {
+	msg := channel.IncomingMessage{ChannelKind: "prism", Text: "hello"}
+	if _, _, _, _, ok := GateActionRaw(msg); ok {
+		t.Fatal("expected ok=false for non-gate message")
+	}
+}

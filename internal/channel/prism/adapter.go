@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,6 +77,23 @@ type frame struct {
 	ActivateGuest   *activateGuestFrame `json:"activate_guest,omitempty"`
 	Kind            string              `json:"kind,omitempty"`
 	CurrentMode     string              `json:"current_mode,omitempty"`
+
+	// gate_action fields. A Prism client sends {type: "gate_action",
+	// gate_id, action: approve|revise|abort, revision_text,
+	// flagged_artifacts, thread} to resolve an open approval gate without
+	// having to synthesize a chat-style [gate:*] command.
+	GateID           string               `json:"gate_id,omitempty"`
+	Action           string               `json:"action,omitempty"`
+	RevisionText     string               `json:"revision_text,omitempty"`
+	FlaggedArtifacts []flaggedArtifactRef `json:"flagged_artifacts,omitempty"`
+}
+
+// flaggedArtifactRef identifies a single artifact the user wants the agent
+// to regenerate during a partial-revise round. The note is optional; if
+// omitted the agent falls back to the gate-level revision_text.
+type flaggedArtifactRef struct {
+	ArtifactID string `json:"artifact_id"`
+	Note       string `json:"note,omitempty"`
 }
 
 type frameFile struct {
@@ -306,6 +324,11 @@ func (a *Adapter) readLoop(entry *connEntry) {
 			continue
 		}
 
+		if f.Type == "gate_action" {
+			a.handleGateActionFrame(entry, f)
+			continue
+		}
+
 		if f.Type != "req" || f.ID == "" {
 			continue
 		}
@@ -343,6 +366,84 @@ func (a *Adapter) readLoop(entry *connEntry) {
 			a.logger.Warn("dropping prism incoming message, buffer full")
 		}
 	}
+}
+
+// handleGateActionFrame translates a structured Prism `gate_action` frame
+// into a channel.IncomingMessage the orchestrator's existing gate-routing
+// code can consume. The existing route (`isGateResolution` + [gate:*] text
+// tags) is kept alive by emitting the same tag form; the new frame adds
+// two properties the text path could not carry: a stable gate_id the
+// runner can match directly, and flagged_artifacts for selective revise.
+//
+// The message arrives with:
+//   - ThreadID = the thread the UI was looking at when the user clicked
+//     (FE-supplied; we don't trust it for anything but surfacing a reply).
+//   - Text set to the [gate:*] tag + any revision note, so existing
+//     orchestrator paths keep working unchanged.
+//   - Raw = the original frame so a future orchestrator pass can read
+//     gate_id and flagged_artifacts without re-parsing.
+func (a *Adapter) handleGateActionFrame(entry *connEntry, f frame) {
+	action := strings.ToLower(strings.TrimSpace(f.Action))
+	switch action {
+	case "approve", "revise", "abort":
+	default:
+		a.logger.Warn("prism gate_action with unknown action, ignoring", "action", f.Action, "gate_id", f.GateID)
+		_ = entry.writeJSON(frame{Type: "error", Error: fmt.Sprintf("unknown gate action %q", f.Action)})
+		return
+	}
+
+	text := fmt.Sprintf("[gate:%s]", action)
+	if action == "revise" && strings.TrimSpace(f.RevisionText) != "" {
+		text = text + " " + strings.TrimSpace(f.RevisionText)
+	}
+
+	threadID := f.Thread
+	if threadID == "" {
+		threadID = f.ID
+	}
+
+	if threadID != "" {
+		a.mu.Lock()
+		a.threads[threadID] = entry
+		a.mu.Unlock()
+	}
+
+	msg := channel.IncomingMessage{
+		ChannelKind: "prism",
+		SenderID:    "prism",
+		ThreadID:    threadID,
+		Text:        text,
+		Timestamp:   time.Now(),
+		Raw:         f,
+	}
+
+	select {
+	case a.incoming <- msg:
+	default:
+		a.logger.Warn("dropping prism gate_action, buffer full", "gate_id", f.GateID)
+	}
+}
+
+// GateActionRaw exposes the fields of a gate_action frame to callers that
+// pulled the corresponding IncomingMessage off the channel. Returns zero
+// values + false if the message did not originate from a gate_action frame.
+func GateActionRaw(msg channel.IncomingMessage) (gateID, action, revisionText string, flagged []FlaggedArtifact, ok bool) {
+	f, good := msg.Raw.(frame)
+	if !good || f.Type != "gate_action" {
+		return "", "", "", nil, false
+	}
+	out := make([]FlaggedArtifact, len(f.FlaggedArtifacts))
+	for i, r := range f.FlaggedArtifacts {
+		out[i] = FlaggedArtifact{ArtifactID: r.ArtifactID, Note: r.Note}
+	}
+	return f.GateID, f.Action, f.RevisionText, out, true
+}
+
+// FlaggedArtifact is the public counterpart of flaggedArtifactRef for
+// consumers outside the prism package.
+type FlaggedArtifact struct {
+	ArtifactID string
+	Note       string
 }
 
 func (a *Adapter) removeConn(entry *connEntry) {
