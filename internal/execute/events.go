@@ -28,6 +28,21 @@ const (
 	// plans/runs.Snapshot; see plans/runs/snapshot_event.go for the
 	// builder that translates it to a channel.OutgoingMessage.
 	EventPlanSnapshot = "execution.plan_snapshot"
+	// EventRunHistory carries a full, newest-first list of reduced
+	// Snapshots for a project (active + terminal). The orchestrator
+	// emits one message in response to an inbound hydrate frame so
+	// Prism can populate its scrollable Execute history in a single
+	// round-trip. Payload shape: {"runs": [Snapshot, ...]}. See
+	// plans/runs/history_event.go for the builder.
+	EventRunHistory = "execution.run_history"
+	// EventRunArchived fires when a live run transitions to terminal
+	// (completion or abort). The payload is the final Snapshot, which
+	// lets Prism flip the matching history entry from LIVE to
+	// COMPLETED/ABORTED without a full re-fetch. Sibling of the
+	// existing plan_completed / plan_aborted events -- those stay for
+	// ambient UI (chat banners, voice cues); this one carries the
+	// durable state the history scroll depends on.
+	EventRunArchived = "execution.run_archived"
 )
 
 // planLoadedPayload is the wire shape Prism decodes on
@@ -354,6 +369,42 @@ func PlanCompletedEvent(plan *ExecutionPlan, threadID string) channel.OutgoingMe
 			Title:          plan.Metadata.Title,
 			TotalSteps:     len(plan.Steps),
 			CompletedSteps: completed,
+		}),
+	}
+}
+
+// runArchivedMarker is the wire shape of execution.run_archived when
+// emitted by the runner on terminal transition. It intentionally
+// avoids shipping the full Snapshot: the client already has the
+// terminal step/gate state from the live event stream, so the only
+// new information is "this run is now terminal". Carrying plan_id +
+// compile_generation lets the frontend match the marker against the
+// corresponding RunEntry in its history list without fuzzy lookup.
+type runArchivedMarker struct {
+	PlanID            string `json:"plan_id"`
+	CompileGeneration int    `json:"compile_generation"`
+	Reason            string `json:"reason,omitempty"`
+	Terminal          bool   `json:"terminal"`
+}
+
+// RunArchivedEvent builds the execution.run_archived wire message the
+// runner emits alongside plan_completed / plan_aborted so Prism can
+// demote the matching history entry from LIVE to COMPLETED/ABORTED
+// without a round-trip re-fetch. Kept separate from the full-Snapshot
+// variant in plans/runs/history_event.go because the runner cannot
+// import runs without creating a cycle.
+//
+// reason is typically the PlanAbortedEvent reason string; empty on
+// completion.
+func RunArchivedEvent(planID string, compileGen int, reason string, threadID string) channel.OutgoingMessage {
+	return channel.OutgoingMessage{
+		EventType: EventRunArchived,
+		ThreadID:  threadID,
+		Text: mustJSON(runArchivedMarker{
+			PlanID:            planID,
+			CompileGeneration: compileGen,
+			Reason:            reason,
+			Terminal:          true,
 		}),
 	}
 }

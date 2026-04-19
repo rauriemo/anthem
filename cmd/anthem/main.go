@@ -349,13 +349,19 @@ func runCmd() *cobra.Command {
 					prismAdapter.SetMaxActiveGuests(cfg.MaxActiveGuests)
 				}
 				prismAdapter.SetCurrentMode(string(orch.CurrentMode))
-				// Each newly-authenticated Prism client gets an
-				// execution.plan_snapshot for every currently-active
-				// run so it can hydrate the Execute view without any
-				// browser-side persistence. See
-				// orchestrator.HydrationEventsForConnect for the
-				// snapshot build policy.
-				prismAdapter.SetOnConnect(orch.HydrationEventsForConnect)
+				// Each newly-authenticated Prism client gets one
+				// execution.run_history message carrying the combined
+				// newest-first list of active + terminal runs across
+				// every project (bounded by runs.DefaultHistoryLimit
+				// per plan) so it can populate the scrollable Execute
+				// history without any browser-side persistence. The
+				// same callback fires in response to client-initiated
+				// {"type":"hydrate"} frames (see
+				// adapter.handleHydrateFrame) so browser refreshes
+				// re-hydrate without waiting on a Prism-backend
+				// reconnect. See orchestrator.HistoryEventsForConnect
+				// for the list-build policy.
+				prismAdapter.SetOnConnect(orch.HistoryEventsForConnect)
 			}
 
 			// Start config hot-reload watcher

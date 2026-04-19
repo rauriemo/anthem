@@ -221,3 +221,139 @@ func mustAppend(t *testing.T, path string, e Event) {
 		t.Fatalf("append %s: %v", e.Type, err)
 	}
 }
+
+// TestListAll_NewestFirstAcrossPlans seeds two plans with mixed
+// terminal and live runs and verifies ListAll (a) includes both
+// terminal and non-terminal runs, (b) orders the combined result
+// strictly newest-first by StartedAt, and (c) exposes the per-run
+// Snapshot / file paths the hydration wire needs.
+func TestListAll_NewestFirstAcrossPlans(t *testing.T) {
+	root := t.TempDir()
+	planA := filepath.Join(root, "plan-a.plan.md")
+	planB := filepath.Join(root, "plan-b.plan.md")
+	base := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+
+	// Plan A, run 1: completed 2h ago.
+	oldCompleted := NewRunLogPath(planA, 1, base.Add(-2*time.Hour))
+	mustAppend(t, oldCompleted, RunStartedEvent("plan-a", 1, fixturePlan(), "proj"))
+	mustAppend(t, oldCompleted, RunCompletedEvent())
+
+	// Plan B, run 1: aborted 90m ago.
+	midAborted := NewRunLogPath(planB, 1, base.Add(-90*time.Minute))
+	mustAppend(t, midAborted, RunStartedEvent("plan-b", 1, fixturePlan(), "proj"))
+	mustAppend(t, midAborted, RunAbortedEvent("user"))
+
+	// Plan A, run 2: live 30m ago (parked at gate).
+	liveGate := NewRunLogPath(planA, 2, base.Add(-30*time.Minute))
+	mustAppend(t, liveGate, RunStartedEvent("plan-a", 2, fixturePlan(), "proj"))
+	mustAppend(t, liveGate, StepStartedEvent("s1", "miyazaki"))
+	mustAppend(t, liveGate, GateOpenedEvent("g1", "s1", "miyazaki", "", "", nil, []string{"approve"}, nil, ""))
+
+	got, err := ListAll(root, 0)
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3 (active + terminal across both plans) entries: %+v", len(got), got)
+	}
+	if got[0].RunPath != liveGate {
+		t.Errorf("newest entry = %s, want liveGate %s", got[0].RunPath, liveGate)
+	}
+	if got[1].RunPath != midAborted {
+		t.Errorf("middle entry = %s, want midAborted %s", got[1].RunPath, midAborted)
+	}
+	if got[2].RunPath != oldCompleted {
+		t.Errorf("oldest entry = %s, want oldCompleted %s", got[2].RunPath, oldCompleted)
+	}
+	if got[0].Snapshot.Terminal {
+		t.Errorf("live gate entry should be non-terminal, got terminal=true")
+	}
+	if !got[1].Snapshot.Terminal || got[1].Snapshot.Reason == "" {
+		t.Errorf("aborted entry should be terminal with reason, got %+v", got[1].Snapshot)
+	}
+	if !got[2].Snapshot.Terminal {
+		t.Errorf("completed entry should be terminal, got terminal=false")
+	}
+}
+
+// TestListAll_LimitIsPerPlan ensures the `limit` parameter caps runs
+// per .runs/ directory rather than globally so a project with many
+// plans can still surface at least `limit` history entries for each
+// plan. Files past the cap remain on disk (no deletion).
+func TestListAll_LimitIsPerPlan(t *testing.T) {
+	root := t.TempDir()
+	planA := filepath.Join(root, "plan-a.plan.md")
+	planB := filepath.Join(root, "plan-b.plan.md")
+	base := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+
+	// Seed 5 runs per plan, all completed, spaced one minute apart.
+	for i := 0; i < 5; i++ {
+		ts := base.Add(time.Duration(i) * time.Minute)
+		pa := NewRunLogPath(planA, i+1, ts)
+		mustAppend(t, pa, RunStartedEvent("plan-a", i+1, fixturePlan(), "proj"))
+		mustAppend(t, pa, RunCompletedEvent())
+
+		pb := NewRunLogPath(planB, i+1, ts.Add(30*time.Second))
+		mustAppend(t, pb, RunStartedEvent("plan-b", i+1, fixturePlan(), "proj"))
+		mustAppend(t, pb, RunCompletedEvent())
+	}
+
+	got, err := ListAll(root, 3)
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	// 3 per plan * 2 plans = 6 total.
+	if len(got) != 6 {
+		t.Fatalf("len = %d, want 6 (limit=3 per plan × 2 plans)", len(got))
+	}
+
+	// Verify on-disk files outside the cap are untouched.
+	entries, err := os.ReadDir(planA + RunsDirSuffix)
+	if err != nil {
+		t.Fatalf("read plan-a runs dir: %v", err)
+	}
+	var jsonlCount int
+	for _, e := range entries {
+		if !e.IsDir() && filenameRE.MatchString(e.Name()) {
+			jsonlCount++
+		}
+	}
+	if jsonlCount != 5 {
+		t.Errorf("expected 5 run files on disk for plan-a (retention cap is read-only), got %d", jsonlCount)
+	}
+}
+
+// TestListAll_DefaultLimitApplied verifies that a zero (or negative)
+// limit falls back to DefaultHistoryLimit rather than returning
+// unbounded results.
+func TestListAll_DefaultLimitApplied(t *testing.T) {
+	root := t.TempDir()
+	plan := filepath.Join(root, "plan.plan.md")
+	base := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+
+	for i := 0; i < DefaultHistoryLimit+5; i++ {
+		p := NewRunLogPath(plan, i+1, base.Add(time.Duration(i)*time.Second))
+		mustAppend(t, p, RunStartedEvent("plan", i+1, fixturePlan(), "proj"))
+		mustAppend(t, p, RunCompletedEvent())
+	}
+	got, err := ListAll(root, 0)
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	if len(got) != DefaultHistoryLimit {
+		t.Errorf("len = %d, want DefaultHistoryLimit=%d", len(got), DefaultHistoryLimit)
+	}
+}
+
+// TestListAll_MissingDirectoryIsOK mirrors ListActive's contract: a
+// non-existent project root returns an empty slice, not an error, so
+// orchestrator startup on a fresh machine doesn't panic.
+func TestListAll_MissingDirectoryIsOK(t *testing.T) {
+	got, err := ListAll(filepath.Join(t.TempDir(), "missing"), 0)
+	if err != nil {
+		t.Errorf("missing project dir should not error, got %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty slice, got %+v", got)
+	}
+}

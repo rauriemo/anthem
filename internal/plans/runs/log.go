@@ -234,3 +234,115 @@ func parseGenFromFilename(name string) int {
 	}
 	return n
 }
+
+// DefaultHistoryLimit is the per-plan cap applied when ListAll is
+// called without an explicit limit. At ~10 KB per reduced snapshot
+// this keeps the first-hydrate wire payload well under a megabyte per
+// plan even at pathological usage.
+//
+// Files older than the cap stay on disk untouched; only the fetch is
+// capped. A future `anthem runs prune` subcommand can delete them in
+// bulk when operators want to reclaim space.
+const DefaultHistoryLimit = 50
+
+// RunEntry is the disk-paired projection ListAll returns: a reduced
+// Snapshot plus the file paths that produced it. Consumers that only
+// need wire-level data can ignore the paths; startup triage and future
+// prune commands need them.
+type RunEntry struct {
+	RunPath  string   // absolute path to the .jsonl
+	PlanPath string   // plan markdown this run belongs to
+	Snapshot Snapshot // replay-reduced view of the run log
+}
+
+// ListAll walks every .runs/ directory beneath projectRoot, replays
+// each log into a Snapshot, and returns the combined list newest-first
+// by Snapshot.StartedAt. Unlike ListActive, terminal (completed/
+// aborted) runs are included -- this is the hydration feed that
+// populates Prism's scrollable Execute history.
+//
+// limit caps the number of runs returned PER PLAN DIRECTORY (i.e. per
+// .plan.md.runs/), not per project. A project with three plans each
+// holding 120 log files returns up to 3*limit entries; a project with
+// one plan and 120 log files returns up to limit entries. Pass <=0 or
+// DefaultHistoryLimit to accept the default cap. Pass math.MaxInt (or
+// any very large number) to effectively disable the cap.
+//
+// Files older than the per-plan cap remain on disk untouched; they
+// are simply skipped during the scan. This keeps the wire payload
+// bounded while preserving forensic access on the filesystem.
+//
+// Corrupt or empty log files are skipped rather than aborting the
+// walk, matching ListActive's discipline: a single bad file must
+// never starve the rest of the history.
+func ListAll(projectRoot string, limit int) ([]RunEntry, error) {
+	if limit <= 0 {
+		limit = DefaultHistoryLimit
+	}
+
+	entries, err := os.ReadDir(projectRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("runs: read project dir: %w", err)
+	}
+
+	var all []RunEntry
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasSuffix(e.Name(), RunsDirSuffix) {
+			continue
+		}
+		runsDir := filepath.Join(projectRoot, e.Name())
+		planPath := strings.TrimSuffix(runsDir, RunsDirSuffix)
+
+		perPlan, err := listPlanRuns(runsDir, planPath)
+		if err != nil {
+			continue
+		}
+		// Newest first per plan directory.
+		sort.Slice(perPlan, func(i, j int) bool {
+			return perPlan[i].Snapshot.StartedAt.After(perPlan[j].Snapshot.StartedAt)
+		})
+		if len(perPlan) > limit {
+			perPlan = perPlan[:limit]
+		}
+		all = append(all, perPlan...)
+	}
+
+	// Global ordering so multi-plan projects present a single
+	// newest-first timeline to the UI; the per-plan cap is already
+	// applied above.
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Snapshot.StartedAt.After(all[j].Snapshot.StartedAt)
+	})
+	return all, nil
+}
+
+// listPlanRuns replays every run log under a single .runs/ directory
+// into a RunEntry. Returned entries are in no particular order; the
+// caller is expected to sort.
+func listPlanRuns(runsDir, planPath string) ([]RunEntry, error) {
+	runFiles, err := os.ReadDir(runsDir)
+	if err != nil {
+		return nil, err
+	}
+	var out []RunEntry
+	for _, rf := range runFiles {
+		if rf.IsDir() || !filenameRE.MatchString(rf.Name()) {
+			continue
+		}
+		runPath := filepath.Join(runsDir, rf.Name())
+		snap, err := ReplayToSnapshot(runPath)
+		if err != nil {
+			// Corrupt / empty log -- skip, don't abort the walk.
+			continue
+		}
+		out = append(out, RunEntry{
+			RunPath:  runPath,
+			PlanPath: planPath,
+			Snapshot: snap,
+		})
+	}
+	return out, nil
+}

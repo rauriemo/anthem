@@ -143,14 +143,17 @@ type Adapter struct {
 	currentMode     string
 
 	// onConnect, when non-nil, is invoked after a client completes
-	// the auth handshake and before readLoop starts. Each returned
-	// OutgoingMessage is written to just the newly-connected
-	// conn -- never fanned out. This is the hook the orchestrator
-	// uses to emit execution.plan_snapshot events for every active
-	// run so Prism can hydrate its Execute view without any
-	// browser-side persistence. Kept simple (pure function, no conn
-	// handle exposed) so the orchestrator can generate snapshots
-	// without caring about adapter internals.
+	// the auth handshake and before readLoop starts, and again in
+	// response to client-initiated {"type":"hydrate"} frames via
+	// handleHydrateFrame. Each returned OutgoingMessage is written
+	// to just the single conn that triggered the call -- never
+	// fanned out. This is the hook the orchestrator uses to emit
+	// execution.run_history (the bounded, newest-first list of
+	// reduced run Snapshots) so Prism can populate its scrollable
+	// Execute history without any browser-side persistence. Kept
+	// simple (pure function, no conn handle exposed) so the
+	// orchestrator can generate history without caring about
+	// adapter internals.
 	onConnect func(ctx context.Context) []channel.OutgoingMessage
 
 	cancel context.CancelFunc
@@ -186,12 +189,13 @@ func (a *Adapter) SetCurrentMode(mode string) {
 	a.currentMode = mode
 }
 
-// SetOnConnect registers a hook invoked once per authenticated client.
-// The returned messages are sent only to the newly-connected session
-// (not broadcast), which is what the execution.plan_snapshot emission
-// requires: a reloading tab needs to learn about active runs on its
-// own connect, but other already-hydrated tabs must not receive a
-// second copy. Passing nil clears the hook.
+// SetOnConnect registers a hook invoked once per authenticated client
+// and additionally on every client-initiated hydrate frame. The
+// returned messages are sent only to the newly-connected (or
+// requesting) session -- never broadcast -- which is what the
+// execution.run_history emission requires: a reloading tab needs its
+// own history payload, but other already-hydrated tabs must not
+// receive a second copy. Passing nil clears the hook.
 func (a *Adapter) SetOnConnect(cb func(ctx context.Context) []channel.OutgoingMessage) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -405,6 +409,11 @@ func (a *Adapter) readLoop(entry *connEntry) {
 			continue
 		}
 
+		if f.Type == "hydrate" {
+			a.handleHydrateFrame(entry)
+			continue
+		}
+
 		if f.Type != "req" || f.ID == "" {
 			continue
 		}
@@ -440,6 +449,34 @@ func (a *Adapter) readLoop(entry *connEntry) {
 		case a.incoming <- msg:
 		default:
 			a.logger.Warn("dropping prism incoming message, buffer full")
+		}
+	}
+}
+
+// handleHydrateFrame responds to a client-initiated {"type":"hydrate"}
+// request by running the same on-connect hook used for the auth
+// handshake (see SetOnConnect) and delivering the resulting messages
+// to *only* the requesting connection. This is the path Prism uses
+// after a browser refresh: the FastAPI backend's WebSocket to Anthem
+// is long-lived, so the orchestrator's auth-time SetOnConnect fires
+// only once per Prism-backend reconnect -- not per browser tab. The
+// inbound hydrate frame gives the frontend a direct lever over its
+// own re-hydration without waiting on an unrelated reconnect.
+//
+// Never broadcast: a hydrate reply fans out only to the conn that
+// asked, matching how the on-connect path uses sendToConn.
+func (a *Adapter) handleHydrateFrame(entry *connEntry) {
+	a.mu.RLock()
+	cb := a.onConnect
+	a.mu.RUnlock()
+	if cb == nil {
+		return
+	}
+	msgs := cb(context.Background())
+	for _, m := range msgs {
+		if err := a.sendToConn(entry, m); err != nil {
+			a.logger.Warn("prism hydrate send failed", "error", err)
+			return
 		}
 	}
 }

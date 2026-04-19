@@ -1191,3 +1191,100 @@ func TestSetOnConnect_DeliversEventsOnlyToNewClient(t *testing.T) {
 		t.Fatalf("on-connect invoked %d times, want 1", got)
 	}
 }
+
+// TestHydrateFrame_RepliesOnlyToRequester covers the client-initiated
+// hydrate path: an authenticated client sends {"type":"hydrate"} and
+// the adapter invokes the on-connect hook again, but only writes the
+// returned messages to the requesting connection. A second client on
+// the same adapter must receive nothing -- otherwise a browser tab
+// that hydrates on reload would also trigger hydration events on
+// peer tabs, duplicating store writes.
+func TestHydrateFrame_RepliesOnlyToRequester(t *testing.T) {
+	a, url := startTestAdapter(t)
+
+	// Install the hook BEFORE either connection so the initial auth
+	// handshake fires it once per connection -- the test reads those
+	// warm-up frames off the wire before sending the hydrate, so the
+	// assertions below only see the hydrate-triggered reply.
+	var called int32
+	a.SetOnConnect(func(ctx context.Context) []channel.OutgoingMessage {
+		atomic.AddInt32(&called, 1)
+		return []channel.OutgoingMessage{
+			{EventType: "execution.run_history", Text: `{"runs":[]}`, ThreadID: "resume"},
+		}
+	})
+
+	passiveConn := dial(t, url)
+	if f := authenticate(t, passiveConn, testToken); f.Type != "auth_ok" {
+		t.Fatalf("passive auth failed: %s", f.Type)
+	}
+	// Drain the auth-time on-connect message.
+	_ = readFrame(t, passiveConn)
+
+	freshConn := dial(t, url)
+	if f := authenticate(t, freshConn, testToken); f.Type != "auth_ok" {
+		t.Fatalf("fresh auth failed: %s", f.Type)
+	}
+	_ = readFrame(t, freshConn)
+
+	// Reset the counter so we only assert the hydrate-triggered call.
+	atomic.StoreInt32(&called, 0)
+
+	hydrate := frame{Type: "hydrate"}
+	data, _ := json.Marshal(hydrate)
+	if err := freshConn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write hydrate: %v", err)
+	}
+
+	got := readFrame(t, freshConn)
+	if got.Type != "event" || got.Event != "execution.run_history" {
+		t.Fatalf("requester frame = %+v, want type=event event=execution.run_history", got)
+	}
+
+	_ = passiveConn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	if _, _, err := passiveConn.ReadMessage(); err == nil {
+		t.Fatal("passive client received a frame; hydrate should not broadcast")
+	}
+
+	if got := atomic.LoadInt32(&called); got != 1 {
+		t.Fatalf("on-connect invoked %d times after hydrate, want 1", got)
+	}
+}
+
+// TestHydrateFrame_NoHookInstalledIsNoop verifies that a hydrate
+// frame arriving before any hook is installed (startup race) does
+// not crash the read loop or write an error frame to the client.
+// The client should simply observe silence; subsequent frames
+// continue to work.
+func TestHydrateFrame_NoHookInstalledIsNoop(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	if f := authenticate(t, conn, testToken); f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	hydrate := frame{Type: "hydrate"}
+	data, _ := json.Marshal(hydrate)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write hydrate: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("expected no reply when no on-connect hook is installed")
+	}
+
+	// Verify the read loop is still alive: follow up with a chat req
+	// and expect the adapter to surface it on Incoming() as usual.
+	reqFrame := frame{Type: "req", ID: "post-hydrate", Text: "hello"}
+	data, _ = json.Marshal(reqFrame)
+	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		t.Fatalf("write req: %v", err)
+	}
+	select {
+	case <-a.Incoming():
+	case <-time.After(2 * time.Second):
+		t.Fatal("read loop stalled after no-op hydrate")
+	}
+}
