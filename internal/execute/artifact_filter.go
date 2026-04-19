@@ -2,7 +2,6 @@ package execute
 
 import (
 	"path"
-	"path/filepath"
 	"strings"
 )
 
@@ -62,16 +61,18 @@ func matchAnyGlob(p string, globs []string) bool {
 //   - *         matches any single path segment (no cross-segment)
 //   - ?, [...]  as in path.Match, applied per-segment
 //
-// Both pattern and name are normalized with filepath.ToSlash before
-// matching so this works identically on Windows and POSIX even when the
-// artifact path carries backslashes (e.g. an agent dumped an OS-native
-// path into artifacts.yaml). We intentionally do not fall back to
-// filepath.Match for the non-doublestar case because that would flip
-// separator meaning on Windows (path.Match treats / as the separator;
-// filepath.Match treats \).
+// Both pattern and name are normalized by unconditionally replacing "\"
+// with "/" before matching -- we cannot use filepath.ToSlash here because
+// that is a no-op on Linux/macOS runners, and the artifact paths we
+// receive may carry Windows-style backslashes even when executed on a
+// non-Windows host (e.g. an agent running on Windows echoed an OS-native
+// path into artifacts.yaml and the CI runner is Ubuntu). We intentionally
+// do not fall back to filepath.Match for the non-doublestar case because
+// that would flip separator meaning on Windows (path.Match treats / as
+// the separator; filepath.Match treats \).
 func matchGlob(pattern, name string) bool {
-	pattern = filepath.ToSlash(pattern)
-	name = filepath.ToSlash(name)
+	pattern = strings.ReplaceAll(pattern, "\\", "/")
+	name = strings.ReplaceAll(name, "\\", "/")
 	return matchSegments(strings.Split(pattern, "/"), strings.Split(name, "/"))
 }
 

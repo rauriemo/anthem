@@ -60,29 +60,29 @@ type deactivateGuestFrame struct {
 }
 
 type frame struct {
-	Type            string              `json:"type"`
-	Token           string              `json:"token,omitempty"`
-	Client          string              `json:"client,omitempty"`
-	ID              string              `json:"id,omitempty"`
-	Text            string              `json:"text,omitempty"`
-	Event           string              `json:"event,omitempty"`
-	Error           string              `json:"error,omitempty"`
-	Ack             bool                `json:"ack,omitempty"`
-	Thread          string              `json:"thread,omitempty"`
-	Component       any                 `json:"component,omitempty"`
-	Done            bool                `json:"done,omitempty"`
-	Files           []frameFile         `json:"files,omitempty"`
-	GuestAgents     []guestAgentInfo    `json:"guest_agents,omitempty"`
-	MaxActiveGuests int                 `json:"max_active_guests,omitempty"`
-	ActiveGuests    []string            `json:"active_guests,omitempty"`
-	Mention         string              `json:"mention,omitempty"`
-	GuestID         string              `json:"guest_id,omitempty"`
-	DisplayIDs      []string            `json:"display_ids,omitempty"`
+	Type            string                `json:"type"`
+	Token           string                `json:"token,omitempty"`
+	Client          string                `json:"client,omitempty"`
+	ID              string                `json:"id,omitempty"`
+	Text            string                `json:"text,omitempty"`
+	Event           string                `json:"event,omitempty"`
+	Error           string                `json:"error,omitempty"`
+	Ack             bool                  `json:"ack,omitempty"`
+	Thread          string                `json:"thread,omitempty"`
+	Component       any                   `json:"component,omitempty"`
+	Done            bool                  `json:"done,omitempty"`
+	Files           []frameFile           `json:"files,omitempty"`
+	GuestAgents     []guestAgentInfo      `json:"guest_agents,omitempty"`
+	MaxActiveGuests int                   `json:"max_active_guests,omitempty"`
+	ActiveGuests    []string              `json:"active_guests,omitempty"`
+	Mention         string                `json:"mention,omitempty"`
+	GuestID         string                `json:"guest_id,omitempty"`
+	DisplayIDs      []string              `json:"display_ids,omitempty"`
 	SuggestGuest    *suggestGuestFrame    `json:"suggest_guest,omitempty"`
 	ActivateGuest   *activateGuestFrame   `json:"activate_guest,omitempty"`
 	DeactivateGuest *deactivateGuestFrame `json:"deactivate_guest,omitempty"`
-	Kind            string              `json:"kind,omitempty"`
-	CurrentMode     string              `json:"current_mode,omitempty"`
+	Kind            string                `json:"kind,omitempty"`
+	CurrentMode     string                `json:"current_mode,omitempty"`
 
 	// gate_action fields. A Prism client sends {type: "gate_action",
 	// gate_id, action: approve|revise|abort, revision_text,

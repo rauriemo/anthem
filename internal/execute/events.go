@@ -131,11 +131,7 @@ func PlanLoadedEvent(plan *ExecutionPlan, threadID string) channel.OutgoingMessa
 	}
 	gates := make([]planGateSummary, 0, len(plan.Gates))
 	for _, g := range plan.Gates {
-		gates = append(gates, planGateSummary{
-			ID:        g.ID,
-			AfterStep: g.AfterStep,
-			Prompt:    g.Prompt,
-		})
+		gates = append(gates, planGateSummary(g))
 	}
 	return channel.OutgoingMessage{
 		EventType: EventPlanLoaded,

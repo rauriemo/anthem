@@ -23,11 +23,11 @@ type Broadcaster interface {
 
 // RunnerOpts holds dependencies injected into the PlanRunner at construction time.
 type RunnerOpts struct {
-	GuestIndex       *guests.GuestIndex
-	Runner           agent.AgentRunner
-	ChannelMgr       Broadcaster
-	Artifacts        ArtifactProvider
-	ProjectRoot      string
+	GuestIndex  *guests.GuestIndex
+	Runner      agent.AgentRunner
+	ChannelMgr  Broadcaster
+	Artifacts   ArtifactProvider
+	ProjectRoot string
 	// ProjectSlug identifies the project Prism should resolve for
 	// /files/{slug}/{path} static serving. Emitted on gate_opened events so
 	// image-gallery / video-preview / document review UIs can fetch artifact

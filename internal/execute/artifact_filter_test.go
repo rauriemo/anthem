@@ -64,11 +64,11 @@ func TestFilterArtifactsByGlobs_DoubleStarMatchesAnyDepth(t *testing.T) {
 		path string
 		want bool
 	}{
-		{"Assets/a.png", true},                      // zero intermediate segments
-		{"Assets/Characters/hero.png", true},        // one intermediate
+		{"Assets/a.png", true},                            // zero intermediate segments
+		{"Assets/Characters/hero.png", true},              // one intermediate
 		{"Assets/_Project/Art/Characters/hero.png", true}, // three intermediate
-		{"Other/hero.png", false},                   // prefix mismatch
-		{"Assets/Characters/hero.jpg", false},       // extension mismatch
+		{"Other/hero.png", false},                         // prefix mismatch
+		{"Assets/Characters/hero.jpg", false},             // extension mismatch
 	}
 	for _, tc := range cases {
 		arts := []StepArtifact{{Path: tc.path}}
