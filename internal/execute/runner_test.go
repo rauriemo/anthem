@@ -947,3 +947,73 @@ func TestPlanRunner_GateEmptyGlobsDoesNotFilter(t *testing.T) {
 	}
 	t.Fatal("no gate_opened emitted")
 }
+
+// TestPlanRunner_BuildRunOptsMaxTurns pins the three-rung max_turns
+// ladder at the execute path's buildRunOpts call site. Regression for
+// the Shigeru "max_turns_reached turnCount=2 maxTurns=1" failure where
+// a file-authoring guest (no MCP) hit the global one-shot default
+// after two tool calls. The per-agent override must beat that default.
+func TestPlanRunner_BuildRunOptsMaxTurns(t *testing.T) {
+	runner := newMockRunner()
+	httpTools := map[string]guests.HTTPToolConfig{
+		"gen": {URL: "https://example.com/gen", Method: "POST"},
+	}
+
+	tests := []struct {
+		name          string
+		agent         guests.GuestAgent
+		guestMaxTurns int
+		want          int
+	}{
+		{
+			name:          "per-agent override, no mcp",
+			agent:         guests.GuestAgent{ID: "shigeru", Name: "Shigeru", MaxTurns: 20},
+			guestMaxTurns: 0,
+			want:          20,
+		},
+		{
+			name:          "per-agent override beats config and mcp",
+			agent:         guests.GuestAgent{ID: "tower", Name: "Tower", MaxTurns: 16, HTTPTools: httpTools},
+			guestMaxTurns: 32,
+			want:          16,
+		},
+		{
+			name:          "no override, no mcp -> legacy 1",
+			agent:         guests.GuestAgent{ID: "artist", Name: "Artist"},
+			guestMaxTurns: 0,
+			want:          1,
+		},
+		{
+			name:          "no override, mcp active, config unset -> default 16",
+			agent:         guests.GuestAgent{ID: "eiji", Name: "Eiji", HTTPTools: httpTools},
+			guestMaxTurns: 0,
+			want:          16,
+		},
+		{
+			name:          "no override, mcp active, config 24 -> 24",
+			agent:         guests.GuestAgent{ID: "eiji", Name: "Eiji", HTTPTools: httpTools},
+			guestMaxTurns: 24,
+			want:          24,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			idx := &guests.GuestIndex{
+				Agents: map[string]guests.GuestAgent{tt.agent.ID: tt.agent},
+			}
+			pr := NewPlanRunner(RunnerOpts{
+				GuestIndex:       idx,
+				Runner:           runner,
+				ProjectRoot:      t.TempDir(),
+				GuestMCPMaxTurns: tt.guestMaxTurns,
+			})
+
+			step := &PlanStep{ID: "s1", AgentID: tt.agent.ID, Description: "test"}
+			opts := pr.buildRunOpts(step, "prompt body", "thread-max-turns")
+			if opts.MaxTurns != tt.want {
+				t.Errorf("MaxTurns = %d, want %d", opts.MaxTurns, tt.want)
+			}
+		})
+	}
+}

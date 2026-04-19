@@ -48,18 +48,15 @@ type GuestPromptOpts struct {
 var planEditBlockRe = regexp.MustCompile("(?s)```plan-edit\\s*\\n(.*?)\\n```")
 
 // defaultGuestMCPMaxTurns is used when orchestrator.guest_mcp_max_turns is unset (≤0).
+// Kept for backwards-compatible tests that exercise the legacy helper.
 const defaultGuestMCPMaxTurns = 16
 
-// guestInvocationMaxTurns is the Claude Code --max-turns value for one guest Run.
-// MCP workflows need multiple agentic turns (tools, then final text / prism fences).
+// guestInvocationMaxTurns is a thin backwards-compat wrapper over
+// guests.ResolveMaxTurns. New call sites should pass the GuestAgent
+// directly to ResolveMaxTurns so per-agent max_turns overrides take
+// effect. This helper resolves as if no override were declared.
 func guestInvocationMaxTurns(mcpActive bool, configured int) int {
-	if !mcpActive {
-		return 1
-	}
-	if configured > 0 {
-		return configured
-	}
-	return defaultGuestMCPMaxTurns
+	return guests.ResolveMaxTurns(guests.GuestAgent{}, mcpActive, configured)
 }
 
 // mergeMCPServersForSelectedGuests merges anthem global mcp_servers with every
@@ -406,8 +403,6 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 			}
 		}
 	}
-	guestMaxTurns := guestInvocationMaxTurns(mcpRoundActive, p.guestMCPMaxTurns)
-
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 3)
 
@@ -507,6 +502,8 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 		if toolsDisabled {
 			allowedTools = []string{}
 		}
+
+		guestMaxTurns := guests.ResolveMaxTurns(agent, mcpRoundActive, p.guestMCPMaxTurns)
 
 		wg.Add(1)
 		go func() {

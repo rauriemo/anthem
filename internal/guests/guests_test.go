@@ -1380,3 +1380,129 @@ func TestParseFrontmatter_InputTypes(t *testing.T) {
 		}
 	})
 }
+
+func TestParseFrontmatterMaxTurns(t *testing.T) {
+	base := func(extra string) string {
+		return "---\nname: MaxTurnsAgent\ndescription: Fixture for max_turns parsing\n" + extra + "---\n"
+	}
+
+	t.Run("omitted defaults to zero", func(t *testing.T) {
+		agent, err := ParseFrontmatter([]byte(base("")))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if agent.MaxTurns != 0 {
+			t.Errorf("MaxTurns = %d, want 0 (unset)", agent.MaxTurns)
+		}
+	})
+
+	t.Run("positive value parses", func(t *testing.T) {
+		agent, err := ParseFrontmatter([]byte(base("max_turns: 20\n")))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if agent.MaxTurns != 20 {
+			t.Errorf("MaxTurns = %d, want 20", agent.MaxTurns)
+		}
+	})
+
+	t.Run("negative value rejected", func(t *testing.T) {
+		_, err := ParseFrontmatter([]byte(base("max_turns: -3\n")))
+		if err == nil || !strings.Contains(err.Error(), "max_turns") {
+			t.Fatalf("expected max_turns error, got: %v", err)
+		}
+	})
+
+	t.Run("above hard cap dropped", func(t *testing.T) {
+		agent, err := ParseFrontmatter([]byte(base("max_turns: 1000000\n")))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if agent.MaxTurns != 0 {
+			t.Errorf("MaxTurns = %d, want 0 (dropped above cap)", agent.MaxTurns)
+		}
+	})
+
+	t.Run("zero is valid and means unset", func(t *testing.T) {
+		agent, err := ParseFrontmatter([]byte(base("max_turns: 0\n")))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if agent.MaxTurns != 0 {
+			t.Errorf("MaxTurns = %d, want 0", agent.MaxTurns)
+		}
+	})
+
+	t.Run("exactly at hard cap kept", func(t *testing.T) {
+		input := base("max_turns: 100\n")
+		agent, err := ParseFrontmatter([]byte(input))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if agent.MaxTurns != MaxTurnsHardCap {
+			t.Errorf("MaxTurns = %d, want %d", agent.MaxTurns, MaxTurnsHardCap)
+		}
+	})
+}
+
+func TestResolveMaxTurns(t *testing.T) {
+	tests := []struct {
+		name       string
+		agent      GuestAgent
+		mcpActive  bool
+		configured int
+		want       int
+	}{
+		{
+			name:       "per-agent override wins over everything",
+			agent:      GuestAgent{MaxTurns: 20},
+			mcpActive:  false,
+			configured: 0,
+			want:       20,
+		},
+		{
+			name:       "per-agent override wins even when mcp+configured",
+			agent:      GuestAgent{MaxTurns: 24},
+			mcpActive:  true,
+			configured: 32,
+			want:       24,
+		},
+		{
+			name:       "no override, no mcp -> 1",
+			agent:      GuestAgent{},
+			mcpActive:  false,
+			configured: 0,
+			want:       1,
+		},
+		{
+			name:       "no override, no mcp, configured ignored -> 1",
+			agent:      GuestAgent{},
+			mcpActive:  false,
+			configured: 32,
+			want:       1,
+		},
+		{
+			name:       "no override, mcp active, no config -> default 16",
+			agent:      GuestAgent{},
+			mcpActive:  true,
+			configured: 0,
+			want:       16,
+		},
+		{
+			name:       "no override, mcp active, config 32 -> 32",
+			agent:      GuestAgent{},
+			mcpActive:  true,
+			configured: 32,
+			want:       32,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveMaxTurns(tt.agent, tt.mcpActive, tt.configured)
+			if got != tt.want {
+				t.Errorf("ResolveMaxTurns() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

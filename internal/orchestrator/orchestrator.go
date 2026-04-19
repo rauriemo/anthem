@@ -2426,7 +2426,7 @@ func (o *Orchestrator) handleGuestMention(ctx context.Context, msg channel.Incom
 	mentionRunOpts := types.RunOpts{
 		Prompt:         prompt,
 		Model:          model,
-		MaxTurns:       guestInvocationMaxTurns(mcpActive, o.cfg.Orchestrator.GuestMCPMaxTurns),
+		MaxTurns:       guests.ResolveMaxTurns(agent, mcpActive, o.cfg.Orchestrator.GuestMCPMaxTurns),
 		PermissionMode: "bypassPermissions",
 		OnStream:       onMentionStream,
 	}

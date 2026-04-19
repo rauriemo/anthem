@@ -583,9 +583,11 @@ func (r *PlanRunner) buildRunOpts(step *PlanStep, prompt string, threadID string
 	var allowedTools []string
 	var guestMCPServers map[string]mcpconfig.MCPServerRef
 	var httpTools map[string]guests.HTTPToolConfig
+	var agent guests.GuestAgent
 
 	if r.opts.GuestIndex != nil {
 		if ag, ok := r.opts.GuestIndex.Agents[guestID]; ok {
+			agent = ag
 			if ag.Model != "" {
 				model = ag.Model
 			}
@@ -631,13 +633,7 @@ func (r *PlanRunner) buildRunOpts(step *PlanStep, prompt string, threadID string
 		}
 	}
 
-	maxTurns := 1
-	if mcpActive {
-		maxTurns = r.opts.GuestMCPMaxTurns
-		if maxTurns <= 0 {
-			maxTurns = 16
-		}
-	}
+	maxTurns := guests.ResolveMaxTurns(agent, mcpActive, r.opts.GuestMCPMaxTurns)
 
 	opts := types.RunOpts{
 		Prompt:         prompt,

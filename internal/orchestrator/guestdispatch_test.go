@@ -1159,3 +1159,79 @@ func TestDispatchSelectedGuests_PlanModeStripsTools(t *testing.T) {
 		t.Errorf("Plan-mode AllowedTools = %v, want empty slice", observed.AllowedTools)
 	}
 }
+
+// TestDispatchSelectedGuests_PerGuestMaxTurns pins the per-agent
+// max_turns hand-off: two guests dispatched in the same round must
+// receive distinct MaxTurns values taken from their frontmatter.
+// Before this change, maxTurns was computed once per round from the
+// merged mcp-active flag, so every guest in a round shared the same
+// cap regardless of what their agent.md declared.
+func TestDispatchSelectedGuests_PerGuestMaxTurns(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	agentsDir := dir + "/agents"
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fastBody := "---\nname: Fast\ndescription: one-shot\nrole: artist\nmax_turns: 4\n---\nFast executor."
+	if err := os.WriteFile(agentsDir+"/fast.md", []byte(fastBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	slowBody := "---\nname: Slow\ndescription: iterative\nrole: designer\nmax_turns: 20\n---\nSlow author."
+	if err := os.WriteFile(agentsDir+"/slow.md", []byte(slowBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	observed := make(map[string]int)
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		mu.Lock()
+		if strings.Contains(opts.Prompt, "Fast executor.") {
+			observed["fast"] = opts.MaxTurns
+		} else if strings.Contains(opts.Prompt, "Slow author.") {
+			observed["slow"] = opts.MaxTurns
+		}
+		mu.Unlock()
+		return &types.RunResult{Output: "ok"}, nil
+	}
+
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	idx := &guests.GuestIndex{
+		Agents: map[string]guests.GuestAgent{
+			"fast": {ID: "fast", Name: "Fast", Description: "one-shot", MaxTurns: 4},
+			"slow": {ID: "slow", Name: "Slow", Description: "iterative", MaxTurns: 20},
+		},
+	}
+
+	dispatchSelectedGuests(guestDispatchParams{
+		ctx:         context.Background(),
+		selectedIDs: []string{"fast", "slow"},
+		msg: channel.IncomingMessage{
+			ChannelKind: "test",
+			ThreadID:    "t-per-guest",
+			Text:        "Work on your tasks.",
+		},
+		guestsDir:        agentsDir,
+		runner:           runner,
+		sharedCtx:        NewSharedContext(),
+		convoBuf:         NewConvoBuffer(),
+		channelMgr:       mgr,
+		logger:           testSuggestLogger(),
+		guestIndex:       idx,
+		guestMCPMaxTurns: 32,
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if observed["fast"] != 4 {
+		t.Errorf("fast MaxTurns = %d, want 4 (per-agent override)", observed["fast"])
+	}
+	if observed["slow"] != 20 {
+		t.Errorf("slow MaxTurns = %d, want 20 (per-agent override)", observed["slow"])
+	}
+}

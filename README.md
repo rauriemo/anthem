@@ -295,6 +295,14 @@ agent:
 
 **Guest agents** (project `agents/*.md`) can declare their own `mcp_servers` and `allowed_tools`; Anthem merges them with this global registry when dispatching a guest and writes the combined **`{workspace}/.mcp.json`** so Claude Code can attach to Unity and other stdio/HTTP MCP servers.
 
+Guests can also declare `max_turns: N` in their frontmatter to set a per-agent Claude Code `--max-turns` cap. Resolution precedence (see [`internal/guests/guests.go:ResolveMaxTurns`](internal/guests/guests.go)):
+
+1. Per-agent `max_turns` when `> 0` — authoritative, used for both Execute steps and Chat/Plan dispatch.
+2. `orchestrator.guest_mcp_max_turns` (default `16`) when the guest has MCP servers or HTTP tools active for the run.
+3. `1` otherwise — cheap one-shot default for declared executors with no tools.
+
+Values are clamped at `100` (a guardrail against typos like `max_turns: 1000000`); values above the cap are logged and treated as unset. Negative values fail agent registration. Use tighter-than-default caps (e.g. `max_turns: 4`) on one-shot tool agents to prevent drift, and higher caps (e.g. `max_turns: 20`) on iterative file-authoring personas that exceed the one-shot default.
+
 #### Built-in Skills
 
 Anthem ships 6 core skills compiled into the binary via `go:embed`. These are automatically available to all agents without any external dependencies:

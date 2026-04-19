@@ -108,6 +108,11 @@ type GuestAgent struct {
 	VoiceID                 string                            `json:"voice_id,omitempty"`
 	VoiceModel              string                            `json:"voice_model,omitempty"`
 	VoicePriority           int                               `json:"voice_priority,omitempty"`
+	// MaxTurns is an optional per-agent override for the Claude Code
+	// --max-turns cap. When > 0, ResolveMaxTurns returns this value
+	// instead of the mcp-aware fallback. Declared as `max_turns:` in
+	// agent YAML frontmatter. See ResolveMaxTurns for precedence.
+	MaxTurns int `json:"max_turns,omitempty"`
 	// Review is the parsed `review:` frontmatter block. It declares how this
 	// agent's step output should be rendered for user approval. Nil means
 	// "no declaration" (fallback to artifact-list). See
@@ -141,8 +146,14 @@ type frontmatter struct {
 	VoiceID       string                            `yaml:"voice_id"`
 	VoiceModel    string                            `yaml:"voice_model"`
 	VoicePriority int                               `yaml:"voice_priority"`
+	MaxTurns      int                               `yaml:"max_turns"`
 	Review        *ReviewSpec                       `yaml:"review"`
 }
+
+// MaxTurnsHardCap is the upper bound applied to per-agent max_turns overrides.
+// Protects against a typo (e.g. max_turns: 1000000) turning into runaway cost.
+// Values above this cap are logged and dropped (treated as unset).
+const MaxTurnsHardCap = 100
 
 const indexFile = ".agents-index.json"
 
@@ -356,6 +367,19 @@ func ParseFrontmatter(data []byte) (GuestAgent, error) {
 		applyInputTypeDefaults(fm.HTTPTools, name)
 	}
 
+	// Validate max_turns: reject negatives outright; clamp absurdly large
+	// values by dropping them (treating as unset). The hard cap protects
+	// against a typo turning into a runaway-cost budget.
+	maxTurns := fm.MaxTurns
+	if maxTurns < 0 {
+		return GuestAgent{}, fmt.Errorf("max_turns must be >= 0, got %d", maxTurns)
+	}
+	if maxTurns > MaxTurnsHardCap {
+		slog.Default().Warn("max_turns exceeds hard cap; treating as unset",
+			"agent", fm.Name, "max_turns", maxTurns, "cap", MaxTurnsHardCap)
+		maxTurns = 0
+	}
+
 	return GuestAgent{
 		Name:                    fm.Name,
 		Description:             fm.Description,
@@ -371,8 +395,34 @@ func ParseFrontmatter(data []byte) (GuestAgent, error) {
 		VoiceID:                 fm.VoiceID,
 		VoiceModel:              fm.VoiceModel,
 		VoicePriority:           fm.VoicePriority,
+		MaxTurns:                maxTurns,
 		Review:                  fm.Review,
 	}, nil
+}
+
+// ResolveMaxTurns returns the --max-turns cap for a guest invocation, using
+// a three-rung fallback:
+//
+//  1. Per-agent MaxTurns override when > 0 (authoritative).
+//  2. Config-level GuestMCPMaxTurns (configured > 0) when MCP/HTTP tools are
+//     active for this run; else the compiled-in MCP default of 16.
+//  3. A hard default of 1 for one-shot guests with no MCP activity and no
+//     per-agent override (keeps cheap executors like Miyazaki cheap).
+//
+// The fallback ladder is backward-compatible: guests that never declare
+// max_turns and never wire MCP servers still resolve to 1, matching the
+// prior inline behavior in execute/runner.go and orchestrator/guestdispatch.go.
+func ResolveMaxTurns(agent GuestAgent, mcpActive bool, configured int) int {
+	if agent.MaxTurns > 0 {
+		return agent.MaxTurns
+	}
+	if !mcpActive {
+		return 1
+	}
+	if configured > 0 {
+		return configured
+	}
+	return 16
 }
 
 func extractTemplateVars(tmpl map[string]any) map[string]bool {
