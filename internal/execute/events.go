@@ -112,6 +112,10 @@ type planDonePayload struct {
 	Title          string `json:"title"`
 	TotalSteps     int    `json:"total_steps"`
 	CompletedSteps int    `json:"completed_steps"`
+	// Reason is populated on plan_aborted events so Prism can surface why
+	// the plan ended (e.g. "user aborted at gate X", "pre-flight failed").
+	// Empty on plan_completed (omitempty keeps the wire compact).
+	Reason string `json:"reason,omitempty"`
 }
 
 func mustJSON(v any) string {
@@ -361,6 +365,7 @@ func PlanAbortedEvent(plan *ExecutionPlan, reason string, threadID string) chann
 			Title:          plan.Metadata.Title,
 			TotalSteps:     len(plan.Steps),
 			CompletedSteps: completed,
+			Reason:         reason,
 		}),
 	}
 }

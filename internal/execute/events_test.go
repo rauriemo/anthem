@@ -208,6 +208,145 @@ func TestPlanLoadedEvent_EmptyPlan(t *testing.T) {
 	}
 }
 
+// TestStepFailedEvent_WireKeys pins the snake_case JSON key Prism's
+// useWebSocket.ts decoder reads (payload.error). A casing or rename
+// regression here would leave every step failure showing as
+// "Unknown error" in the Execute pipeline view.
+func TestStepFailedEvent_WireKeys(t *testing.T) {
+	msg := StepFailedEvent("s1", "miyazaki", "brush died mid-stroke", "thread-fail")
+
+	if msg.EventType != EventStepFailed {
+		t.Fatalf("event_type = %q, want %q", msg.EventType, EventStepFailed)
+	}
+
+	var got stepEventPayload
+	if err := json.Unmarshal([]byte(msg.Text), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.StepID != "s1" || got.AgentID != "miyazaki" {
+		t.Errorf("identity wrong: %+v", got)
+	}
+	if got.Error != "brush died mid-stroke" {
+		t.Errorf("error = %q", got.Error)
+	}
+
+	// Guard the exact wire key so a json tag rename is caught here.
+	for _, want := range []string{
+		`"step_id":"s1"`,
+		`"agent_id":"miyazaki"`,
+		`"error":"brush died mid-stroke"`,
+	} {
+		if !strings.Contains(msg.Text, want) {
+			t.Errorf("wire JSON missing %q: %s", want, msg.Text)
+		}
+	}
+}
+
+// TestGateResolvedEvent_WireKeys pins the snake_case JSON keys Prism's
+// useWebSocket.ts decoder reads (payload.resolution, payload.feedback).
+// If the wire reverted to the legacy action/revision_text names, gate
+// resolution would never reach the execution store and approvals would
+// appear stuck.
+func TestGateResolvedEvent_WireKeys(t *testing.T) {
+	msg := GateResolvedEvent("gate-1", GateRevise, "redraw the cape", "thread-resolve")
+
+	if msg.EventType != EventGateResolved {
+		t.Fatalf("event_type = %q, want %q", msg.EventType, EventGateResolved)
+	}
+
+	var got gateEventPayload
+	if err := json.Unmarshal([]byte(msg.Text), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.GateID != "gate-1" {
+		t.Errorf("gate_id = %q", got.GateID)
+	}
+	if got.Resolution != string(GateRevise) {
+		t.Errorf("resolution = %q, want %q", got.Resolution, string(GateRevise))
+	}
+	if got.Feedback != "redraw the cape" {
+		t.Errorf("feedback = %q", got.Feedback)
+	}
+
+	for _, want := range []string{
+		`"gate_id":"gate-1"`,
+		`"resolution":"revise"`,
+		`"feedback":"redraw the cape"`,
+	} {
+		if !strings.Contains(msg.Text, want) {
+			t.Errorf("wire JSON missing %q: %s", want, msg.Text)
+		}
+	}
+
+	// The pre-refactor wire used these names; assert they are NOT present
+	// so a partial revert at the json-tag level is caught immediately.
+	for _, gone := range []string{
+		`"action":`,
+		`"revision_text":`,
+	} {
+		if strings.Contains(msg.Text, gone) {
+			t.Errorf("wire JSON should not contain legacy key %q: %s", gone, msg.Text)
+		}
+	}
+}
+
+// TestPlanAbortedEvent_CarriesReason pins the plan_aborted wire contract
+// introduced when the Reason field was added to planDonePayload. Prism's
+// executionStore.planAborted stores this so the abort banner can surface
+// why the plan ended (e.g. "aborted at gate g1", "step failure aborted
+// by user"). Without it, users see a generic "aborted" status with no
+// context. PlanCompletedEvent intentionally omits the field via
+// `omitempty` so the completion payload stays compact.
+func TestPlanAbortedEvent_CarriesReason(t *testing.T) {
+	plan := &ExecutionPlan{
+		Steps: []PlanStep{
+			{ID: "s1", AgentID: "miyazaki", Description: "Draw hero", Status: StepCompleted},
+			{ID: "s2", AgentID: "kaplan", Description: "Balance hero", Status: StepPending},
+		},
+		Metadata: PlanMetadata{Title: "Hero bring-up"},
+	}
+
+	msg := PlanAbortedEvent(plan, "aborted at gate g1", "thread-abort")
+
+	if msg.EventType != EventPlanAborted {
+		t.Fatalf("event_type = %q, want %q", msg.EventType, EventPlanAborted)
+	}
+
+	var got planDonePayload
+	if err := json.Unmarshal([]byte(msg.Text), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Title != "Hero bring-up" {
+		t.Errorf("title = %q", got.Title)
+	}
+	if got.TotalSteps != 2 || got.CompletedSteps != 1 {
+		t.Errorf("counts wrong: total=%d completed=%d", got.TotalSteps, got.CompletedSteps)
+	}
+	if got.Reason != "aborted at gate g1" {
+		t.Errorf("reason = %q", got.Reason)
+	}
+
+	if !strings.Contains(msg.Text, `"reason":"aborted at gate g1"`) {
+		t.Errorf("wire JSON missing reason: %s", msg.Text)
+	}
+}
+
+// TestPlanCompletedEvent_OmitsReason verifies that the shared planDonePayload
+// does not leak an empty "reason" key on successful completions. omitempty
+// keeps the wire compact and lets Prism distinguish "no reason provided"
+// (completed) from "empty reason" (aborted) on the decoder side.
+func TestPlanCompletedEvent_OmitsReason(t *testing.T) {
+	plan := &ExecutionPlan{
+		Steps:    []PlanStep{{ID: "s1", AgentID: "miyazaki", Status: StepCompleted}},
+		Metadata: PlanMetadata{Title: "Done plan"},
+	}
+
+	msg := PlanCompletedEvent(plan, "thread-done")
+	if strings.Contains(msg.Text, `"reason"`) {
+		t.Errorf("plan_completed should omit reason key, got %s", msg.Text)
+	}
+}
+
 func TestNewArtifactID_StableAndDistinct(t *testing.T) {
 	a := NewArtifactID("s1", "a/b.png")
 	b := NewArtifactID("s1", "a/b.png")
