@@ -8,7 +8,7 @@ From the Anthem project root:
 claude --dangerously-skip-permissions
 ```
 
-Then paste the prompt below. The `--dangerously-skip-permissions` flag skips all file edit and command execution confirmations. It does NOT affect remote operations (no risk of deleting GitHub repos -- that requires explicit `gh` commands which are not part of this plan).
+Then paste the prompt below. The `--dangerously-skip-permissions` flag skips all file edit and command execution confirmations -- including `gh` / `curl` / network tools. Do NOT assume it is scoped to local files: Claude can and will shell out to any installed CLI with no prompt. Keep remote-mutating actions out of prompts run under this flag. (Orchestrator-initiated tracker mutations are separately gated by mode in `orchestrator.executeActions` via `IsLoopOnlyAction`; Chat/Plan/Execute cannot create GitHub issues.)
 
 After each tier completes, exit and re-enter to keep the context window fresh.
 

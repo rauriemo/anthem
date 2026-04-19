@@ -54,6 +54,11 @@ type activateGuestFrame struct {
 	Reason string `json:"reason"`
 }
 
+type deactivateGuestFrame struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+}
+
 type frame struct {
 	Type            string              `json:"type"`
 	Token           string              `json:"token,omitempty"`
@@ -73,8 +78,9 @@ type frame struct {
 	Mention         string              `json:"mention,omitempty"`
 	GuestID         string              `json:"guest_id,omitempty"`
 	DisplayIDs      []string            `json:"display_ids,omitempty"`
-	SuggestGuest    *suggestGuestFrame  `json:"suggest_guest,omitempty"`
-	ActivateGuest   *activateGuestFrame `json:"activate_guest,omitempty"`
+	SuggestGuest    *suggestGuestFrame    `json:"suggest_guest,omitempty"`
+	ActivateGuest   *activateGuestFrame   `json:"activate_guest,omitempty"`
+	DeactivateGuest *deactivateGuestFrame `json:"deactivate_guest,omitempty"`
 	Kind            string              `json:"kind,omitempty"`
 	CurrentMode     string              `json:"current_mode,omitempty"`
 
@@ -517,6 +523,20 @@ func (a *Adapter) Send(_ context.Context, msg channel.OutgoingMessage) error {
 		}
 	}
 
+	if msg.DeactivateGuest != nil {
+		f := frame{
+			Type:    "deactivate_guest",
+			GuestID: msg.DeactivateGuest.ID,
+			DeactivateGuest: &deactivateGuestFrame{
+				ID:     msg.DeactivateGuest.ID,
+				Reason: msg.DeactivateGuest.Reason,
+			},
+		}
+		if err := a.broadcastFrame(f); err != nil {
+			a.logger.Warn("prism deactivate_guest broadcast failed", "error", err)
+		}
+	}
+
 	if msg.Display != nil {
 		if err := a.sendDisplay(msg); err != nil {
 			a.logger.Warn("prism display send failed", "error", err)
@@ -527,11 +547,22 @@ func (a *Adapter) Send(_ context.Context, msg channel.OutgoingMessage) error {
 		return nil
 	}
 
-	if msg.ThreadID != "" {
-		return a.sendReply(msg)
-	}
+	// Typed execution events (EventType != "") must always route to
+	// broadcastEvent, even when ThreadID is set — the runner threads every
+	// execution event through its plan threadID for affinity, but the wire
+	// contract with Prism is that execution.* events arrive as `type: event`
+	// frames so the frontend's `execution.gate_opened` / `gate_notification`
+	// handlers fire. If this check yields to the ThreadID branch below, every
+	// gate notification collapses into a `res` chat bubble whose `text`
+	// contains the raw JSON payload — the frontend handler never runs,
+	// ReviewDrawer never opens, and the user sees Miyazaki "saying" a JSON
+	// blob instead of a Review & Approve chip. broadcastEvent preserves the
+	// ThreadID on the frame (see frame.Thread) so per-tab routing still works.
 	if msg.EventType != "" {
 		return a.broadcastEvent(msg)
+	}
+	if msg.ThreadID != "" {
+		return a.sendReply(msg)
 	}
 	return a.broadcastEvent(msg)
 }

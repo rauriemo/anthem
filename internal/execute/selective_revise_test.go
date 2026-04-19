@@ -67,16 +67,22 @@ func TestGateNotificationEvent_EmittedBeforeGateOpened(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	events := bc.eventTypes()
+	// Index against the full event slice (not eventTypes(), which filters
+	// out untyped broadcasts such as PlanRunner's per-step ActivateGuest/
+	// DeactivateGuest frames). The test cares about the relative ordering
+	// of gate_notification vs gate_opened, and fetches the notification
+	// payload directly from bc.events, so we need those indices to match.
+	bc.mu.Lock()
 	var notifIdx, openIdx int = -1, -1
-	for i, e := range events {
-		if e == EventGateNotification && notifIdx == -1 {
+	for i, ev := range bc.events {
+		if ev.EventType == EventGateNotification && notifIdx == -1 {
 			notifIdx = i
 		}
-		if e == EventGateOpened && openIdx == -1 {
+		if ev.EventType == EventGateOpened && openIdx == -1 {
 			openIdx = i
 		}
 	}
+	bc.mu.Unlock()
 	if notifIdx == -1 {
 		t.Fatal("expected gate_notification event")
 	}

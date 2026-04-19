@@ -28,6 +28,12 @@ type RunnerOpts struct {
 	ChannelMgr       Broadcaster
 	Artifacts        ArtifactProvider
 	ProjectRoot      string
+	// ProjectSlug identifies the project Prism should resolve for
+	// /files/{slug}/{path} static serving. Emitted on gate_opened events so
+	// image-gallery / video-preview / document review UIs can fetch artifact
+	// bytes. When empty, callers should fall back to the orchestrator agent
+	// id (Prism's ProjectResolver registers projects by agent id).
+	ProjectSlug      string
 	AgentsDir        string
 	GlobalMCPServers map[string]mcpconfig.MCPServerRef
 	GuestMCPMaxTurns int
@@ -139,6 +145,22 @@ func (r *PlanRunner) runStep(ctx context.Context, step *PlanStep, threadID strin
 	r.setStepStatus(step.ID, StepRunning)
 	r.broadcast(ctx, StepStartedEvent(*step, threadID))
 
+	// Ephemeral per-step roster: PlanRunner is the sole activator during
+	// Execute. Broadcasting ActivateGuest here makes the Prism sidebar
+	// show exactly "this step's owner" for the duration of the step, then
+	// handleGate broadcasts DeactivateGuest so the chip disappears before
+	// the next step activates. See orchestrator.clearPlanTimeRosterForExecute
+	// for the handoff that guarantees the roster is empty when we start.
+	if step.AgentID != "" {
+		r.broadcast(ctx, channel.OutgoingMessage{
+			ActivateGuest: &channel.ActivateGuest{
+				ID:     step.AgentID,
+				Reason: fmt.Sprintf("Starting step %s: %s", step.ID, step.Description),
+			},
+			ThreadID: threadID,
+		})
+	}
+
 	// Inject upstream artifacts
 	upstream := r.upstreamArtifacts(step.DependsOn)
 	if r.opts.Artifacts != nil {
@@ -192,6 +214,13 @@ func (r *PlanRunner) runStep(ctx context.Context, step *PlanStep, threadID strin
 		return r.handleGate(ctx, gate, step, collected, threadID)
 	}
 
+	// No gate: the step is done and there's nothing for the user to
+	// approve, so the step owner's chip should disappear before the next
+	// step activates. Gated steps emit DeactivateGuest from handleGate
+	// after the resolution (approve or abort) so the chip lingers through
+	// review.
+	r.deactivateStepAgent(ctx, step, fmt.Sprintf("step %s complete", step.ID), threadID)
+
 	return nil
 }
 
@@ -228,6 +257,7 @@ func (r *PlanRunner) handleStepFailure(ctx context.Context, step *PlanStep, thre
 			r.mu.Unlock()
 			return nil
 		case GateAbort:
+			r.deactivateStepAgent(ctx, step, fmt.Sprintf("step %s aborted", step.ID), threadID)
 			r.broadcast(ctx, PlanAbortedEvent(r.plan, "step failure aborted by user", threadID))
 			return fmt.Errorf("plan aborted at step %q", step.ID)
 		}
@@ -238,6 +268,24 @@ func (r *PlanRunner) handleStepFailure(ctx context.Context, step *PlanStep, thre
 
 func (r *PlanRunner) handleGate(ctx context.Context, gate *ApprovalGate, step *PlanStep, artifacts []StepArtifact, threadID string) error {
 	agentID, agentName, review := r.agentReviewContext(step.AgentID)
+
+	// Enforce the review spec's artifact_globs at the gate boundary.
+	// ImageGalleryView / VideoPreviewView / DocumentView in Prism each
+	// assume every artifact they receive is appropriate for their
+	// renderer (an image tag, a video tag, a markdown pane). Without
+	// this filter, a step that produces mixed outputs (e.g. Miyazaki
+	// generating both a .md character reference doc AND .png sprites)
+	// would surface the .md to ImageGalleryView where it renders as a
+	// broken <img src> tile -- the filename loads but the browser
+	// can't decode markdown as an image.
+	//
+	// Globs are declared in agent frontmatter (review.artifact_globs)
+	// and validated at guest-load time. FilterArtifactsByGlobs
+	// silently returns the input unchanged when globs is empty, so
+	// legacy agents without a glob config see no behavior change.
+	if review != nil {
+		artifacts = FilterArtifactsByGlobs(artifacts, review.ArtifactGlobs)
+	}
 
 	// Emit the guest-authored notification *before* gate_opened so the chat
 	// panel picks it up in the same tick as the drawer. If we don't have the
@@ -263,6 +311,7 @@ func (r *PlanRunner) handleGate(ctx context.Context, gate *ApprovalGate, step *P
 		agentName,
 		review,
 		threadID,
+		r.opts.ProjectSlug,
 		threadID,
 	))
 
@@ -275,18 +324,46 @@ func (r *PlanRunner) handleGate(ctx context.Context, gate *ApprovalGate, step *P
 		switch msg.Resolution.Action {
 		case GateApprove:
 			r.clearPartialReviseState(gate.AfterStep)
+			// Approve means the step's owner is done; drop the chip
+			// so the next step's ActivateGuest is the only pill
+			// visible in the Prism roster.
+			r.deactivateStepAgent(ctx, step, fmt.Sprintf("step %s complete", step.ID), threadID)
 			return nil
 		case GateRevise:
+			// Revise: the same guest is about to re-run the step, so
+			// we intentionally keep them active. Emitting
+			// DeactivateGuest here would cause the chip to flicker
+			// between the revise click and the next StepStarted.
 			r.applyRevise(gate.AfterStep, msg.Resolution, artifacts, review)
 			return nil
 		case GateAbort:
 			r.clearPartialReviseState(gate.AfterStep)
+			r.deactivateStepAgent(ctx, step, fmt.Sprintf("step %s aborted", step.ID), threadID)
 			r.broadcast(ctx, PlanAbortedEvent(r.plan, "aborted at gate", threadID))
 			return fmt.Errorf("plan aborted at gate %q", gate.ID)
 		}
 	}
 
 	return nil
+}
+
+// deactivateStepAgent emits a DeactivateGuest frame for the step's owner
+// on the channel. Centralized so every PlanRunner code path that concludes
+// a step (gate approve, gate abort, no-gate completion, step failure
+// abort) follows the same ordering: StepCompleted/StepFailed frames,
+// optional GateResolved, then DeactivateGuest. A missing AgentID (legacy
+// seed plans, test fixtures) is treated as a no-op.
+func (r *PlanRunner) deactivateStepAgent(ctx context.Context, step *PlanStep, reason, threadID string) {
+	if step == nil || step.AgentID == "" {
+		return
+	}
+	r.broadcast(ctx, channel.OutgoingMessage{
+		DeactivateGuest: &channel.DeactivateGuest{
+			ID:     step.AgentID,
+			Reason: reason,
+		},
+		ThreadID: threadID,
+	})
 }
 
 // applyRevise rewrites the step description with revise context and re-queues

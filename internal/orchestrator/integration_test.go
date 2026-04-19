@@ -1178,6 +1178,131 @@ func TestCreateSubtasks_RemapsDependsOnOrdinals(t *testing.T) {
 	}
 }
 
+// TestExecuteActions_LoopOnlyActionsBlockedOutsideLoop is the
+// regression test for the "agent silently created 9 GitHub issues
+// during an Execute-mode approval gate" incident. Every loop-only
+// action is proposed in every non-Loop mode (Chat/Plan/Execute) and
+// the mock tracker must remain untouched: no new issues (task
+// count unchanged), no comments, no status flips, no labels added.
+// The same action set in ModeLoop must still go through -- that
+// subtest proves the gate is mode-conditional, not action-killed
+// globally.
+//
+// Enforcement lives in Orchestrator.executeActions just after the
+// SchemaOnly check. See IsLoopOnlyAction for the canonical set.
+func TestExecuteActions_LoopOnlyActionsBlockedOutsideLoop(t *testing.T) {
+	loopOnly := []Action{
+		{
+			Type: ActionCreateSubtasks,
+			Subtasks: []SubtaskDef{
+				{Title: "Subtask A", Body: "Do A", Labels: []string{"todo"}},
+				{Title: "Subtask B", Body: "Do B", Labels: []string{"todo"}},
+			},
+		},
+		{Type: ActionSkip, TaskID: "1", Reason: "blocked"},
+		{Type: ActionComment, TaskID: "1", Body: "still working"},
+		{Type: ActionRequestApproval, TaskID: "1"},
+		{Type: ActionCloseWave},
+	}
+
+	nonLoopModes := []types.Mode{types.ModeChat, types.ModePlan, types.ModeExecute}
+
+	for _, mode := range nonLoopModes {
+		mode := mode
+		t.Run(string(mode), func(t *testing.T) {
+			trk := tracker.NewMockTracker([]types.Task{
+				{ID: "1", Title: "Parent", Status: types.StatusQueued, Labels: []string{"todo"}},
+			})
+
+			cfg := config.DefaultConfig()
+			cfg.Tracker.Kind = "github"
+			cfg.Tracker.Repo = "t/r"
+			cfg.Tracker.Labels.Active = []string{"todo"}
+
+			orch := New(Opts{
+				Config:       &cfg,
+				TemplateBody: "{{.issue.title}}",
+				Tracker:      trk,
+				Runner:       newNoopRunner(),
+				Workspace:    workspace.NewMockWorkspaceManager(),
+				EventBus:     NewMockEventBus(),
+				Logger:       testLogger(),
+			})
+			orch.CurrentMode = mode
+
+			orch.executeActions(context.Background(),
+				[]types.Task{{ID: "1", Title: "Parent", Status: types.StatusQueued}},
+				loopOnly,
+			)
+
+			// No new issues created (this is the #10-#18 regression).
+			if got := len(trk.Tasks); got != 1 {
+				t.Errorf("%s: tracker.Tasks = %d, want 1 (no create_subtasks leaked into tracker)",
+					mode, got)
+			}
+			// No comments added (ActionComment blocked).
+			if got := len(trk.Comments["1"]); got != 0 {
+				t.Errorf("%s: tracker.Comments[1] = %v, want [] (ActionComment not blocked)",
+					mode, trk.Comments["1"])
+			}
+			// Status not flipped (ActionSkip blocked). MockTracker's
+			// UpdateStatus mutates in-place, so we observe via Tasks[0].
+			if got := trk.Tasks[0].Status; got != types.StatusQueued {
+				t.Errorf("%s: task.Status = %q, want StatusQueued (ActionSkip not blocked)",
+					mode, got)
+			}
+			// No "needs-approval" label (ActionRequestApproval blocked).
+			for _, l := range trk.Tasks[0].Labels {
+				if l == "needs-approval" {
+					t.Errorf("%s: task.Labels contains 'needs-approval' -- ActionRequestApproval not blocked; labels=%v",
+						mode, trk.Tasks[0].Labels)
+				}
+			}
+		})
+	}
+
+	// Loop mode still dispatches normally -- the gate must only fire
+	// when CurrentMode != ModeLoop. If someone inverts the condition
+	// or removes the mode check entirely, this subtest catches it.
+	t.Run("loop mode still creates subtasks", func(t *testing.T) {
+		trk := tracker.NewMockTracker([]types.Task{
+			{ID: "1", Title: "Parent", Status: types.StatusQueued},
+		})
+
+		cfg := config.DefaultConfig()
+		cfg.Tracker.Kind = "github"
+		cfg.Tracker.Repo = "t/r"
+		cfg.Tracker.Labels.Active = []string{"todo"}
+
+		orch := New(Opts{
+			Config:       &cfg,
+			TemplateBody: "{{.issue.title}}",
+			Tracker:      trk,
+			Runner:       newNoopRunner(),
+			Workspace:    workspace.NewMockWorkspaceManager(),
+			EventBus:     NewMockEventBus(),
+			Logger:       testLogger(),
+		})
+		orch.CurrentMode = types.ModeLoop
+
+		orch.executeActions(context.Background(),
+			[]types.Task{{ID: "1", Title: "Parent", Status: types.StatusQueued}},
+			[]Action{
+				{
+					Type: ActionCreateSubtasks,
+					Subtasks: []SubtaskDef{
+						{Title: "Subtask A", Body: "Do A", Labels: []string{"todo"}},
+					},
+				},
+			},
+		)
+
+		if got := len(trk.Tasks); got != 2 {
+			t.Errorf("loop mode: tracker.Tasks = %d, want 2 (1 parent + 1 created subtask)", got)
+		}
+	})
+}
+
 func TestCreateSubtasks_NoActiveLabelsConfigured(t *testing.T) {
 	trk := tracker.NewMockTracker([]types.Task{
 		{ID: "1", Title: "Parent", Status: types.StatusQueued},
@@ -1195,6 +1320,11 @@ func TestCreateSubtasks_NoActiveLabelsConfigured(t *testing.T) {
 		EventBus:     NewMockEventBus(),
 		Logger:       testLogger(),
 	})
+	// create_subtasks is loop-only; without Tracker.Kind the orchestrator
+	// defaults to ModeChat and the mode gate would drop the action. This
+	// test predates the mode gate and only cares about label auto-add
+	// behavior, so pin ModeLoop explicitly.
+	orch.CurrentMode = types.ModeLoop
 
 	tasks := []types.Task{{ID: "1", Title: "Parent", Status: types.StatusQueued}}
 	actions := []Action{

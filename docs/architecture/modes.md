@@ -73,6 +73,16 @@ For trivial requests (scout returns 0 explore tasks), Plan falls back to a singl
 
 **Guardrails:** write tools (`Write`, `Edit`, `MultiEdit`) are denied across the entire pipeline. The plan agent uses a dedicated prompt that omits JSON actions and HTML display instructions, so the output is always fenced markdown inside `anthem-plan` blocks.
 
+**Guest contributions in Plan mode.** Active guests can reply and emit `plan-edit` blocks, but they run with **all tools stripped**. Specifically:
+
+- `dispatchSelectedGuests` forces `AllowedTools = []` when `mode == types.ModePlan` regardless of what the guest's frontmatter declares.
+- `types.RunOpts.ToolsDisabled = true` is threaded through to the harness; `claude/driver.go` translates this to `--disallowedTools '*'`, which dominates every other tool-resolution path. Any new tool-resolution code must honor this flag first.
+- The guest's prompt carries an explicit "Plan Mode Tool Policy" section telling the agent to respond in text only and to use `plan-edit` blocks for any plan changes.
+
+This layered strip (prompt + harness flag + frontmatter override) is deliberate belt-and-suspenders: a guest summoned into Plan mode cannot execute tools even if one of the layers is accidentally weakened by a future refactor.
+
+**Invite-intent detection is convenience, not authority.** `detectInviteIntent` matches a tight verb+name regex (`invite|add|bring in|pull in` followed by an adjacent token that resolves to a known guest id/name, with chained separators for "A and B"). The detection **is skipped entirely** when the message is in Plan or Execute mode, or when it is an execplan gate click, so a typed name in a Plan-mode message is treated as a reference, not a summons. The design principle is to bias toward false negatives over false positives: a missed auto-invite is one `@mention` to correct; a false-positive auto-activation burns tokens and (pre-L2) could fire tools on misread intent.
+
 **Stable plan artifacts:** every plan has a persistent UUIDv4 `ID` in its YAML frontmatter, generated on first save and backfilled for legacy files on load. The Plan mode pipeline derives a stable `DisplayID = "plan:" + plan.Frontmatter.ID` when broadcasting the artifact to Prism. The displayStore upserts artifacts by `displayId`, so iterating on a plan replaces content *in place* in the same artifact slot rather than spamming new cards on every refinement — navigation position and action state are preserved across upserts. Random fallback `DisplayID`s are only used when no plan was persisted (e.g. malformed output).
 
 **Starting a fresh plan:** to archive the current draft and begin a new one, send `[system:plan:new]` (Prism exposes this as the `/newplan` slash command, aliased to `/plan:new`). The handler marks the current draft `StatusArchived` (which is filtered out of `LatestDraft`) and then proceeds as a normal Plan turn on fresh content. Archived plans are kept on disk for audit; they simply stop showing up as the "current" draft.
@@ -114,6 +124,16 @@ Relevant code: `internal/orchestrator/planmode.go` (or equivalent), `internal/pl
 - Artifact collection and upstream injection.
 - Event emission to Prism.
 - Failure / pause semantics (no autonomous retries in v1).
+
+**PlanRunner is the sole guest activator in Execute mode.** Orchestrator-driven guest dispatch is gated off for the duration of Execute mode (`dispatchBlockedByMode = preMsgMode == types.ModeExecute || isExecPlanGateAction(text)`). Instead, `PlanRunner` broadcasts `ActivateGuest` at the start of each step and `DeactivateGuest` at the end, so the Prism roster always reflects "this step's owner is working" while a step runs and returns to empty between steps. The pairing rules are:
+
+- `runStep` start: broadcast `ActivateGuest` with the step's `AgentID`.
+- No-gate completion: broadcast `DeactivateGuest` with reason `"step <id> complete"`.
+- `handleGate` / `GateApprove`: broadcast `DeactivateGuest` ("step complete") — the next step's `ActivateGuest` will follow.
+- `handleGate` / `GateRevise`: **retain** the chip. The same agent is about to re-run, and flicker between revise click and next StepStarted is exactly what this invariant is preventing.
+- `handleGate` / `GateAbort` and `handleStepFailure` / `GateAbort`: broadcast `DeactivateGuest` ("step aborted").
+
+**Plan→Execute roster handoff.** Before `PlanRunner` spawns, `handleExecutePlanApproval` broadcasts `DeactivateGuest` for every guest in `msg.ActiveGuests` with reason `"plan approved, entering execute"`. This closes the "who's working vs who's watching" ambiguity — after Approve, the Prism roster is empty and the only chip that appears belongs to the step currently running. Any code that spawns `PlanRunner` MUST broadcast the deactivation frames first; breaking this ordering re-introduces mixed-roster UI state.
 
 The agent owns:
 - Compiling human intent into the `ExecutionPlan` (typically during Plan mode).

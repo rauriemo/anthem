@@ -23,10 +23,42 @@ const (
 	EventPlanAborted      = "execution.plan_aborted"
 )
 
+// planLoadedPayload is the wire shape Prism decodes on
+// execution.plan_loaded. It carries enough data for the Execute pipeline
+// view to render the full step list and approval gates immediately -- the
+// previous metadata-only payload (title + counts) left the pipeline showing
+// "0/0 steps" even after the plan was successfully compiled.
+//
+// Steps/Gates use a flattened shape that matches what Prism's
+// useExecutionStore.loadPlan expects ({id, agent_id, label} and
+// {id, after_step, prompt}), with PlanStep.Description exposed as `label`
+// so the pipeline renders the human-authored step title rather than the
+// opaque step ID.
 type planLoadedPayload struct {
-	Title     string `json:"title"`
-	StepCount int    `json:"step_count"`
-	GateCount int    `json:"gate_count"`
+	Title     string            `json:"title"`
+	StepCount int               `json:"step_count"`
+	GateCount int               `json:"gate_count"`
+	Steps     []planStepSummary `json:"steps"`
+	Gates     []planGateSummary `json:"gates"`
+}
+
+// planStepSummary is the JSON projection of a PlanStep that Prism's
+// execution store consumes. Description is renamed to `label` because that
+// is the field name ExecutionStep uses (ExecuteProgressView renders
+// step.label ?? step.id).
+type planStepSummary struct {
+	ID        string `json:"id"`
+	AgentID   string `json:"agent_id"`
+	Label     string `json:"label,omitempty"`
+	DependsOn string `json:"depends_on,omitempty"`
+}
+
+// planGateSummary mirrors ApprovalGate on the wire with the field names
+// Prism expects (after_step, not AfterStep via camelCase).
+type planGateSummary struct {
+	ID        string `json:"id"`
+	AfterStep string `json:"after_step"`
+	Prompt    string `json:"prompt,omitempty"`
 }
 
 type stepEventPayload struct {
@@ -50,6 +82,12 @@ type gateEventPayload struct {
 	PlanID         string             `json:"plan_id,omitempty"`
 	ReviewLink     string             `json:"review_link,omitempty"`
 	Review         *guests.ReviewSpec `json:"review,omitempty"`
+	// Slug is the project slug Prism uses to resolve artifact file paths
+	// against a project root (/files/{slug}/{path}). Without it, review UIs
+	// (image-gallery, video-preview, document) have no anchor for <img src>
+	// / <video src> / fetch() calls and render empty "missing" tiles.
+	// Populated from the orchestrator's project slug at runner construction.
+	Slug string `json:"slug,omitempty"`
 }
 
 // buildReviewLink returns a stable, shareable URL that opens the chain
@@ -82,6 +120,23 @@ func mustJSON(v any) string {
 }
 
 func PlanLoadedEvent(plan *ExecutionPlan, threadID string) channel.OutgoingMessage {
+	steps := make([]planStepSummary, 0, len(plan.Steps))
+	for _, s := range plan.Steps {
+		steps = append(steps, planStepSummary{
+			ID:        s.ID,
+			AgentID:   s.AgentID,
+			Label:     s.Description,
+			DependsOn: s.DependsOn,
+		})
+	}
+	gates := make([]planGateSummary, 0, len(plan.Gates))
+	for _, g := range plan.Gates {
+		gates = append(gates, planGateSummary{
+			ID:        g.ID,
+			AfterStep: g.AfterStep,
+			Prompt:    g.Prompt,
+		})
+	}
 	return channel.OutgoingMessage{
 		EventType: EventPlanLoaded,
 		ThreadID:  threadID,
@@ -89,6 +144,8 @@ func PlanLoadedEvent(plan *ExecutionPlan, threadID string) channel.OutgoingMessa
 			Title:     plan.Metadata.Title,
 			StepCount: len(plan.Steps),
 			GateCount: len(plan.Gates),
+			Steps:     steps,
+			Gates:     gates,
 		}),
 	}
 }
@@ -157,6 +214,7 @@ func GateOpenedEvent(
 	agentName string,
 	review *guests.ReviewSpec,
 	planID string,
+	projectSlug string,
 	threadID string,
 ) channel.OutgoingMessage {
 	return channel.OutgoingMessage{
@@ -173,6 +231,7 @@ func GateOpenedEvent(
 			PlanID:         planID,
 			ReviewLink:     buildReviewLink(planID, gate.ID),
 			Review:         review,
+			Slug:           projectSlug,
 		}),
 	}
 }

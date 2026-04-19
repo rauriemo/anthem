@@ -278,6 +278,45 @@ func TestEventBroadcast(t *testing.T) {
 	}
 }
 
+// TestEventBroadcast_ThreadIDDoesNotDowngradeToRes is a regression test for a
+// routing bug where execution.* events emitted by PlanRunner with both
+// EventType and ThreadID set were being misrouted to sendReply (producing a
+// `res` chat frame with the serialized payload as text) instead of
+// broadcastEvent (producing a typed `event` frame). Symptom in Prism: every
+// gate_notification rendered as a guest chat bubble containing raw JSON, and
+// the ReviewDrawer never opened.
+func TestEventBroadcast_ThreadIDDoesNotDowngradeToRes(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	err := a.Send(context.Background(), channel.OutgoingMessage{
+		Text:      `{"gate_id":"g1","text":"Miyazaki finished step s1"}`,
+		EventType: "execution.gate_notification",
+		ThreadID:  "plan-thread-42",
+		GuestID:   "miyazaki",
+	})
+	if err != nil {
+		t.Fatalf("send event: %v", err)
+	}
+
+	evFrame := readFrame(t, conn)
+	if evFrame.Type != "event" {
+		t.Fatalf("expected type=event for EventType+ThreadID send, got %s (would render as chat bubble in Prism)", evFrame.Type)
+	}
+	if evFrame.Event != "execution.gate_notification" {
+		t.Fatalf("expected event=execution.gate_notification, got %s", evFrame.Event)
+	}
+	if evFrame.Thread != "plan-thread-42" {
+		t.Fatalf("expected thread preserved on event frame, got %q", evFrame.Thread)
+	}
+}
+
 func TestStreamFrames(t *testing.T) {
 	a, url := startTestAdapter(t)
 	conn := dial(t, url)
@@ -639,6 +678,50 @@ func TestActivateGuestFrame(t *testing.T) {
 	}
 	if resFrame.ActivateGuest.Reason != "User asked to invite Tolkien" {
 		t.Errorf("activate_guest.reason = %q", resFrame.ActivateGuest.Reason)
+	}
+}
+
+// TestDeactivateGuestFrame covers the L5a wire-format contract: when the
+// orchestrator (Plan->Execute handoff) or PlanRunner (step complete/abort)
+// sends a DeactivateGuest OutgoingMessage, the Prism adapter must emit a
+// "deactivate_guest" frame carrying both the flat guest_id (used by the
+// frontend to locate the chip in the roster) and the typed payload with
+// a human-readable reason (used for tooltips / transcript traces).
+func TestDeactivateGuestFrame(t *testing.T) {
+	a, url := startTestAdapter(t)
+	conn := dial(t, url)
+	f := authenticate(t, conn, testToken)
+	if f.Type != "auth_ok" {
+		t.Fatalf("auth failed")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	err := a.Send(context.Background(), channel.OutgoingMessage{
+		DeactivateGuest: &channel.DeactivateGuest{
+			ID:     "tolkien",
+			Reason: "step s1 complete",
+		},
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	resFrame := readFrame(t, conn)
+	if resFrame.Type != "deactivate_guest" {
+		t.Errorf("type = %q, want %q", resFrame.Type, "deactivate_guest")
+	}
+	if resFrame.GuestID != "tolkien" {
+		t.Errorf("guest_id = %q, want %q", resFrame.GuestID, "tolkien")
+	}
+	if resFrame.DeactivateGuest == nil {
+		t.Fatal("expected deactivate_guest payload, got nil")
+	}
+	if resFrame.DeactivateGuest.ID != "tolkien" {
+		t.Errorf("deactivate_guest.id = %q, want %q", resFrame.DeactivateGuest.ID, "tolkien")
+	}
+	if resFrame.DeactivateGuest.Reason != "step s1 complete" {
+		t.Errorf("deactivate_guest.reason = %q", resFrame.DeactivateGuest.Reason)
 	}
 }
 

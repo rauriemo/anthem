@@ -131,7 +131,7 @@ func TestHandlePlanNew_ArchivesAndDrafts(t *testing.T) {
 	})
 	firstID := planDisplayID(t, ch, "first")
 
-	metas, _ := orch.planStore.List("owner/repo")
+	metas, _ := orch.planStore.List(orch.projectSlug())
 	if len(metas) != 1 {
 		t.Fatalf("expected 1 plan, got %d", len(metas))
 	}
@@ -163,7 +163,7 @@ func TestHandlePlanNew_ArchivesAndDrafts(t *testing.T) {
 		t.Errorf("first plan status = %q, want archived", p.Frontmatter.Status)
 	}
 
-	metas, _ = orch.planStore.List("owner/repo")
+	metas, _ = orch.planStore.List(orch.projectSlug())
 	if len(metas) != 2 {
 		t.Fatalf("expected 2 plans total, got %d", len(metas))
 	}
@@ -191,7 +191,7 @@ func TestHandlePlanNew_IgnoresBodyLiteral(t *testing.T) {
 		Timestamp:   time.Now(),
 	})
 
-	metas, _ := orch.planStore.List("owner/repo")
+	metas, _ := orch.planStore.List(orch.projectSlug())
 	if len(metas) != 1 {
 		t.Fatalf("expected 1 plan, got %d", len(metas))
 	}

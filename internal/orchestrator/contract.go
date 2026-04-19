@@ -261,3 +261,35 @@ func IsIdempotent(actionType ActionType) bool {
 func SchemaOnly(_ ActionType) bool {
 	return false
 }
+
+// IsLoopOnlyAction reports whether an action is only valid in Loop mode.
+//
+// Loop-only actions touch the issue tracker (create issues, update
+// status, add comments, add labels, dispatch queued tasks) or
+// manipulate wave coordination state. These are all concepts that
+// only exist in the issue-driven Loop mode -- the Chat / Plan /
+// Execute paths are light "claude code CLI + context injection"
+// prompts and must never create or mutate remote work items on the
+// user's behalf.
+//
+// The orchestrator gates the executeActions dispatch on this helper:
+// when CurrentMode != ModeLoop, loop-only actions are logged,
+// audited as blocked, and dropped without calling the tracker. See
+// Orchestrator.executeActions for the enforcement point.
+//
+// Keep the set conservative: adding a new action here silently
+// disables it in Chat/Plan/Execute, so only include actions whose
+// intent is meaningless outside of Loop.
+func IsLoopOnlyAction(actionType ActionType) bool {
+	switch actionType {
+	case ActionDispatch,
+		ActionSkip,
+		ActionComment,
+		ActionRequestApproval,
+		ActionCreateSubtasks,
+		ActionCloseWave:
+		return true
+	default:
+		return false
+	}
+}

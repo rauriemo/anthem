@@ -217,7 +217,7 @@ func (o *Orchestrator) handleExecuteMarkdown(ctx context.Context, msg channel.In
 		return
 	}
 
-	o.broadcastExecPlanArtifact(ctx, msg, planID, newGen, compiled, body, source)
+	o.broadcastExecPlanArtifact(ctx, msg, planID, newGen, compiled, body, source, requiredProfiles)
 	o.recordAudit(ctx, "channel.execute_plan_compiled", "", strPtr("execute"))
 }
 
@@ -301,10 +301,17 @@ func (o *Orchestrator) broadcastExecPlanArtifact(
 	plan *execute.ExecutionPlan,
 	body []byte,
 	source string,
+	requiredProfiles []string,
 ) {
 	if o.channelMgr == nil {
 		return
 	}
+	// requiredProfiles is a defensive copy: the Prism preview renders
+	// these as "Guests involved" so the user knows exactly which agents
+	// will activate if they click Approve. We deliberately sort and
+	// deduplicate upstream in requiredProfilesFromPlan so the UI can show
+	// them in a stable order.
+	profiles := append([]string(nil), requiredProfiles...)
 	component := map[string]any{
 		"kind":              "execplan",
 		"planId":            planID,
@@ -315,6 +322,7 @@ func (o *Orchestrator) broadcastExecPlanArtifact(
 		"description":       plan.Metadata.Description,
 		"body":              string(body),
 		"sourceMode":        source,
+		"requiredProfiles":  profiles,
 	}
 	displayID := "execplan:" + planID
 	_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
@@ -423,8 +431,52 @@ func (o *Orchestrator) handleExecutePlanApproval(ctx context.Context, msg channe
 		return
 	}
 
+	// Plan->Execute roster handoff. Any guests who were active during Plan
+	// mode (contributing plan-edit blocks, answering questions) are cleared
+	// here BEFORE PlanRunner starts. PlanRunner is then the sole activator
+	// of guests for the duration of execution: it activates each step's
+	// AgentID on step start and deactivates on gate approve/abort. This
+	// closes the "who's working vs who's watching" ambiguity — after
+	// Approve, the Prism roster is empty and the only chip that appears
+	// belongs to the step currently running.
+	//
+	// Any code that spawns PlanRunner MUST broadcast the deactivation
+	// frames first. Breaking this ordering re-introduces mixed-roster UI
+	// state (plan-time participants sitting next to PlanRunner step-owners)
+	// which is exactly the ambiguity we locked this invariant in to
+	// prevent.
+	o.clearPlanTimeRosterForExecute(ctx, msg)
+
 	o.handleExecuteMessage(ctx, msg, &compiled)
 	o.recordAudit(ctx, "channel.execute_plan_dispatched", "", strPtr("execute"))
+}
+
+// clearPlanTimeRosterForExecute broadcasts a DeactivateGuest frame for every
+// guest in msg.ActiveGuests so the Prism roster is empty at the moment
+// PlanRunner begins. This is the Plan->Execute handoff invariant: after
+// Approve on the execplan artifact, only PlanRunner may activate guests.
+//
+// Ordering guarantee: every DeactivateGuest broadcast completes before
+// this function returns, which means the subsequent PlanRunner.Run
+// ActivateGuest frames will appear strictly after all deactivations on the
+// wire. Prism relies on this ordering to avoid a "Kaplan re-joins after
+// Miyazaki" flash in the roster sidebar.
+func (o *Orchestrator) clearPlanTimeRosterForExecute(ctx context.Context, msg channel.IncomingMessage) {
+	if o.channelMgr == nil || len(msg.ActiveGuests) == 0 {
+		return
+	}
+	const reason = "plan approved, entering execute"
+	for _, guestID := range msg.ActiveGuests {
+		if guestID == "" {
+			continue
+		}
+		_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+			DeactivateGuest: &channel.DeactivateGuest{
+				ID:     guestID,
+				Reason: reason,
+			},
+		})
+	}
 }
 
 // findPlanByID scans the store for a plan with the given stable ID. The

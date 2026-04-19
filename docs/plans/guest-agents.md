@@ -6,9 +6,9 @@ Guest agents are lightweight persona definitions (markdown files with YAML front
 
 **Mode integration (current):**
 
-- **Chat mode** — `@mention` or `active_guests` selects which guests participate in the current round. Routing call decides directed text; guests run concurrently (semaphore 3).
-- **Plan mode** — orchestrator may author structured `ExecutionPlan`s that reference specific `agent_id`s from the guest roster; no dispatch yet.
-- **Execute mode** — `PlanRunner` looks up `PlanStep.AgentID` in the same guest registry and runs it through the standard guest prompt + harness pipeline. Step artifacts feed the next step via the `ArtifactProvider`.
+- **Chat mode** — `@mention` or `active_guests` selects which guests participate in the current round. Routing call decides directed text; guests run concurrently (semaphore 3). Structured invite intent (`/invite Tolkien`, `add Tolkien and Walt`) may auto-activate guests via `detectInviteIntent`; the detection biases toward false negatives and is skipped in Plan/Execute and on execplan gate clicks.
+- **Plan mode** — orchestrator may author structured `ExecutionPlan`s that reference specific `agent_id`s from the guest roster. Active guests can also **reply and emit `plan-edit` blocks** for the current plan, but they run with **all tools stripped** (`RunOpts.ToolsDisabled = true`, `AllowedTools = []`, harness emits `--disallowedTools '*'`). No MCP, no HTTP tools, no Bash/Edit/Write. The guest's prompt carries an explicit "Plan Mode Tool Policy" section so the model is told this policy up front. Invite-intent auto-activation is disabled in this mode — a typed name is a reference, not a summons.
+- **Execute mode** — `PlanRunner` is the sole authority for guest activation. It broadcasts `ActivateGuest`/`DeactivateGuest` per step so the Prism roster reflects "this step's owner is working" ephemerally. Guests run with their declared `allowed_tools` and full MCP access. Orchestrator-driven guest dispatch is gated off for the duration of Execute mode, and on the Plan→Execute handoff (`handleExecutePlanApproval`) the orchestrator broadcasts `DeactivateGuest` for every plan-time active guest before `PlanRunner` spawns so the roster starts empty.
 - **Loop mode** — optional; guest roster is available to the `GitHubLoopBackend` just like in the pre-refactor orchestrator.
 
 This spec covers all Anthem-side changes across all phases. Prism and Forge have their own specs.

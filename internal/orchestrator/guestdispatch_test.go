@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/rauriemo/anthem/internal/agent"
@@ -1057,5 +1058,104 @@ func TestBuildGuestPrompt_UserContextOrdering(t *testing.T) {
 	}
 	if userCtxIdx >= projectIdx {
 		t.Error("User Context should appear before Project Context")
+	}
+}
+
+// TestBuildGuestPrompt_PlanModeToolPolicy asserts L2's prompt directive:
+// a Plan-mode guest invocation must include the explicit "Plan Mode Tool
+// Policy" section that tells the agent not to call tools. This is the
+// prompt-layer half of the tool strip; RunOpts.ToolsDisabled is the
+// harness-layer half and is asserted separately below.
+func TestBuildGuestPrompt_PlanModeToolPolicy(t *testing.T) {
+	prompt := buildGuestPrompt("You are a designer.", "", "", "", "Draft the level", GuestPromptOpts{
+		Mode:        types.ModePlan,
+		PlanContent: "# My Plan\n\nTBD",
+	})
+	if !strings.Contains(prompt, "## Plan Mode Tool Policy") {
+		t.Error("prompt should include Plan Mode Tool Policy section in Plan mode")
+	}
+	if !strings.Contains(prompt, "You MUST NOT call any tools this turn") {
+		t.Error("prompt should explicitly forbid tool calls in Plan mode")
+	}
+	if !strings.Contains(prompt, "plan-edit") {
+		t.Error("prompt should tell the agent to use plan-edit blocks for edits")
+	}
+
+	// Chat mode must NOT carry this directive.
+	chatPrompt := buildGuestPrompt("You are a designer.", "", "", "", "Draft", GuestPromptOpts{
+		Mode: types.ModeChat,
+	})
+	if strings.Contains(chatPrompt, "## Plan Mode Tool Policy") {
+		t.Error("Chat-mode prompt should NOT include Plan Mode Tool Policy section")
+	}
+}
+
+// TestDispatchSelectedGuests_PlanModeStripsTools asserts L2's harness
+// directive: every run in Plan mode must receive RunOpts.ToolsDisabled=true
+// and an empty AllowedTools slice, regardless of what the guest's
+// frontmatter declares. This is the belt-and-suspenders guarantee that
+// prevents a future refactor from accidentally re-enabling tools for
+// plan-time contributions.
+func TestDispatchSelectedGuests_PlanModeStripsTools(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	agentsDir := dir + "/agents"
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Frontmatter deliberately declares an allowed_tools list to prove
+	// that Plan mode overrides it.
+	body := "---\nname: Artist\ndescription: draws things\nrole: artist\nallowed_tools:\n  - Edit\n  - Write\n---\nYou are an artist."
+	if err := os.WriteFile(agentsDir+"/artist.md", []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var observed types.RunOpts
+	var observedOnce sync.Once
+	runner := agent.NewMockRunner()
+	runner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		observedOnce.Do(func() { observed = opts })
+		return &types.RunResult{Output: "ok"}, nil
+	}
+
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	idx := &guests.GuestIndex{
+		Agents: map[string]guests.GuestAgent{
+			"artist": {
+				ID:           "artist",
+				Name:         "Artist",
+				Description:  "draws things",
+				AllowedTools: []string{"Edit", "Write"},
+			},
+		},
+	}
+
+	dispatchSelectedGuests(guestDispatchParams{
+		ctx:         context.Background(),
+		selectedIDs: []string{"artist"},
+		msg: channel.IncomingMessage{
+			ChannelKind: "test",
+			ThreadID:    "t-plan",
+			Text:        "[system:plan] contribute to the plan",
+		},
+		guestsDir:  agentsDir,
+		runner:     runner,
+		sharedCtx:  NewSharedContext(),
+		convoBuf:   NewConvoBuffer(),
+		channelMgr: mgr,
+		logger:     testSuggestLogger(),
+		guestIndex: idx,
+		mode:       types.ModePlan,
+	})
+
+	if !observed.ToolsDisabled {
+		t.Error("Plan-mode RunOpts.ToolsDisabled = false, want true")
+	}
+	if len(observed.AllowedTools) != 0 {
+		t.Errorf("Plan-mode AllowedTools = %v, want empty slice", observed.AllowedTools)
 	}
 }

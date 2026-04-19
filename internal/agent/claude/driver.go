@@ -48,13 +48,25 @@ func (d *Driver) Run(ctx context.Context, opts types.RunOpts) (*types.RunResult,
 	default:
 		args = append(args, "--permission-mode", "dontAsk")
 	}
-	for _, tool := range opts.DeniedTools {
-		args = append(args, "--disallowedTools", tool)
+	// ToolsDisabled dominates every other tool configuration path. If
+	// true, emit "--disallowedTools '*'" and skip any AllowedTools /
+	// DeniedTools / per-profile defaults; this flag exists so Plan-mode
+	// guest dispatch cannot accidentally leak tool access even if a
+	// future refactor forgets to zero AllowedTools. Keep this branch
+	// first — do NOT hoist AllowedTools above it, and do NOT AND it with
+	// other flags. See types.RunOpts.ToolsDisabled for the full
+	// invariant.
+	if opts.ToolsDisabled {
+		args = append(args, "--disallowedTools", "*")
+	} else {
+		for _, tool := range opts.DeniedTools {
+			args = append(args, "--disallowedTools", tool)
+		}
 	}
 	if opts.MaxTurns > 0 {
 		args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
 	}
-	if len(opts.AllowedTools) > 0 {
+	if !opts.ToolsDisabled && len(opts.AllowedTools) > 0 {
 		for _, tool := range opts.AllowedTools {
 			args = append(args, "--allowedTools", tool)
 		}

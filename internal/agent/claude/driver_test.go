@@ -246,6 +246,37 @@ func TestRunDeniedTools(t *testing.T) {
 	}
 }
 
+// TestRunToolsDisabled_DominatesAllowedTools asserts the L2 invariant:
+// ToolsDisabled dominates every other tool configuration path. The driver
+// must emit --disallowedTools '*' and must NOT emit any --allowedTools
+// even when AllowedTools is populated. Any future tool-resolution layer
+// that lands in this driver has to honor this short-circuit or the whole
+// Plan-mode tool strip collapses. Also asserts that DeniedTools is
+// superseded (no redundant per-tool disallow entries when * already
+// disallows everything).
+func TestRunToolsDisabled_DominatesAllowedTools(t *testing.T) {
+	args := captureArgs(t, func(d *Driver) {
+		_, _ = d.Run(context.Background(), types.RunOpts{
+			Prompt:        "test",
+			ToolsDisabled: true,
+			AllowedTools:  []string{"Edit", "Write", "mcp__image_gen__*"},
+			DeniedTools:   []string{"Bash"},
+		})
+	})
+
+	if !containsArgPair(args, "--disallowedTools", "*") {
+		t.Error("ToolsDisabled must emit --disallowedTools *")
+	}
+	if containsArg(args, "--allowedTools") {
+		t.Error("ToolsDisabled must suppress --allowedTools, got args: " + strings.Join(args, " "))
+	}
+	// Per-tool DeniedTools are redundant when * is already disallowed, and
+	// emitting them would obscure the invariant. Assert we don't pile them on.
+	if containsArgPair(args, "--disallowedTools", "Bash") {
+		t.Error("ToolsDisabled should suppress per-tool DeniedTools; got --disallowedTools Bash")
+	}
+}
+
 func TestContinuePassesOpts(t *testing.T) {
 	var capturedDir string
 	var capturedArgs []string

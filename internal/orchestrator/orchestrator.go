@@ -701,6 +701,25 @@ func (o *Orchestrator) executeActions(ctx context.Context, tasks []types.Task, a
 			continue
 		}
 
+		// Loop-only actions (create_subtasks, dispatch, skip, comment,
+		// request_approval, close_wave) mutate remote tracker state or
+		// wave coordination. These are Loop-mode concepts; the
+		// Chat/Plan/Execute paths are light context-injected prompts
+		// and must not create or modify GitHub issues / PRs on the
+		// user's behalf. Drop silently with an audit entry so a
+		// guest-authored plan that emits create_subtasks during
+		// Execute does not leak issues into the tracker. Loop mode
+		// continues to execute these actions normally.
+		if IsLoopOnlyAction(action.Type) && o.CurrentMode != types.ModeLoop {
+			o.logger.Warn("loop-only action proposed outside loop mode, skipping",
+				"action", action.Type,
+				"mode", string(o.CurrentMode),
+				"task_id", action.TaskID,
+			)
+			o.recordAudit(ctx, "action.blocked_by_mode", action.TaskID, strPtr(string(action.Type)))
+			continue
+		}
+
 		switch action.Type {
 		case ActionDispatch:
 			task, ok := taskMap[action.TaskID]
@@ -1782,17 +1801,32 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	}
 
 	// --- Server-driven guest activation on invite intent ---
-	if results := detectInviteIntent(msg.Text, msg.ActiveGuests, o.guestIndex); len(results) > 0 {
-		for _, result := range results {
-			if o.channelMgr != nil {
-				_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
-					ActivateGuest: &channel.ActivateGuest{
-						ID:     result.GuestID,
-						Reason: result.Reason,
-					},
-				})
+	// Structured intent only in Chat mode. Plan and Execute messages never
+	// cause auto-activation: Plan-mode rooms need deterministic rosters so
+	// the orchestrator can draft without surprise participants, and
+	// Execute-mode messages are either control signals (execplan gate
+	// clicks) or PlanRunner-mediated, neither of which should spawn new
+	// guests mid-plan. isExecPlanGateAction also guards against a Chat-mode
+	// gate click somehow slipping through.
+	inviteTags, _ := parseControlTags(msg.Text)
+	inviteMode := o.detectMode(msg.Text)
+	inviteAllowed := inviteMode != types.ModePlan &&
+		inviteMode != types.ModeExecute &&
+		!inviteTags["system:execute"] &&
+		!isExecPlanGateAction(msg.Text)
+	if inviteAllowed {
+		if results := detectInviteIntent(msg.Text, msg.ActiveGuests, o.guestIndex); len(results) > 0 {
+			for _, result := range results {
+				if o.channelMgr != nil {
+					_ = o.channelMgr.Broadcast(ctx, channel.OutgoingMessage{
+						ActivateGuest: &channel.ActivateGuest{
+							ID:     result.GuestID,
+							Reason: result.Reason,
+						},
+					})
+				}
+				msg.ActiveGuests = append(msg.ActiveGuests, result.GuestID)
 			}
-			msg.ActiveGuests = append(msg.ActiveGuests, result.GuestID)
 		}
 	}
 
@@ -1826,10 +1860,22 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 	// Exception: Plan mode first-draft. When the user is kicking off a new plan
 	// and no draft exists yet, guests stay silent so the orchestrator can draft
 	// cleanly. Once a draft exists, guests may contribute via plan-edit blocks.
+	//
+	// Execute-mode gate: during Execute, PlanRunner is the sole dispatcher
+	// (each step ephemerally activates its AgentID). We must NOT fan out to
+	// the room in parallel — that would re-introduce the same-turn
+	// "orchestrator + guest" storm we saw before and defeats the
+	// "PlanRunner owns the roster" invariant. Likewise, execplan gate
+	// clicks (Approve/Revise/Abort on the compiled-plan artifact) are
+	// control signals, not conversational prompts, and should never trigger
+	// guest dispatch.
+	preMsgMode := o.detectMode(msg.Text)
+	isExecGateClick := isExecPlanGateAction(msg.Text)
+	dispatchBlockedByMode := preMsgMode == types.ModeExecute || isExecGateClick
 	var guestWg *sync.WaitGroup
 	var includeOrchestrator bool
 	planFirstDraft := false
-	if len(msg.ActiveGuests) > 0 && o.guestIndex != nil {
+	if len(msg.ActiveGuests) > 0 && o.guestIndex != nil && !dispatchBlockedByMode {
 		channelKey := msg.ChannelKind
 		o.convoBuf.RecordUserMessage(channelKey, msg.Text)
 		history := FormatHistory(o.convoBuf.History(channelKey))
@@ -2754,6 +2800,7 @@ func (o *Orchestrator) handleExecuteMessage(ctx context.Context, msg channel.Inc
 		ChannelMgr:       o.channelMgr,
 		Artifacts:        artifactProvider,
 		ProjectRoot:      o.projectRoot(),
+		ProjectSlug:      o.projectSlug(),
 		AgentsDir:        o.guestsDir(),
 		GlobalMCPServers: o.cfg.Agent.MCPServers,
 		GuestMCPMaxTurns: o.cfg.Orchestrator.GuestMCPMaxTurns,
@@ -3431,11 +3478,30 @@ func (o *Orchestrator) initPlanStore() {
 	o.planStore = store
 }
 
+// projectSlug returns the canonical URL-safe project identifier used as
+// both an internal key (plan store, conversation buffer) and as the
+// `{slug}` segment in Prism's /files/{slug}/{path} artifact-serving URL.
+//
+// The slug MUST be a single path segment (no '/'): HTTP normalizes
+// %2F-encoded slashes back to literal '/' before routing, so a slug
+// like "rauriemo/RebelTower" gets split by FastAPI into
+// slug="rauriemo" + path="RebelTower/..." and fails the ProjectResolver
+// lookup.
+//
+// Prism's ProjectResolver already canonicalizes agents.yaml repo
+// entries by taking the last path segment (`repo.split("/")[-1]`), so
+// we strip the owner here and send just the repo name. That keeps the
+// slug stable across anthem and Prism without requiring a second
+// url-safe variant threaded through the event wire.
 func (o *Orchestrator) projectSlug() string {
-	if o.cfg.Tracker.Repo != "" {
-		return o.cfg.Tracker.Repo
+	repo := o.cfg.Tracker.Repo
+	if repo == "" {
+		return "default"
 	}
-	return "default"
+	if idx := strings.LastIndex(repo, "/"); idx >= 0 && idx < len(repo)-1 {
+		return repo[idx+1:]
+	}
+	return repo
 }
 
 // extractPlanBlock pulls the markdown content from an ```anthem-plan fenced block.

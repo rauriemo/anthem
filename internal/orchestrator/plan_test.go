@@ -137,7 +137,7 @@ func TestHandlePlanMessage_SavesPlanFile(t *testing.T) {
 		Timestamp:   time.Now(),
 	})
 
-	metas, err := orch.planStore.List("owner/repo")
+	metas, err := orch.planStore.List(orch.projectSlug())
 	if err != nil {
 		t.Fatal(err)
 	}

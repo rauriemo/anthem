@@ -132,6 +132,20 @@ type RunOpts struct {
 	DeniedTools    []string
 	AdditionalDirs []string
 	OnStream       func(delta string)
+
+	// ToolsDisabled dominates every other tool configuration path. If
+	// true, the harness MUST emit "--disallowedTools '*'" regardless of
+	// AllowedTools, per-profile defaults, guest-frontmatter overrides, or
+	// any future tool-resolution layer. Any new tool-resolution code
+	// added to this repo must honor this flag first and short-circuit if
+	// set.
+	//
+	// This is the belt-and-suspenders half of the Plan-mode guest tool
+	// strip: the caller in guestdispatch.go also zeroes AllowedTools, but
+	// ToolsDisabled exists so a future caller that forgets the AllowedTools
+	// zeroing still gets the correct "no tools" behavior. Do not weaken
+	// or remove this field; it exists specifically to survive refactors.
+	ToolsDisabled bool
 }
 
 type ContinueOpts struct {

@@ -246,6 +246,14 @@ func buildGuestPrompt(persona, projectSummary, sharedCtx, history, userMsg strin
 		sb.WriteString("- To COMMENT without editing, just respond normally.\n\n")
 	}
 
+	if opts.Mode == types.ModePlan {
+		sb.WriteString("## Plan Mode Tool Policy\n\n")
+		sb.WriteString("You MUST NOT call any tools this turn. Respond in text only. ")
+		sb.WriteString("To modify the plan, emit a ```plan-edit fenced block. ")
+		sb.WriteString("No MCP calls, no HTTP tools, no Bash, no Edit/Write. ")
+		sb.WriteString("Tool access is stripped at the harness level — attempted tool calls will fail.\n\n")
+	}
+
 	if opts.StoryContext != nil {
 		sb.WriteString("## Story Bible\n\n")
 		sb.WriteString("### Project Context\n")
@@ -447,7 +455,22 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 		isFirstTurn := !p.convoBuf.HasGuestSpoken(channelKey, guestID)
 		var history string
 		if isFirstTurn {
-			history = FormatHistoryN(rounds, expandedDisplayRounds, expandedTruncLen)
+			// Onboarding sanitization: a newly-joined guest should not
+			// receive the raw user history verbatim. The earlier behavior
+			// piped an expanded transcript including planning chatter,
+			// which was a leak vector — a guest asked to "draft sprites"
+			// on the first turn could read the user's whole task list and
+			// silently start executing it with tools.
+			//
+			// Known tradeoff: stripping raw history reduces first-turn
+			// usefulness since the guest has near-zero context. This is
+			// the safer default; a future enhancement (see the plan's
+			// "Out of scope" section) swaps this preamble for a small
+			// orchestrator-curated summary that gives context without
+			// re-exposing tool-bearing instructions.
+			history = "## Onboarding\n\n" +
+				"You were just added to this conversation. Introduce yourself briefly (one sentence, in character) and wait for direction from the user before taking any action. " +
+				"Do not execute tools on this turn. Do not assume any task from prior conversation — ask if you are unsure what the user needs from you.\n"
 		} else {
 			history = FormatHistory(rounds)
 		}
@@ -470,6 +493,19 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 		var allowedTools []string
 		if p.guestIndex != nil {
 			allowedTools = resolveGuestTools(p.guestIndex.Agents[guestID])
+		}
+
+		// Plan mode: guests can reply and emit plan-edit blocks, but
+		// must not invoke ANY tools (no MCP, no HTTP, no Bash/Edit).
+		// We strip allowedTools to an explicit empty slice (not nil —
+		// nil means "apply caller defaults" in some paths) AND set
+		// RunOpts.ToolsDisabled as a belt-and-suspenders guarantee
+		// the harness forwards `--disallowedTools '*'` regardless of
+		// any other tool-resolution layer. See L2 of the mode-aware
+		// guest activation plan for rationale.
+		toolsDisabled := p.mode == types.ModePlan
+		if toolsDisabled {
+			allowedTools = []string{}
 		}
 
 		wg.Add(1)
@@ -498,6 +534,7 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 				MaxTurns:       guestMaxTurns,
 				PermissionMode: "bypassPermissions",
 				OnStream:       onStream,
+				ToolsDisabled:  toolsDisabled,
 			}
 			if len(allowedTools) > 0 {
 				runOpts.AllowedTools = allowedTools
@@ -908,10 +945,33 @@ type ActivateResult struct {
 	Reason  string
 }
 
-var inviteVerbs = regexp.MustCompile(`(?i)\b(?:invite|add|bring\s+in|pull\s+in)\b`)
+// inviteVerbRe matches just the verb phrase that signals an invite intent.
+// The accompanying name scan (inviteNameRe + chainSepRe) is run starting
+// at the position immediately after this match so that only tokens
+// adjacent to the verb are considered — phrases like "add some space
+// between Miyazaki and Walt" do not match because the token immediately
+// after "add" ("some") does not resolve to a known guest.
+//
+// Design principle — bias toward false negatives over false positives.
+// Natural-language invite detection is inherently fuzzy. A missed
+// auto-invite is cheap: the user types `/invite <name>` or `@<name>` and
+// it resolves in one step. A false-positive auto-activation is expensive:
+// a surprise participant joins the room, burns tokens, and (before the
+// Plan-mode tool strip) could fire tools on misread intent.
+// detectInviteIntent is a convenience, not an authority — when in doubt,
+// return nothing and let the user state intent explicitly. Any future
+// widening of these patterns must preserve this bias.
+var (
+	inviteVerbRe = regexp.MustCompile(`(?i)\b(?:invite|add|bring\s+in|pull\s+in)\s+(?:the\s+|our\s+)?`)
+	inviteNameRe = regexp.MustCompile(`^@?([A-Za-z][\w-]*)`)
+	// chainSepRe consumes a separator between chained names: "," "and"
+	// "&" or their combinations with surrounding whitespace. After a
+	// separator we re-scan inviteNameRe; a non-guest token ends the chain.
+	chainSepRe = regexp.MustCompile(`^(?:\s*,\s*(?:and\s+)?|\s+and\s+|\s*&\s*)`)
+)
 
 func detectInviteIntent(text string, activeGuests []string, guestIndex *guests.GuestIndex) []ActivateResult {
-	if guestIndex == nil || !inviteVerbs.MatchString(text) {
+	if guestIndex == nil {
 		return nil
 	}
 
@@ -920,21 +980,66 @@ func detectInviteIntent(text string, activeGuests []string, guestIndex *guests.G
 		activeSet[id] = struct{}{}
 	}
 
-	lower := strings.ToLower(text)
-	var results []ActivateResult
+	// Build a lower-case lookup from both guest IDs and names so the
+	// captured token can resolve by either. Names win over IDs on
+	// collision (guest authors usually refer to "Tolkien", not to the
+	// slug "narrative-writer").
+	lookup := make(map[string]string, len(guestIndex.Agents)*2)
 	for id, ag := range guestIndex.Agents {
-		if _, active := activeSet[id]; active {
-			continue
-		}
-		nameMatch := strings.Contains(lower, strings.ToLower(ag.Name))
-		idMatch := strings.Contains(lower, strings.ToLower(id))
-		if nameMatch || idMatch {
-			results = append(results, ActivateResult{
-				GuestID: id,
-				Reason:  fmt.Sprintf("User asked to invite %s", ag.Name),
-			})
+		lookup[strings.ToLower(id)] = id
+		if ag.Name != "" {
+			lookup[strings.ToLower(ag.Name)] = id
 		}
 	}
+
+	verbMatches := inviteVerbRe.FindAllStringIndex(text, -1)
+	if len(verbMatches) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	var results []ActivateResult
+
+	for _, vm := range verbMatches {
+		pos := vm[1]
+		for pos < len(text) {
+			nameLoc := inviteNameRe.FindStringSubmatchIndex(text[pos:])
+			if nameLoc == nil {
+				break
+			}
+			token := strings.ToLower(text[pos+nameLoc[2] : pos+nameLoc[3]])
+			id, ok := lookup[token]
+			if !ok {
+				// The first non-resolving token ends the chain. This
+				// is the "bias toward false negatives" guardrail: a
+				// verb followed by an unknown token is not treated as
+				// an invite at all.
+				break
+			}
+			if _, active := activeSet[id]; !active {
+				if _, dup := seen[id]; !dup {
+					seen[id] = struct{}{}
+					ag := guestIndex.Agents[id]
+					name := ag.Name
+					if name == "" {
+						name = id
+					}
+					results = append(results, ActivateResult{
+						GuestID: id,
+						Reason:  fmt.Sprintf("User asked to invite %s", name),
+					})
+				}
+			}
+			pos += nameLoc[1]
+
+			sep := chainSepRe.FindStringIndex(text[pos:])
+			if sep == nil {
+				break
+			}
+			pos += sep[1]
+		}
+	}
+
 	if len(results) == 0 {
 		return nil
 	}

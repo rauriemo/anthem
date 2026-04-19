@@ -301,6 +301,49 @@ func TestIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestIsLoopOnlyAction pins the action -> mode-gate mapping used by
+// executeActions to silently drop tracker / wave mutations outside
+// Loop mode. Adding a new tracker-touching action without adding it
+// here would re-introduce the same leak that caused issues
+// #10-#18 to get created during an Execute-mode approval gate.
+func TestIsLoopOnlyAction(t *testing.T) {
+	tests := []struct {
+		action ActionType
+		want   bool
+	}{
+		// Mutate issue tracker / wave state -- Loop-only.
+		{ActionDispatch, true},
+		{ActionSkip, true},
+		{ActionComment, true},
+		{ActionRequestApproval, true},
+		{ActionCreateSubtasks, true},
+		{ActionCloseWave, true},
+
+		// Local file edits and channel I/O -- allowed in every mode
+		// because Chat/Plan/Execute agents legitimately need to
+		// reply, show UI components, edit .context/ files, update
+		// voice identity, and tweak agent personas.
+		{ActionReply, false},
+		{ActionDisplay, false},
+		{ActionUpdateVoice, false},
+		{ActionUpdateAgentMeta, false},
+		{ActionPromoteKnowledge, false},
+		{ActionRequestMaintenance, false},
+
+		// Unknown types fall through to false so a typo doesn't
+		// accidentally disable them in non-Loop modes.
+		{"unknown", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.action), func(t *testing.T) {
+			if got := IsLoopOnlyAction(tt.action); got != tt.want {
+				t.Fatalf("IsLoopOnlyAction(%q) = %v, want %v", tt.action, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSchemaOnly(t *testing.T) {
 	tests := []struct {
 		action ActionType

@@ -631,3 +631,87 @@ func TestHandleGuestMention_StreamsDeltas(t *testing.T) {
 		t.Errorf("expected no duplicate final Text (content was streamed), got %v", textMsgs)
 	}
 }
+
+// TestHandleUserMessage_ExecuteModeSkipsGuestDispatch asserts the L1
+// invariant: when the orchestrator sees a message tagged
+// [system:execute], it must NOT fan out to active guests. During Execute
+// mode the PlanRunner is the sole authority for which guest runs at any
+// moment, so orchestrator-driven guest dispatch would re-introduce the
+// "orchestrator + guest" storm we locked down.
+func TestHandleUserMessage_ExecuteModeSkipsGuestDispatch(t *testing.T) {
+	var guestCalls int64
+
+	orchRunner := agent.NewMockRunner()
+	orchRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		return &types.RunResult{
+			SessionID: "orch-s1",
+			Output:    `{"reasoning": "noted", "actions": []}`,
+			TokensIn:  5, TokensOut: 5,
+		}, nil
+	}
+
+	guestRunner := agent.NewMockRunner()
+	guestRunner.RunFunc = func(_ context.Context, _ types.RunOpts) (*types.RunResult, error) {
+		atomic.AddInt64(&guestCalls, 1)
+		return &types.RunResult{SessionID: "g1", Output: "x"}, nil
+	}
+
+	ch := newTestChannel()
+	mgr := channel.NewManager(nil)
+	mgr.Register(ch)
+
+	orchAgent := NewOrchestratorAgent(orchRunner, "", "", 100000, 0, 0, 0, 0, testLogger())
+	cfg := config.DefaultConfig()
+
+	orch := New(Opts{
+		Config:         &cfg,
+		TemplateBody:   "{{.issue.title}}",
+		Tracker:        tracker.NewMockTracker(nil),
+		Runner:         guestRunner,
+		Workspace:      workspace.NewMockWorkspaceManager(),
+		EventBus:       NewMockEventBus(),
+		Logger:         testLogger(),
+		OrchAgent:      orchAgent,
+		ChannelManager: mgr,
+	})
+
+	orch.guestIndex = &guests.GuestIndex{
+		Agents: map[string]guests.GuestAgent{
+			"writer-1": {ID: "writer-1", Name: "Story Writer", Description: "Writes stories"},
+		},
+	}
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind:  "test",
+		SenderID:     "user-1",
+		ThreadID:     "thread-execmode",
+		Text:         "[system:execute] begin",
+		ActiveGuests: []string{"writer-1"},
+		Timestamp:    time.Now(),
+	})
+
+	if got := atomic.LoadInt64(&guestCalls); got != 0 {
+		t.Errorf("expected guest runner to NOT be called in Execute mode, got %d calls", got)
+	}
+}
+
+// TestDetectInviteIntent_RejectsNonAdjacentName guards the L3 bias toward
+// false negatives: a verb-like token followed by a non-guest word must not
+// silently activate a guest, even if a known guest name appears later in
+// the sentence.
+func TestDetectInviteIntent_RejectsNonAdjacentName(t *testing.T) {
+	idx := &guests.GuestIndex{
+		Agents: map[string]guests.GuestAgent{
+			"miyazaki": {ID: "miyazaki", Name: "Miyazaki"},
+			"walt":     {ID: "walt", Name: "Walt"},
+		},
+	}
+	// "add some space between Miyazaki and Walt sprites" -- classic
+	// false-positive scenario. Verb "add" is followed by "some", not a
+	// guest name. The old regex would activate miyazaki + walt; the
+	// tightened regex returns nothing.
+	results := detectInviteIntent("add some space between Miyazaki and Walt sprites", nil, idx)
+	if len(results) != 0 {
+		t.Errorf("expected no matches for non-adjacent name, got %+v", results)
+	}
+}
