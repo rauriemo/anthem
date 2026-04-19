@@ -85,6 +85,126 @@ func TestParseExecPlanGate_IgnoresStepGate(t *testing.T) {
 	}
 }
 
+// TestParseExecPlanGate_SkipList pins the :skip= suffix that Prism emits
+// when the user has toggled approval gates OFF in the preview. Order is
+// preserved and duplicates / empty tokens are dropped so audit logs stay
+// readable. Fixtures mirror the events_test.go style (input string -> want
+// struct) so the wire format can't drift silently.
+func TestParseExecPlanGate_SkipList(t *testing.T) {
+	cases := []struct {
+		name    string
+		text    string
+		action  execute.GateAction
+		planID  string
+		gen     int
+		skipped []string
+	}{
+		{
+			name:    "approve with one skip",
+			text:    "[gate:approve:execplan:abc:2:skip=g1]",
+			action:  execute.GateApprove,
+			planID:  "abc",
+			gen:     2,
+			skipped: []string{"g1"},
+		},
+		{
+			name:    "approve with multiple skips",
+			text:    "[gate:approve:execplan:abc:2:skip=g1,g2,g5]",
+			action:  execute.GateApprove,
+			planID:  "abc",
+			gen:     2,
+			skipped: []string{"g1", "g2", "g5"},
+		},
+		{
+			name:    "approve with trailing comma and duplicates",
+			text:    "[gate:approve:execplan:abc:2:skip=g1,,g2,g1,]",
+			action:  execute.GateApprove,
+			planID:  "abc",
+			gen:     2,
+			skipped: []string{"g1", "g2"},
+		},
+		{
+			name:    "approve with empty skip list stays legal",
+			text:    "[gate:approve:execplan:abc:2:skip=]",
+			action:  execute.GateApprove,
+			planID:  "abc",
+			gen:     2,
+			skipped: nil,
+		},
+		{
+			name:    "no skip suffix preserves backward compat",
+			text:    "[gate:approve:execplan:abc:2]",
+			action:  execute.GateApprove,
+			planID:  "abc",
+			gen:     2,
+			skipped: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !isExecPlanGateAction(tc.text) {
+				t.Fatalf("isExecPlanGateAction false for %q", tc.text)
+			}
+			got, ok := parseExecPlanGate(tc.text)
+			if !ok {
+				t.Fatalf("parseExecPlanGate false for %q", tc.text)
+			}
+			if got.Action != tc.action || got.PlanID != tc.planID || got.CompileGeneration != tc.gen {
+				t.Errorf("head mismatch: got action=%q plan=%q gen=%d, want %q/%q/%d",
+					got.Action, got.PlanID, got.CompileGeneration, tc.action, tc.planID, tc.gen)
+			}
+			if len(got.SkippedGateIDs) != len(tc.skipped) {
+				t.Fatalf("skipped len = %d (%v), want %d (%v)",
+					len(got.SkippedGateIDs), got.SkippedGateIDs, len(tc.skipped), tc.skipped)
+			}
+			for i, id := range tc.skipped {
+				if got.SkippedGateIDs[i] != id {
+					t.Errorf("skipped[%d] = %q, want %q", i, got.SkippedGateIDs[i], id)
+				}
+			}
+		})
+	}
+}
+
+// TestFilterExecPlanGates covers the dispatch-time filter. Unknown IDs are
+// ignored (idempotent between preview and dispatch), and order of the
+// surviving gates is preserved so downstream (PlanRunner) observes the
+// same sequence it would have without any skips.
+func TestFilterExecPlanGates(t *testing.T) {
+	gates := []execute.ApprovalGate{
+		{ID: "g1", AfterStep: "s1", Prompt: "first"},
+		{ID: "g2", AfterStep: "s2", Prompt: "second"},
+		{ID: "g3", AfterStep: "s3", Prompt: "third"},
+	}
+	t.Run("empty skip list returns input unchanged", func(t *testing.T) {
+		got := filterExecPlanGates(gates, nil)
+		if len(got) != 3 {
+			t.Fatalf("len = %d, want 3", len(got))
+		}
+	})
+	t.Run("skips one gate and preserves order", func(t *testing.T) {
+		got := filterExecPlanGates(gates, []string{"g2"})
+		if len(got) != 2 || got[0].ID != "g1" || got[1].ID != "g3" {
+			t.Errorf("unexpected filter output: %+v", got)
+		}
+	})
+	t.Run("unknown IDs are silently ignored", func(t *testing.T) {
+		got := filterExecPlanGates(gates, []string{"ghost", "g1"})
+		if len(got) != 2 || got[0].ID != "g2" || got[1].ID != "g3" {
+			t.Errorf("unexpected filter output: %+v", got)
+		}
+	})
+	t.Run("skipping all yields empty slice (not nil)", func(t *testing.T) {
+		got := filterExecPlanGates(gates, []string{"g1", "g2", "g3"})
+		if got == nil {
+			t.Fatal("returned nil, want empty non-nil slice for deterministic JSON")
+		}
+		if len(got) != 0 {
+			t.Errorf("len = %d, want 0", len(got))
+		}
+	})
+}
+
 // --- requiredProfilesFromPlan ---
 
 func TestRequiredProfilesFromPlan_UniqueSorted(t *testing.T) {

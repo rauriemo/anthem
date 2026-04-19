@@ -20,11 +20,16 @@ import (
 // --- Compile: markdown plan -> ExecutionPlan sidecar ---
 
 // execPlanGateRe matches the extended gate tag Prism emits for execution-plan
-// approval: [gate:<action>:execplan:<planID>:<compileGeneration>]. Step-level
-// gates inside PlanRunner still use the bare [gate:<action>] form handled by
-// gateTagRe in orchestrator.go; the "execplan:" subtag is what tells us this
-// action targets the compiled plan artifact, not an in-flight step gate.
-var execPlanGateRe = regexp.MustCompile(`\[gate:(approve|revise|abort):execplan:([^\]:]+):(\d+)\]`)
+// approval: [gate:<action>:execplan:<planID>:<compileGeneration>] with an
+// optional trailing :skip=<id1>,<id2>,... that lets the UI drop approval
+// gates the user toggled off before dispatch. Step-level gates inside
+// PlanRunner still use the bare [gate:<action>] form handled by gateTagRe in
+// orchestrator.go; the "execplan:" subtag is what tells us this action
+// targets the compiled plan artifact, not an in-flight step gate.
+//
+// Capture groups: 1=action, 2=planID, 3=compileGeneration, 4=skip list
+// (raw, comma-separated, may be empty or absent).
+var execPlanGateRe = regexp.MustCompile(`\[gate:(approve|revise|abort):execplan:([^\]:]+):(\d+)(?::skip=([^\]]*))?\]`)
 
 // isExecPlanGateAction returns true when the message carries an execplan gate
 // tag. This is checked before the generic step-gate regex so execplan
@@ -40,6 +45,12 @@ type execPlanGate struct {
 	PlanID            string
 	CompileGeneration int
 	Feedback          string
+	// SkippedGateIDs is the set of approval-gate IDs the user toggled OFF
+	// in the Prism preview before dispatching. Parsed from the optional
+	// :skip=<csv> suffix on the gate tag; empty when no skips were
+	// requested. Unknown IDs are tolerated at apply time — see
+	// handleExecutePlanApproval for the filter.
+	SkippedGateIDs []string
 }
 
 func parseExecPlanGate(text string) (execPlanGate, bool) {
@@ -52,12 +63,59 @@ func parseExecPlanGate(text string) (execPlanGate, bool) {
 		return execPlanGate{}, false
 	}
 	feedback := strings.TrimSpace(execPlanGateRe.ReplaceAllString(text, ""))
+	var skipped []string
+	if len(m) >= 5 && m[4] != "" {
+		skipped = parseSkipList(m[4])
+	}
 	return execPlanGate{
 		Action:            execute.GateAction(m[1]),
 		PlanID:            m[2],
 		CompileGeneration: gen,
 		Feedback:          feedback,
+		SkippedGateIDs:    skipped,
 	}, true
+}
+
+// parseSkipList splits a comma-separated skip-list into a deduped, trimmed
+// slice in input order. Empty tokens (trailing comma, double comma) are
+// dropped so "g1,,g2," parses to []string{"g1","g2"}. The order is
+// preserved so audit logs remain readable in the sequence the UI intended.
+func parseSkipList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	seen := make(map[string]bool, len(parts))
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		id := strings.TrimSpace(p)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+// filterExecPlanGates returns a copy of gates with entries whose ID appears
+// in skippedIDs removed. Unknown IDs (not present in gates) are ignored —
+// the UI may have sent an ID for a gate that was already resolved or
+// compiled away between preview and dispatch, which is fine because the
+// observable effect (the gate does not open) is identical either way.
+func filterExecPlanGates(gates []execute.ApprovalGate, skippedIDs []string) []execute.ApprovalGate {
+	if len(skippedIDs) == 0 {
+		return gates
+	}
+	skip := make(map[string]bool, len(skippedIDs))
+	for _, id := range skippedIDs {
+		skip[id] = true
+	}
+	out := make([]execute.ApprovalGate, 0, len(gates))
+	for _, g := range gates {
+		if skip[g.ID] {
+			continue
+		}
+		out = append(out, g)
+	}
+	return out
 }
 
 // handleExecuteMarkdown is the Execute-mode entry point when the incoming
@@ -429,6 +487,23 @@ func (o *Orchestrator) handleExecutePlanApproval(ctx context.Context, msg channe
 	if err := json.Unmarshal(body, &compiled); err != nil {
 		o.sendFollowUp(ctx, msg, fmt.Sprintf("Failed to parse compiled plan: %v", err))
 		return
+	}
+
+	// Apply the UI-side skip list BEFORE handoff so PlanRunner never sees
+	// gates the user toggled off in the preview. Unknown IDs are ignored
+	// (a gate may have been compiled away in a revise round-trip between
+	// preview and dispatch — identical observable effect).
+	if len(gate.SkippedGateIDs) > 0 {
+		before := len(compiled.Gates)
+		compiled.Gates = filterExecPlanGates(compiled.Gates, gate.SkippedGateIDs)
+		if removed := before - len(compiled.Gates); removed > 0 {
+			o.recordAudit(ctx, "channel.execute_gates_skipped",
+				strings.Join(gate.SkippedGateIDs, ","), strPtr("execute"))
+			o.logger.Info("execute: dropped gates before dispatch",
+				"plan_id", gate.PlanID,
+				"skipped_ids", gate.SkippedGateIDs,
+				"removed", removed)
+		}
 	}
 
 	// Plan->Execute roster handoff. Any guests who were active during Plan
