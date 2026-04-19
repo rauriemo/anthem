@@ -92,6 +92,17 @@ type frame struct {
 	Action           string               `json:"action,omitempty"`
 	RevisionText     string               `json:"revision_text,omitempty"`
 	FlaggedArtifacts []flaggedArtifactRef `json:"flagged_artifacts,omitempty"`
+
+	// execute_rerun fields. Prism sends {type: "execute_rerun",
+	// plan_id, feedback?} from the terminal-run banner in the
+	// Execute tab to ask the orchestrator to recompile a prior
+	// plan, optionally with additional user feedback. The
+	// orchestrator loads the saved plan markdown for plan_id,
+	// appends a "## Addendum" block carrying the feedback, and
+	// synthesises a fresh [system:execute] chat message so the
+	// existing compile path runs unchanged.
+	PlanID   string `json:"plan_id,omitempty"`
+	Feedback string `json:"feedback,omitempty"`
 }
 
 // flaggedArtifactRef identifies a single artifact the user wants the agent
@@ -414,6 +425,11 @@ func (a *Adapter) readLoop(entry *connEntry) {
 			continue
 		}
 
+		if f.Type == "execute_rerun" {
+			a.handleExecuteRerunFrame(entry, f)
+			continue
+		}
+
 		if f.Type != "req" || f.ID == "" {
 			continue
 		}
@@ -534,6 +550,70 @@ func (a *Adapter) handleGateActionFrame(entry *connEntry, f frame) {
 	case a.incoming <- msg:
 	default:
 		a.logger.Warn("dropping prism gate_action, buffer full", "gate_id", f.GateID)
+	}
+}
+
+// handleExecuteRerunFrame translates a Prism `execute_rerun` frame into
+// a channel.IncomingMessage tagged with [system:execute_rerun:<planID>]
+// so the orchestrator's mode detector can route it to handleExecuteRerun
+// without treating it as a regular execute submission. The feedback (if
+// any) is appended to the text so the orchestrator's existing control-
+// tag stripper leaves it intact as plain body text.
+func (a *Adapter) handleExecuteRerunFrame(entry *connEntry, f frame) {
+	planID := strings.TrimSpace(f.PlanID)
+	if planID == "" {
+		a.logger.Warn("prism execute_rerun with missing plan_id, ignoring")
+		_ = entry.writeJSON(frame{Type: "error", Error: "execute_rerun requires plan_id"})
+		return
+	}
+
+	text := fmt.Sprintf("[system:execute_rerun:%s]", planID)
+	if fb := strings.TrimSpace(f.Feedback); fb != "" {
+		text = text + " " + fb
+	}
+
+	threadID := f.Thread
+	if threadID == "" {
+		threadID = f.ID
+	}
+	if threadID != "" {
+		a.mu.Lock()
+		a.threads[threadID] = entry
+		a.mu.Unlock()
+	}
+
+	msg := channel.IncomingMessage{
+		ChannelKind: "prism",
+		SenderID:    "prism",
+		ThreadID:    threadID,
+		Text:        text,
+		Timestamp:   time.Now(),
+		Raw:         f,
+	}
+
+	select {
+	case a.incoming <- msg:
+	default:
+		a.logger.Warn("dropping prism execute_rerun, buffer full", "plan_id", planID)
+	}
+}
+
+// NewExecuteRerunIncomingMessage builds the IncomingMessage shape the
+// prism adapter emits when a client sends an execute_rerun frame. It
+// exists so orchestrator tests can assert downstream routing behavior
+// without running a live WebSocket connection.
+func NewExecuteRerunIncomingMessage(planID, feedback, threadID string) channel.IncomingMessage {
+	planID = strings.TrimSpace(planID)
+	text := fmt.Sprintf("[system:execute_rerun:%s]", planID)
+	if fb := strings.TrimSpace(feedback); fb != "" {
+		text = text + " " + fb
+	}
+	return channel.IncomingMessage{
+		ChannelKind: "prism",
+		SenderID:    "prism",
+		ThreadID:    threadID,
+		Text:        text,
+		Timestamp:   time.Now(),
 	}
 }
 

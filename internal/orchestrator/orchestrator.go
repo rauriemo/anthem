@@ -2009,6 +2009,16 @@ func (o *Orchestrator) HandleUserMessage(ctx context.Context, msg channel.Incomi
 			o.finalizeGuestRound(ctx, msg, guestWg)
 			return
 		}
+		// Rerun frames carry a [system:execute_rerun:<planID>] tag the
+		// prism adapter synthesises from the terminal-run banner. Route
+		// those through handleExecuteRerun before the markdown compile
+		// path so the plan to recompile is identified by its stable
+		// frontmatter UUID rather than by LatestDraft lookup.
+		if rerunPlanID, rerunFeedback, ok := parseExecuteRerunTag(msg.Text); ok {
+			o.handleExecuteRerun(ctx, msg, rerunPlanID, rerunFeedback)
+			o.finalizeGuestRound(ctx, msg, guestWg)
+			return
+		}
 		if plan := o.tryLoadExecutionPlan(msg.Text); plan != nil {
 			o.handleExecuteMessage(ctx, msg, plan)
 			o.finalizeGuestRound(ctx, msg, guestWg)
@@ -2302,6 +2312,12 @@ func (o *Orchestrator) detectMode(text string) types.Mode {
 	tags, _ := parseControlTags(text)
 	for tag := range tags {
 		if strings.HasPrefix(tag, "system:respec") {
+			return types.ModeExecute
+		}
+		// execute_rerun carries the plan UUID as a tag suffix
+		// (e.g. system:execute_rerun:<uuid>) so the full key varies
+		// per invocation; prefix-match to recognise it as Execute.
+		if strings.HasPrefix(tag, "system:execute_rerun:") {
 			return types.ModeExecute
 		}
 	}

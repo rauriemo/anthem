@@ -1148,3 +1148,128 @@ func TestHandleExecuteMarkdown_AcceptsOrchestratorAgentID(t *testing.T) {
 		t.Errorf("RequiredProfiles = %v, want [orchestrator]", p.Frontmatter.RequiredProfiles)
 	}
 }
+
+// --- execute_rerun: parseExecuteRerunTag, happy-path rerun, unknown plan, feedback addendum ---
+
+func TestParseExecuteRerunTag(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		wantID   string
+		wantBody string
+		wantOK   bool
+	}{
+		{"bare tag", "[system:execute_rerun:abc-123]", "abc-123", "", true},
+		{"tag with feedback", "[system:execute_rerun:abc-123] please retry without tower", "abc-123", "please retry without tower", true},
+		{"tag with trailing space and feedback", "[system:execute_rerun:xyz]   tighten step 2 ", "xyz", "tighten step 2", true},
+		{"missing tag", "[system:execute] plain", "", "", false},
+		{"empty plan id", "[system:execute_rerun:]", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, body, ok := parseExecuteRerunTag(tc.input)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v (input=%q)", ok, tc.wantOK, tc.input)
+			}
+			if id != tc.wantID {
+				t.Errorf("id = %q, want %q", id, tc.wantID)
+			}
+			if body != tc.wantBody {
+				t.Errorf("body = %q, want %q", body, tc.wantBody)
+			}
+		})
+	}
+}
+
+func TestHandleExecuteRerun_RecompilesSavedPlanAndBroadcasts(t *testing.T) {
+	out := `{"steps":[{"id":"s1","agent_id":"artist","description":"x"}],"metadata":{"title":"T"}}`
+	orch, ch := newExecuteTestOrch(t, out)
+	_, planID := seedDraftPlan(t, orch, "# Plan\n\nDo things.")
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "prism", SenderID: "u", ThreadID: "t1",
+		Text:      fmt.Sprintf("[system:execute_rerun:%s]", planID),
+		Timestamp: time.Now(),
+	})
+
+	var foundExecplan bool
+	for _, m := range ch.sentMessages() {
+		if m.DisplayID == "execplan:"+planID {
+			foundExecplan = true
+		}
+	}
+	if !foundExecplan {
+		t.Fatalf("no execplan:%s broadcast; messages=%+v", planID, ch.sentMessages())
+	}
+
+	metas, _ := orch.planStore.List(orch.projectSlug())
+	if len(metas) != 1 {
+		t.Fatalf("expected 1 plan, got %d", len(metas))
+	}
+	p, err := orch.planStore.Load(metas[0].Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Frontmatter.CompileGeneration != 1 {
+		t.Errorf("CompileGeneration = %d, want 1", p.Frontmatter.CompileGeneration)
+	}
+}
+
+func TestHandleExecuteRerun_UnknownPlanIDReplies(t *testing.T) {
+	orch, ch := newExecuteTestOrch(t, `{}`)
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "prism", SenderID: "u", ThreadID: "t1",
+		Text:      "[system:execute_rerun:does-not-exist]",
+		Timestamp: time.Now(),
+	})
+
+	var found bool
+	for _, m := range ch.sentMessages() {
+		if strings.Contains(m.Text, "no saved plan with that id") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected missing-plan guidance; got: %+v", ch.sentMessages())
+	}
+}
+
+func TestHandleExecuteRerun_FeedbackAppendsAddendumToCompileInput(t *testing.T) {
+	// Capture the compile consult prompt so we can assert the
+	// appended "## Addendum" block reaches the LLM input. The
+	// MockRunner records opts.Prompt for the single Run() call.
+	r := agent.NewMockRunner()
+	var capturedPrompt string
+	r.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		if !strings.Contains(opts.Prompt, "Compile Mode") {
+			return nil, fmt.Errorf("unexpected prompt: %s", opts.Prompt)
+		}
+		capturedPrompt = opts.Prompt
+		return &types.RunResult{SessionID: "compile-s", Output: `{"steps":[{"id":"s1","agent_id":"artist","description":"x"}],"metadata":{"title":"T"}}`}, nil
+	}
+	orchAg := NewOrchestratorAgent(r, "", "", 100000, 10, 25, 10, 5, testLogger())
+	orch, _ := newPlanTestOrch(t, r)
+	orch.orchAgent = orchAg
+	orch.guestIndex = &guests.GuestIndex{
+		Agents: map[string]guests.GuestAgent{"artist": {ID: "artist", Role: "artist"}},
+	}
+
+	_, planID := seedDraftPlan(t, orch, "# Plan\n\nDo things.")
+
+	orch.HandleUserMessage(context.Background(), channel.IncomingMessage{
+		ChannelKind: "prism", SenderID: "u", ThreadID: "t1",
+		Text:      fmt.Sprintf("[system:execute_rerun:%s] drop the second step", planID),
+		Timestamp: time.Now(),
+	})
+
+	if capturedPrompt == "" {
+		t.Fatal("compile runner was never invoked")
+	}
+	if !strings.Contains(capturedPrompt, "## Addendum") {
+		t.Errorf("compile prompt missing ## Addendum block; got: %s", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "drop the second step") {
+		t.Errorf("compile prompt missing feedback body; got: %s", capturedPrompt)
+	}
+}

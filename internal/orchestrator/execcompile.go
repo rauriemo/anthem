@@ -167,6 +167,98 @@ func (o *Orchestrator) handleExecuteMarkdown(ctx context.Context, msg channel.In
 		return
 	}
 
+	o.compileAndBroadcastExecutePlan(ctx, msg, markdown, planPath, planID, source, feedback)
+}
+
+// handleExecuteRerun reruns a previously compiled plan identified by its
+// stable frontmatter UUID. Triggered by the Execute tab's terminal-run
+// banner (Rerun / Revise buttons) which posts an `execute_rerun` frame
+// through the prism adapter. Feedback is optional; when provided it is
+// appended to the plan body as a `## Addendum` block so the compile LLM
+// sees it as an explicit revise instruction. The normal compile pipeline
+// (mutex, ConsultCompilePlan with alias recovery, Validate, SaveCompiled,
+// broadcast) runs unchanged -- the resulting execplan artifact lands as
+// a fresh preview and the client's PREVIEW_INDEX snap makes it claim
+// the Execute foreground.
+func (o *Orchestrator) handleExecuteRerun(ctx context.Context, msg channel.IncomingMessage, planID, feedback string) {
+	if o.orchAgent == nil {
+		o.sendFollowUp(ctx, msg, "Execute mode requires the orchestrator agent to be configured.")
+		return
+	}
+	if o.planStore == nil {
+		o.sendFollowUp(ctx, msg, "Execute mode requires a plan store.")
+		return
+	}
+	if strings.TrimSpace(planID) == "" {
+		o.sendFollowUp(ctx, msg, "Rerun requires a plan id.")
+		return
+	}
+
+	metas, err := o.planStore.List(o.projectSlug())
+	if err != nil {
+		o.logger.Warn("execute: rerun list plans", "error", err)
+		o.sendFollowUp(ctx, msg, fmt.Sprintf("Failed to locate plan %q: %v", planID, err))
+		return
+	}
+	var targetPath string
+	for _, m := range metas {
+		if m.ID == planID {
+			targetPath = m.Path
+			break
+		}
+	}
+	if targetPath == "" {
+		o.sendFollowUp(ctx, msg, fmt.Sprintf("Cannot rerun plan %q: no saved plan with that id was found.", planID))
+		o.recordAudit(ctx, "channel.execute_rerun_missing_plan", "", strPtr("execute"))
+		return
+	}
+
+	plan, err := o.planStore.Load(targetPath)
+	if err != nil {
+		o.logger.Warn("execute: rerun load plan", "error", err, "plan_path", targetPath)
+		o.sendFollowUp(ctx, msg, fmt.Sprintf("Failed to load plan for rerun: %v", err))
+		return
+	}
+
+	markdown := plan.Body
+	trimmedFeedback := strings.TrimSpace(feedback)
+	if trimmedFeedback != "" {
+		// Append the user's feedback as an explicit "## Addendum" block
+		// so the compile LLM receives it as a named, structured section
+		// alongside the original plan. The compile prompt already
+		// respects the Feedback input, but persisting it in the body
+		// for this single round gives the LLM a second signal at the
+		// exact place in the plan where it would normally read prose.
+		var b strings.Builder
+		b.WriteString(markdown)
+		if !strings.HasSuffix(markdown, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("\n## Addendum\n\n")
+		b.WriteString(trimmedFeedback)
+		b.WriteString("\n")
+		markdown = b.String()
+	}
+
+	o.recordAudit(ctx, "channel.execute_rerun_start", "", strPtr("execute"))
+	o.compileAndBroadcastExecutePlan(ctx, msg, markdown, plan.Path, plan.Frontmatter.ID, "rerun", trimmedFeedback)
+}
+
+// compileAndBroadcastExecutePlan runs the per-plan compile pipeline
+// shared by [system:execute] chat submissions (handleExecuteMarkdown)
+// and rerun frames (handleExecuteRerun). Callers are responsible for
+// resolving the markdown + plan identity; this helper owns the
+// compile-mutex, ConsultCompilePlan loop (with MissingProfile alias
+// recovery), Validate, SaveCompiled, and execplan artifact broadcast.
+func (o *Orchestrator) compileAndBroadcastExecutePlan(
+	ctx context.Context,
+	msg channel.IncomingMessage,
+	markdown string,
+	planPath string,
+	planID string,
+	source string,
+	feedback string,
+) {
 	// Acquire per-plan compile mutex. Inline-only plans (not persisted) use
 	// a synthetic ID derived from the markdown content so two parallel
 	// inline submissions of the same text still collapse to one compile.
@@ -328,6 +420,34 @@ func (o *Orchestrator) handleExecuteMarkdown(ctx context.Context, msg channel.In
 
 	o.broadcastExecPlanArtifact(ctx, msg, planID, newGen, compiled, body, source, requiredProfiles)
 	o.recordAudit(ctx, "channel.execute_plan_compiled", "", strPtr("execute"))
+}
+
+// execRerunTagRe matches the synthetic tag the prism adapter emits for
+// `execute_rerun` frames: [system:execute_rerun:<planID>]. Capture groups:
+// 1 = planID (UUIDv4 shape, but we don't reparse it here — planStore.List
+// resolution will error cleanly if the ID doesn't match anything).
+var execRerunTagRe = regexp.MustCompile(`\[system:execute_rerun:([^\]\s]+)\]`)
+
+// parseExecuteRerunTag extracts the plan ID and remaining feedback body
+// from a message whose leading control tag is [system:execute_rerun:<id>].
+// Returns (planID, feedback, true) when the tag is found; otherwise the
+// zero value with ok=false. Feedback is everything after the tag with
+// surrounding whitespace stripped — matches the convention used by the
+// existing [system:execute] feedback-extraction path.
+func parseExecuteRerunTag(text string) (planID, feedback string, ok bool) {
+	m := execRerunTagRe.FindStringSubmatchIndex(text)
+	if m == nil {
+		return "", "", false
+	}
+	planID = strings.TrimSpace(text[m[2]:m[3]])
+	if planID == "" {
+		return "", "", false
+	}
+	// Strip the matched tag from the text to recover the body.
+	before := text[:m[0]]
+	after := text[m[1]:]
+	body := strings.TrimSpace(before + after)
+	return planID, body, true
 }
 
 // resolveExecuteMarkdownSource enforces inline-beats-draft precedence.
