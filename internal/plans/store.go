@@ -77,6 +77,18 @@ func NewStore(homeDir string) (*Store, error) {
 	return &Store{root: root}, nil
 }
 
+// Root returns the absolute path of the plans directory (~/.anthem/plans).
+// Exposed so siblings like the plans/runs log scanner can walk every
+// project without duplicating the path convention.
+func (s *Store) Root() string { return s.root }
+
+// ProjectDir returns the slugified directory where plans for a given
+// project slug live. Used by the run-log scanner to locate .runs/
+// directories without guessing the slug transform.
+func (s *Store) ProjectDir(projectSlug string) string {
+	return filepath.Join(s.root, projectDir(projectSlug))
+}
+
 var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
 
 func slugify(s string) string {

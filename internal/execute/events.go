@@ -21,6 +21,13 @@ const (
 	EventGateNotification = "execution.gate_notification"
 	EventPlanCompleted    = "execution.plan_completed"
 	EventPlanAborted      = "execution.plan_aborted"
+	// EventPlanSnapshot carries a full, replay-reduced snapshot of a
+	// currently active run. The orchestrator emits one per active run
+	// on every client connect so Prism can hydrate the Execute screen
+	// without any browser-side persistence. The payload is produced by
+	// plans/runs.Snapshot; see plans/runs/snapshot_event.go for the
+	// builder that translates it to a channel.OutgoingMessage.
+	EventPlanSnapshot     = "execution.plan_snapshot"
 )
 
 // planLoadedPayload is the wire shape Prism decodes on

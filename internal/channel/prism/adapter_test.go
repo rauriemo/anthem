@@ -3,6 +3,7 @@ package prism
 import (
 	"context"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1131,5 +1132,62 @@ func TestGateActionRaw_NonGateMessageReturnsFalse(t *testing.T) {
 	msg := channel.IncomingMessage{ChannelKind: "prism", Text: "hello"}
 	if _, _, _, _, ok := GateActionRaw(msg); ok {
 		t.Fatal("expected ok=false for non-gate message")
+	}
+}
+
+// TestSetOnConnect_DeliversEventsOnlyToNewClient pins the contract
+// the plan_snapshot hydration depends on: the on-connect callback's
+// returned messages must reach the freshly authenticated client as
+// event frames, and must NOT be fanned out to other already-connected
+// clients. If the adapter ever regressed to broadcasting on-connect
+// events, a user with two tabs would see hydration events arrive on
+// the passive tab too (duplicated store writes, confusing Active
+// Chains churn).
+func TestSetOnConnect_DeliversEventsOnlyToNewClient(t *testing.T) {
+	a, url := startTestAdapter(t)
+
+	// First client authenticates before the hook is installed so the
+	// test can assert the passive tab receives nothing during a
+	// subsequent connect. This mirrors real-world reconnect timing:
+	// one tab is already steady when another tab reloads.
+	passiveConn := dial(t, url)
+	if f := authenticate(t, passiveConn, testToken); f.Type != "auth_ok" {
+		t.Fatalf("passive auth failed: %s", f.Type)
+	}
+
+	var called int32
+	a.SetOnConnect(func(ctx context.Context) []channel.OutgoingMessage {
+		atomic.AddInt32(&called, 1)
+		return []channel.OutgoingMessage{
+			{EventType: "execution.plan_snapshot", Text: `{"plan_id":"p1"}`, ThreadID: "resume:p1"},
+		}
+	})
+
+	freshConn := dial(t, url)
+	if f := authenticate(t, freshConn, testToken); f.Type != "auth_ok" {
+		t.Fatalf("fresh auth failed: %s", f.Type)
+	}
+
+	// The fresh client should receive the hydration event next.
+	got := readFrame(t, freshConn)
+	if got.Type != "event" || got.Event != "execution.plan_snapshot" {
+		t.Fatalf("fresh client frame = %+v, want type=event event=execution.plan_snapshot", got)
+	}
+	if got.Thread != "resume:p1" {
+		t.Errorf("fresh client thread = %q, want resume:p1", got.Thread)
+	}
+	if got.Text != `{"plan_id":"p1"}` {
+		t.Errorf("fresh client text = %q", got.Text)
+	}
+
+	// The passive client must stay quiet -- a short deadline is fine
+	// because any broadcast from SetOnConnect would be synchronous.
+	_ = passiveConn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	if _, _, err := passiveConn.ReadMessage(); err == nil {
+		t.Fatal("passive client received a frame; expected timeout")
+	}
+
+	if got := atomic.LoadInt32(&called); got != 1 {
+		t.Fatalf("on-connect invoked %d times, want 1", got)
 	}
 }

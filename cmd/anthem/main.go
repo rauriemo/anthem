@@ -349,6 +349,13 @@ func runCmd() *cobra.Command {
 					prismAdapter.SetMaxActiveGuests(cfg.MaxActiveGuests)
 				}
 				prismAdapter.SetCurrentMode(string(orch.CurrentMode))
+				// Each newly-authenticated Prism client gets an
+				// execution.plan_snapshot for every currently-active
+				// run so it can hydrate the Execute view without any
+				// browser-side persistence. See
+				// orchestrator.HydrationEventsForConnect for the
+				// snapshot build policy.
+				prismAdapter.SetOnConnect(orch.HydrationEventsForConnect)
 			}
 
 			// Start config hot-reload watcher

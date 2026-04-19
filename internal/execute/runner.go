@@ -38,6 +38,20 @@ type RunnerOpts struct {
 	GlobalMCPServers map[string]mcpconfig.MCPServerRef
 	GuestMCPMaxTurns int
 	Logger           *slog.Logger
+	// PlanID + CompileGeneration identify the run log entry this
+	// invocation belongs to. Recorded in the run_started event so
+	// ReplayToSnapshot can emit the same plan identity Prism sees on
+	// the execution.plan_snapshot wire. Zero values are tolerated for
+	// legacy dispatch paths (inline [execute:plan] tags in tests) that
+	// don't carry a compiled plan identity.
+	PlanID            string
+	CompileGeneration int
+	// RunLog receives every state transition before the corresponding
+	// channel broadcast, making the run log the authoritative source
+	// for restart and reconnect recovery. When nil, NoopAppender is
+	// used so the runner remains drop-in compatible with tests and
+	// legacy paths that have no plan identity.
+	RunLog RunEventAppender
 }
 
 type gateMsg struct {
@@ -76,6 +90,9 @@ func NewPlanRunner(opts RunnerOpts) *PlanRunner {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if opts.RunLog == nil {
+		opts.RunLog = NoopAppender{}
+	}
 	return &PlanRunner{
 		opts:                      opts,
 		logger:                    logger,
@@ -112,12 +129,26 @@ func (r *PlanRunner) ResolveFailure(stepID string, resolution GateResolution) {
 // finishes, is aborted, or the context is canceled. Intended to be called
 // in its own goroutine.
 func (r *PlanRunner) Run(ctx context.Context, plan *ExecutionPlan, threadID string) error {
+	// Log-first: the run_started event carries the compiled plan
+	// snapshot so a replay-only consumer (startup triage, on-connect
+	// plan_snapshot emit) can reconstruct the step/gate identities
+	// without a second file read.
+	r.opts.RunLog.AppendRunStarted(r.opts.PlanID, r.opts.CompileGeneration, plan, r.opts.ProjectSlug)
+
 	r.mu.Lock()
 	r.plan = plan
 	r.mu.Unlock()
 
 	r.broadcast(ctx, PlanLoadedEvent(plan, threadID))
 
+	return r.driveSteps(ctx, plan, threadID)
+}
+
+// driveSteps is the main step-dispatch loop shared by Run (fresh
+// dispatch) and ResumeAtGate (orchestrator startup replay). It keeps
+// pulling NextPendingStep until the plan is complete, stuck, or a
+// step returns an error (abort).
+func (r *PlanRunner) driveSteps(ctx context.Context, plan *ExecutionPlan, threadID string) error {
 	for {
 		r.mu.Lock()
 		step := r.plan.NextPendingStep()
@@ -128,10 +159,12 @@ func (r *PlanRunner) Run(ctx context.Context, plan *ExecutionPlan, threadID stri
 			done := r.plan.AllCompleted()
 			r.mu.Unlock()
 			if done {
+				r.opts.RunLog.AppendRunCompleted()
 				r.broadcast(ctx, PlanCompletedEvent(plan, threadID))
 				return nil
 			}
 			// No step is ready but plan isn't done -- blocked by deps or all failed
+			r.opts.RunLog.AppendRunAborted("plan stuck: no pending step is ready")
 			return fmt.Errorf("plan stuck: no pending step is ready")
 		}
 
@@ -141,7 +174,80 @@ func (r *PlanRunner) Run(ctx context.Context, plan *ExecutionPlan, threadID stri
 	}
 }
 
+// ResumeAtGate reattaches the runner to a run log whose tail event is
+// gate_opened. Called by the orchestrator's startup replay once it has
+// reconstructed the step statuses and per-step artifacts from the log.
+// The gate_opened broadcast is intentionally NOT re-emitted: Prism
+// receives the full drawer state via the execution.plan_snapshot event
+// emitted on WebSocket connect.
+//
+// After the user resolves the gate via ResolveGate, ResumeAtGate
+// applies the resolution (approve/revise/abort) and continues the
+// plan via driveSteps exactly as Run would have.
+func (r *PlanRunner) ResumeAtGate(
+	ctx context.Context,
+	plan *ExecutionPlan,
+	perStepArtifacts map[string][]StepArtifact,
+	openGate ApprovalGate,
+	threadID string,
+) error {
+	r.mu.Lock()
+	r.plan = plan
+	for sid, arts := range perStepArtifacts {
+		r.artifacts[sid] = append([]StepArtifact(nil), arts...)
+	}
+	r.mu.Unlock()
+
+	step := findStepInPlan(plan, openGate.AfterStep)
+	if step == nil {
+		return fmt.Errorf("resume: gate %q refers to unknown step %q", openGate.ID, openGate.AfterStep)
+	}
+	collected := perStepArtifacts[openGate.AfterStep]
+	_, _, review := r.agentReviewContext(step.AgentID)
+
+	// Wait for the resolution the user will send via ResolveGate. The
+	// body matches the gate-resolved branch of handleGate but without
+	// the gate_opened broadcast (Prism already has the drawer state).
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case msg := <-r.gateCh:
+		r.opts.RunLog.AppendGateResolved(openGate.ID, msg.Resolution.Action, msg.Resolution.Feedback)
+		r.broadcast(ctx, GateResolvedEvent(openGate.ID, msg.Resolution.Action, msg.Resolution.Feedback, threadID))
+
+		switch msg.Resolution.Action {
+		case GateApprove:
+			r.clearPartialReviseState(openGate.AfterStep)
+			r.deactivateStepAgent(ctx, step, fmt.Sprintf("step %s complete", step.ID), threadID)
+		case GateRevise:
+			r.opts.RunLog.AppendStepQueued(openGate.AfterStep, step.AgentID)
+			r.applyRevise(openGate.AfterStep, msg.Resolution, collected, review)
+		case GateAbort:
+			r.clearPartialReviseState(openGate.AfterStep)
+			r.opts.RunLog.AppendRunAborted("aborted at gate")
+			r.deactivateStepAgent(ctx, step, fmt.Sprintf("step %s aborted", step.ID), threadID)
+			r.broadcast(ctx, PlanAbortedEvent(r.plan, "aborted at gate", threadID))
+			return fmt.Errorf("plan aborted at gate %q", openGate.ID)
+		}
+	}
+
+	return r.driveSteps(ctx, plan, threadID)
+}
+
+// findStepInPlan locates a step by ID inside the plan and returns a
+// pointer into the plan's Steps slice so callers can mutate status
+// directly (matching the rest of the runner's in-memory discipline).
+func findStepInPlan(plan *ExecutionPlan, stepID string) *PlanStep {
+	for i := range plan.Steps {
+		if plan.Steps[i].ID == stepID {
+			return &plan.Steps[i]
+		}
+	}
+	return nil
+}
+
 func (r *PlanRunner) runStep(ctx context.Context, step *PlanStep, threadID string) error {
+	r.opts.RunLog.AppendStepStarted(step.ID, step.AgentID)
 	r.setStepStatus(step.ID, StepRunning)
 	r.broadcast(ctx, StepStartedEvent(*step, threadID))
 
@@ -202,6 +308,7 @@ func (r *PlanRunner) runStep(ctx context.Context, step *PlanStep, threadID strin
 	r.artifacts[step.ID] = collected
 	r.mu.Unlock()
 
+	r.opts.RunLog.AppendStepCompleted(step.ID, step.AgentID, collected)
 	r.setStepStatus(step.ID, StepCompleted)
 	r.broadcast(ctx, StepCompletedEvent(step.ID, step.AgentID, collected, threadID))
 
@@ -232,6 +339,7 @@ func (r *PlanRunner) handleStepFailure(ctx context.Context, step *PlanStep, thre
 		errMsg = fmt.Sprintf("exit code %d", result.ExitCode)
 	}
 
+	r.opts.RunLog.AppendStepFailed(step.ID, step.AgentID, errMsg)
 	r.setStepStatus(step.ID, StepFailed)
 	r.broadcast(ctx, StepFailedEvent(step.ID, step.AgentID, errMsg, threadID))
 
@@ -242,10 +350,14 @@ func (r *PlanRunner) handleStepFailure(ctx context.Context, step *PlanStep, thre
 	case msg := <-r.gateCh:
 		switch msg.Resolution.Action {
 		case GateApprove:
-			// "approve" on a failure means "retry as-is"
+			// "approve" on a failure means "retry as-is". Emitted as a
+			// step_queued event so the run log records the user's
+			// intent to retry rather than silently resetting status.
+			r.opts.RunLog.AppendStepQueued(step.ID, step.AgentID)
 			r.setStepStatus(step.ID, StepPending)
 			return nil
 		case GateRevise:
+			r.opts.RunLog.AppendStepQueued(step.ID, step.AgentID)
 			r.mu.Lock()
 			for i := range r.plan.Steps {
 				if r.plan.Steps[i].ID == step.ID {
@@ -257,6 +369,7 @@ func (r *PlanRunner) handleStepFailure(ctx context.Context, step *PlanStep, thre
 			r.mu.Unlock()
 			return nil
 		case GateAbort:
+			r.opts.RunLog.AppendRunAborted("step failure aborted by user")
 			r.deactivateStepAgent(ctx, step, fmt.Sprintf("step %s aborted", step.ID), threadID)
 			r.broadcast(ctx, PlanAbortedEvent(r.plan, "step failure aborted by user", threadID))
 			return fmt.Errorf("plan aborted at step %q", step.ID)
@@ -303,6 +416,19 @@ func (r *PlanRunner) handleGate(ctx context.Context, gate *ApprovalGate, step *P
 		threadID,
 	))
 
+	allowedActions := []string{"approve", "revise", "abort"}
+	reviewLink := buildReviewLink(r.opts.PlanID, gate.ID)
+	r.opts.RunLog.AppendGateOpened(
+		gate.ID,
+		step.ID,
+		agentID,
+		agentName,
+		gate.Prompt,
+		artifacts,
+		allowedActions,
+		review,
+		reviewLink,
+	)
 	r.broadcast(ctx, GateOpenedEvent(
 		*gate,
 		artifacts,
@@ -319,6 +445,7 @@ func (r *PlanRunner) handleGate(ctx context.Context, gate *ApprovalGate, step *P
 	case <-ctx.Done():
 		return ctx.Err()
 	case msg := <-r.gateCh:
+		r.opts.RunLog.AppendGateResolved(gate.ID, msg.Resolution.Action, msg.Resolution.Feedback)
 		r.broadcast(ctx, GateResolvedEvent(gate.ID, msg.Resolution.Action, msg.Resolution.Feedback, threadID))
 
 		switch msg.Resolution.Action {
@@ -334,10 +461,12 @@ func (r *PlanRunner) handleGate(ctx context.Context, gate *ApprovalGate, step *P
 			// we intentionally keep them active. Emitting
 			// DeactivateGuest here would cause the chip to flicker
 			// between the revise click and the next StepStarted.
+			r.opts.RunLog.AppendStepQueued(gate.AfterStep, step.AgentID)
 			r.applyRevise(gate.AfterStep, msg.Resolution, artifacts, review)
 			return nil
 		case GateAbort:
 			r.clearPartialReviseState(gate.AfterStep)
+			r.opts.RunLog.AppendRunAborted("aborted at gate")
 			r.deactivateStepAgent(ctx, step, fmt.Sprintf("step %s aborted", step.ID), threadID)
 			r.broadcast(ctx, PlanAbortedEvent(r.plan, "aborted at gate", threadID))
 			return fmt.Errorf("plan aborted at gate %q", gate.ID)

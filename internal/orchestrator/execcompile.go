@@ -522,7 +522,7 @@ func (o *Orchestrator) handleExecutePlanApproval(ctx context.Context, msg channe
 	// prevent.
 	o.clearPlanTimeRosterForExecute(ctx, msg)
 
-	o.handleExecuteMessage(ctx, msg, &compiled)
+	o.handleExecuteMessageWithPlan(ctx, msg, &compiled, planPath, plan.Frontmatter.ID, plan.Frontmatter.CompileGeneration)
 	o.recordAudit(ctx, "channel.execute_plan_dispatched", "", strPtr("execute"))
 }
 

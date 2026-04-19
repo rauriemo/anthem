@@ -142,6 +142,17 @@ type Adapter struct {
 	maxActiveGuests int
 	currentMode     string
 
+	// onConnect, when non-nil, is invoked after a client completes
+	// the auth handshake and before readLoop starts. Each returned
+	// OutgoingMessage is written to just the newly-connected
+	// conn -- never fanned out. This is the hook the orchestrator
+	// uses to emit execution.plan_snapshot events for every active
+	// run so Prism can hydrate its Execute view without any
+	// browser-side persistence. Kept simple (pure function, no conn
+	// handle exposed) so the orchestrator can generate snapshots
+	// without caring about adapter internals.
+	onConnect func(ctx context.Context) []channel.OutgoingMessage
+
 	cancel context.CancelFunc
 }
 
@@ -173,6 +184,18 @@ func (a *Adapter) SetCurrentMode(mode string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.currentMode = mode
+}
+
+// SetOnConnect registers a hook invoked once per authenticated client.
+// The returned messages are sent only to the newly-connected session
+// (not broadcast), which is what the execution.plan_snapshot emission
+// requires: a reloading tab needs to learn about active runs on its
+// own connect, but other already-hydrated tabs must not receive a
+// second copy. Passing nil clears the hook.
+func (a *Adapter) SetOnConnect(cb func(ctx context.Context) []channel.OutgoingMessage) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.onConnect = cb
 }
 
 func (a *Adapter) Start(ctx context.Context) error {
@@ -227,10 +250,57 @@ func (a *Adapter) handleWS(w http.ResponseWriter, r *http.Request) {
 	entry := &connEntry{conn: ws}
 	a.mu.Lock()
 	a.conns[entry] = true
+	cb := a.onConnect
 	a.mu.Unlock()
 
 	a.logger.Info("prism client connected", "remote", ws.RemoteAddr())
+	if cb != nil {
+		// Run with a fresh context: the http handler's Request context
+		// is tied to this single connection and we don't want an early
+		// client disconnect to cancel the orchestrator's replay scan.
+		msgs := cb(context.Background())
+		for _, m := range msgs {
+			if err := a.sendToConn(entry, m); err != nil {
+				a.logger.Warn("prism on-connect send failed", "error", err)
+				break
+			}
+		}
+	}
 	a.readLoop(entry)
+}
+
+// sendToConn is the targeted sibling of Send/broadcastEvent: it writes
+// exactly one OutgoingMessage to one connection. Used by the
+// on-connect hook to deliver hydration events (plan_snapshot) only to
+// the newly-authenticated client. The frame shape mirrors
+// broadcastEvent / sendDisplay / sendStream for the relevant variants
+// so Prism's frame decoder handles the message identically.
+func (a *Adapter) sendToConn(entry *connEntry, msg channel.OutgoingMessage) error {
+	if msg.EventType != "" && msg.Text != "" {
+		return entry.writeJSON(frame{
+			Type:   "event",
+			Event:  msg.EventType,
+			Text:   msg.Text,
+			Thread: msg.ThreadID,
+		})
+	}
+	if msg.Display != nil {
+		return entry.writeJSON(frame{
+			Type:      "display",
+			Component: msg.Display,
+			Thread:    msg.ThreadID,
+			ID:        msg.DisplayID,
+			GuestID:   msg.GuestID,
+		})
+	}
+	if msg.Text != "" {
+		return entry.writeJSON(frame{
+			Type:   "res",
+			Text:   msg.Text,
+			Thread: msg.ThreadID,
+		})
+	}
+	return nil
 }
 
 // UpdateGuestIndex converts a GuestIndex to the wire format, caches it, and broadcasts to all connected clients.

@@ -29,6 +29,7 @@ import (
 	"github.com/rauriemo/anthem/internal/guests"
 	"github.com/rauriemo/anthem/internal/harness"
 	"github.com/rauriemo/anthem/internal/plans"
+	"github.com/rauriemo/anthem/internal/plans/runs"
 	"github.com/rauriemo/anthem/internal/rules"
 	"github.com/rauriemo/anthem/internal/tracker"
 	"github.com/rauriemo/anthem/internal/types"
@@ -188,6 +189,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.loadProjectContext()
 	o.scanGuests()
 	o.initPlanStore()
+	o.replayRunLogsOnStartup(ctx)
 
 	o.logger.Info("orchestrator started",
 		"interval_ms", o.cfg.Polling.IntervalMS,
@@ -2800,6 +2802,24 @@ func (o *Orchestrator) tryLoadExecutionPlan(text string) *execute.ExecutionPlan 
 }
 
 func (o *Orchestrator) handleExecuteMessage(ctx context.Context, msg channel.IncomingMessage, plan *execute.ExecutionPlan) {
+	o.handleExecuteMessageWithPlan(ctx, msg, plan, "", "", 0)
+}
+
+// handleExecuteMessageWithPlan is the richer entry point that threads
+// the compiled plan's path, stable ID, and compile generation down to
+// PlanRunner so every run allocates its own .jsonl run log under the
+// plan's sibling .runs/ directory. The legacy handleExecuteMessage
+// wrapper exists so inline [execute:plan] tags (test harness,
+// orchestrator agent output without a disk plan) continue to work
+// with a NoopAppender and no durability guarantees.
+func (o *Orchestrator) handleExecuteMessageWithPlan(
+	ctx context.Context,
+	msg channel.IncomingMessage,
+	plan *execute.ExecutionPlan,
+	planPath string,
+	planID string,
+	compileGen int,
+) {
 	var artifactProvider execute.ArtifactProvider
 	if o.cfg.ActiveFeature != "" {
 		artifactProvider = execute.NewContextArtifactProvider(o.projectRoot(), o.cfg.ActiveFeature)
@@ -2807,22 +2827,50 @@ func (o *Orchestrator) handleExecuteMessage(ctx context.Context, msg channel.Inc
 		artifactProvider = execute.NewFilesystemArtifactProvider(o.projectRoot())
 	}
 
+	// Allocate a run log for this dispatch. When planPath is empty
+	// (inline [execute:plan] legacy path) we skip log allocation and
+	// let the runner fall back to NoopAppender, preserving backward
+	// compatibility with tests and the orchestrator-agent fallback.
+	var runLog execute.RunEventAppender
+	var runLogPath string
+	if planPath != "" {
+		// One-active-run-per-plan invariant: aborting the previous
+		// live dispatch before starting a new one keeps ListActive
+		// and the UI's "Active Chains" slot deterministic. The abort
+		// event flushes even if the previous runner already exited,
+		// because a crash-dropped tail is the other case ListActive
+		// is designed to filter (orchestrator startup replay picks
+		// it up and aborts on behalf of the now-dead runner).
+		o.supersedePreviousRun(planPath)
+
+		runLogPath = runs.NewRunLogPath(planPath, compileGen, time.Now().UTC())
+		runLog = runs.NewFileAppender(runLogPath, o.logger)
+	}
+
 	pr := execute.NewPlanRunner(execute.RunnerOpts{
-		GuestIndex:       o.guestIndex,
-		Runner:           o.runner,
-		ChannelMgr:       o.channelMgr,
-		Artifacts:        artifactProvider,
-		ProjectRoot:      o.projectRoot(),
-		ProjectSlug:      o.projectSlug(),
-		AgentsDir:        o.guestsDir(),
-		GlobalMCPServers: o.cfg.Agent.MCPServers,
-		GuestMCPMaxTurns: o.cfg.Orchestrator.GuestMCPMaxTurns,
-		Logger:           o.logger,
+		GuestIndex:        o.guestIndex,
+		Runner:            o.runner,
+		ChannelMgr:        o.channelMgr,
+		Artifacts:         artifactProvider,
+		ProjectRoot:       o.projectRoot(),
+		ProjectSlug:       o.projectSlug(),
+		AgentsDir:         o.guestsDir(),
+		GlobalMCPServers:  o.cfg.Agent.MCPServers,
+		GuestMCPMaxTurns:  o.cfg.Orchestrator.GuestMCPMaxTurns,
+		Logger:            o.logger,
+		PlanID:            planID,
+		CompileGeneration: compileGen,
+		RunLog:            runLog,
 	})
 
+	o.mu.Lock()
 	o.activePlanRunner = pr
+	o.mu.Unlock()
 
 	o.sendFollowUp(ctx, msg, fmt.Sprintf("Starting execution plan: %s (%d steps)", plan.Metadata.Title, len(plan.Steps)))
+	if runLogPath != "" {
+		o.logger.Info("execute: run log allocated", "plan_id", planID, "compile_gen", compileGen, "run_log", runLogPath)
+	}
 
 	go func() {
 		err := pr.Run(ctx, plan, msg.ThreadID)
@@ -2835,6 +2883,313 @@ func (o *Orchestrator) handleExecuteMessage(ctx context.Context, msg channel.Inc
 		}
 		o.mu.Unlock()
 	}()
+}
+
+// HydrationEventsForConnect returns the set of OutgoingMessages the
+// Prism adapter should send to a newly-authenticated client so the
+// client can hydrate its Execute view and Active Chains list without
+// any browser-side persistence. The orchestrator scans every project
+// directory under ~/.anthem/plans/ for non-terminal run logs,
+// reduces each to a Snapshot, and emits one execution.plan_snapshot
+// per active run.
+//
+// Called by the adapter's on-connect hook (wired in cmd/anthem/main.go).
+// Safe to call concurrently: the file scan is read-only and every
+// returned message is a fresh copy, so two clients connecting at the
+// same time each receive their own snapshot stream.
+//
+// On error (missing root, unreadable run log) the orchestrator logs
+// and continues: a hydration failure must not break the WebSocket
+// handshake. In the worst case the client starts with an empty
+// executionStore and the user re-dispatches manually.
+func (o *Orchestrator) HydrationEventsForConnect(ctx context.Context) []channel.OutgoingMessage {
+	if o.planStore == nil {
+		return nil
+	}
+	root := o.planStore.Root()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			o.logger.Warn("hydrate: read plans root", "error", err)
+		}
+		return nil
+	}
+	var msgs []channel.OutgoingMessage
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		projectDir := filepath.Join(root, e.Name())
+		active, err := runs.ListActive(projectDir)
+		if err != nil {
+			o.logger.Warn("hydrate: list active", "dir", projectDir, "error", err)
+			continue
+		}
+		// Same "one active run per plan" dedupe the startup replay
+		// uses: keep the most recent non-terminal per plan path so a
+		// client with two crashed logs on the same plan doesn't see
+		// two live-looking chains.
+		mostRecent := make(map[string]runs.ActiveRun)
+		for _, ar := range active {
+			cur, ok := mostRecent[ar.PlanPath]
+			if !ok || ar.StartedAt.After(cur.StartedAt) {
+				mostRecent[ar.PlanPath] = ar
+			}
+		}
+		for _, ar := range mostRecent {
+			snap, err := runs.ReplayToSnapshot(ar.RunPath)
+			if err != nil {
+				o.logger.Warn("hydrate: snapshot", "run", ar.RunPath, "error", err)
+				continue
+			}
+			if snap.Terminal {
+				continue
+			}
+			threadID := fmt.Sprintf("resume:%s", snap.PlanID)
+			msgs = append(msgs, runs.PlanSnapshotEvent(snap, threadID))
+		}
+	}
+	return msgs
+}
+
+// replayRunLogsOnStartup scans every project's plan directory under
+// ~/.anthem/plans/ for non-terminal run logs and triages each one:
+//
+//   - Tail event run_completed / run_aborted: already terminal, skip.
+//   - Tail event gate_opened: reconstruct a PlanRunner parked at that
+//     gate so the user's subsequent approve / revise / abort click
+//     reaches the runner via activePlanRunner.ResolveGate. Per the
+//     "one active run per plan" invariant, only the most recent
+//     gate-parked run is reconstructed; older siblings are superseded.
+//   - Any other non-terminal tail (run_started, step_queued,
+//     step_started, step_failed): abort with reason="anthem restarted"
+//     because mid-step runtime state is not durable. The user will
+//     see the aborted history in their timeline and can re-run.
+//
+// Errors from any single log are logged and the scan continues so a
+// corrupt file can never starve the rest of the system at startup.
+func (o *Orchestrator) replayRunLogsOnStartup(ctx context.Context) {
+	if o.planStore == nil {
+		return
+	}
+	root := o.planStore.Root()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			o.logger.Warn("startup replay: read plans root", "error", err)
+		}
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		o.replayRunLogsForProjectDir(ctx, filepath.Join(root, e.Name()))
+	}
+}
+
+// replayRunLogsForProjectDir processes every .runs/ directory under a
+// single project slug directory. Split out so tests can target a
+// single project without seeding the full plans root.
+func (o *Orchestrator) replayRunLogsForProjectDir(ctx context.Context, projectDir string) {
+	active, err := runs.ListActive(projectDir)
+	if err != nil {
+		o.logger.Warn("startup replay: list active", "dir", projectDir, "error", err)
+		return
+	}
+	// Group by plan so the "one active run per plan" invariant is
+	// enforced at startup: if two logs for the same plan both landed
+	// non-terminal (two crashes, never a terminal rewrite), keep the
+	// most recent and supersede the rest.
+	mostRecent := make(map[string]runs.ActiveRun)
+	var toAbort []runs.ActiveRun
+	for _, ar := range active {
+		cur, ok := mostRecent[ar.PlanPath]
+		if !ok {
+			mostRecent[ar.PlanPath] = ar
+			continue
+		}
+		if ar.StartedAt.After(cur.StartedAt) {
+			toAbort = append(toAbort, cur)
+			mostRecent[ar.PlanPath] = ar
+		} else {
+			toAbort = append(toAbort, ar)
+		}
+	}
+	for _, ar := range toAbort {
+		if err := runs.Append(ar.RunPath, runs.RunAbortedEvent("superseded by new run")); err != nil {
+			o.logger.Warn("startup replay: supersede duplicate", "run", ar.RunPath, "error", err)
+		}
+	}
+
+	for _, ar := range mostRecent {
+		o.triageRunLog(ctx, ar)
+	}
+}
+
+// triageRunLog applies the gate-parked-vs-abort decision for one run.
+// See replayRunLogsOnStartup for the full policy. Abort-on-restart is
+// the chosen crash-recovery semantic: safer than a magic resume and
+// loses nothing durable because the log retains every step's outputs.
+func (o *Orchestrator) triageRunLog(ctx context.Context, ar runs.ActiveRun) {
+	if ar.TailType != runs.EventGateOpened {
+		if err := runs.Append(ar.RunPath, runs.RunAbortedEvent("anthem restarted")); err != nil {
+			o.logger.Warn("startup replay: abort dangling", "run", ar.RunPath, "error", err)
+			return
+		}
+		o.logger.Info("startup replay: aborted dangling run", "run", ar.RunPath, "tail", ar.TailType)
+		return
+	}
+	snap, err := runs.ReplayToSnapshot(ar.RunPath)
+	if err != nil {
+		o.logger.Warn("startup replay: snapshot", "run", ar.RunPath, "error", err)
+		return
+	}
+	if snap.OpenGate == nil {
+		o.logger.Warn("startup replay: gate_opened tail with no open gate", "run", ar.RunPath)
+		return
+	}
+	o.reconstructGateParkedRunner(ctx, ar, snap)
+}
+
+// reconstructGateParkedRunner spins up a PlanRunner whose state
+// mirrors the replayed snapshot and parks it on the open gate. The
+// runner takes over activePlanRunner so a subsequent gate resolution
+// click from Prism is routed to it via routeGateResolution. If a new
+// plan is dispatched before the user acts, handleExecuteMessageWithPlan's
+// supersedePreviousRun will append a run_aborted and the reconstructed
+// runner will exit via its context.
+func (o *Orchestrator) reconstructGateParkedRunner(ctx context.Context, ar runs.ActiveRun, snap runs.Snapshot) {
+	// Rebuild the ExecutionPlan from the snapshot shape so the runner
+	// has a legitimate plan to drive after the gate resolves.
+	plan := &execute.ExecutionPlan{
+		Metadata: execute.PlanMetadata{
+			Title:          snap.Title,
+			Description:    snap.Description,
+			PlanGeneration: snap.CompileGeneration,
+		},
+	}
+	plan.Steps = make([]execute.PlanStep, 0, len(snap.Steps))
+	for _, s := range snap.Steps {
+		plan.Steps = append(plan.Steps, execute.PlanStep{
+			ID:          s.ID,
+			AgentID:     s.AgentID,
+			Description: s.Label,
+			DependsOn:   s.DependsOn,
+			Status:      s.Status,
+		})
+	}
+	openGate := execute.ApprovalGate{
+		ID:        snap.OpenGate.ID,
+		AfterStep: snap.OpenGate.StepID,
+		Prompt:    snap.OpenGate.Prompt,
+	}
+	// Include every gate recorded in the run so future step's gates
+	// still fire normally after the user resolves the open one.
+	gateSet := map[string]bool{openGate.ID: true}
+	plan.Gates = append(plan.Gates, openGate)
+	// We only have the open gate in the snapshot; the remaining gates
+	// in the compiled plan aren't needed for the resume-then-continue
+	// path because driveSteps consults r.plan.Gates on each step
+	// completion. Leaving them out means subsequent steps run without
+	// gates, which matches the trade-off in the plan's "abort on
+	// anything more ambitious than gate resume" policy: the user can
+	// always re-dispatch to pick up the full gate schedule.
+	_ = gateSet
+
+	perStep := make(map[string][]execute.StepArtifact, len(snap.Steps))
+	for _, s := range snap.Steps {
+		if len(s.Artifacts) > 0 {
+			perStep[s.ID] = append([]execute.StepArtifact(nil), s.Artifacts...)
+		}
+	}
+
+	var artifactProvider execute.ArtifactProvider
+	if o.cfg.ActiveFeature != "" {
+		artifactProvider = execute.NewContextArtifactProvider(o.projectRoot(), o.cfg.ActiveFeature)
+	} else {
+		artifactProvider = execute.NewFilesystemArtifactProvider(o.projectRoot())
+	}
+
+	pr := execute.NewPlanRunner(execute.RunnerOpts{
+		GuestIndex:        o.guestIndex,
+		Runner:            o.runner,
+		ChannelMgr:        o.channelMgr,
+		Artifacts:         artifactProvider,
+		ProjectRoot:       o.projectRoot(),
+		ProjectSlug:       o.projectSlug(),
+		AgentsDir:         o.guestsDir(),
+		GlobalMCPServers:  o.cfg.Agent.MCPServers,
+		GuestMCPMaxTurns:  o.cfg.Orchestrator.GuestMCPMaxTurns,
+		Logger:            o.logger,
+		PlanID:            snap.PlanID,
+		CompileGeneration: snap.CompileGeneration,
+		RunLog:            runs.NewFileAppender(ar.RunPath, o.logger),
+	})
+
+	o.mu.Lock()
+	// Only install as the active runner when nothing else is already
+	// driving execution. Paranoid check: Run() hasn't started yet on
+	// any other path by the time replayRunLogsOnStartup runs.
+	if o.activePlanRunner == nil {
+		o.activePlanRunner = pr
+	}
+	o.mu.Unlock()
+
+	// Synthesize a stable thread ID so broadcasts from the resumed
+	// runner land somewhere identifiable; channel.Manager will fan
+	// out to any connected sessions on the plan's thread.
+	threadID := fmt.Sprintf("resume:%s", snap.PlanID)
+
+	go func() {
+		err := pr.ResumeAtGate(ctx, plan, perStep, openGate, threadID)
+		if err != nil {
+			o.logger.Warn("startup replay: resume finished with error", "run", ar.RunPath, "error", err)
+		}
+		o.mu.Lock()
+		if o.activePlanRunner == pr {
+			o.activePlanRunner = nil
+		}
+		o.mu.Unlock()
+	}()
+	o.logger.Info("startup replay: reconstructed gate-parked runner",
+		"run", ar.RunPath, "plan_id", snap.PlanID, "gate_id", openGate.ID)
+}
+
+// supersedePreviousRun enforces the "one active run per plan"
+// invariant. For every run log in the plan's .runs/ directory whose
+// tail event is non-terminal, append a run_aborted entry with
+// reason="superseded by new run" so ListActive stops surfacing it and
+// Prism's "Active Chains" slot removes the stale card. Errors are
+// logged and swallowed; a missing directory is the clean-first-run
+// case and is not treated as an error.
+func (o *Orchestrator) supersedePreviousRun(planPath string) {
+	runsDir := runs.RunsDir(planPath)
+	entries, err := os.ReadDir(runsDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			o.logger.Warn("execute: scan prior runs", "plan", planPath, "error", err)
+		}
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		runPath := filepath.Join(runsDir, e.Name())
+		events, err := runs.Replay(runPath)
+		if err != nil || len(events) == 0 {
+			continue
+		}
+		if events[len(events)-1].IsTerminal() {
+			continue
+		}
+		if err := runs.Append(runPath, runs.RunAbortedEvent("superseded by new run")); err != nil {
+			o.logger.Warn("execute: supersede prior run", "run", runPath, "error", err)
+			continue
+		}
+		o.logger.Info("execute: prior run superseded", "run", runPath)
+	}
 }
 
 // guestsDir returns the path to the project's agents/ directory.
