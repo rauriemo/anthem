@@ -17,15 +17,15 @@ import (
 // per-step status, per-step artifacts, and any open gate or failure
 // so the Prism executionStore can hydrate in a single atomic call.
 type Snapshot struct {
-	PlanID            string                `json:"plan_id"`
-	CompileGeneration int                   `json:"compile_generation"`
-	Title             string                `json:"title"`
-	Description       string                `json:"description,omitempty"`
-	RequiredProfiles  []string              `json:"required_profiles,omitempty"`
-	ProjectSlug       string                `json:"project_slug,omitempty"`
-	StartedAt         time.Time             `json:"started_at"`
+	PlanID            string    `json:"plan_id"`
+	CompileGeneration int       `json:"compile_generation"`
+	Title             string    `json:"title"`
+	Description       string    `json:"description,omitempty"`
+	RequiredProfiles  []string  `json:"required_profiles,omitempty"`
+	ProjectSlug       string    `json:"project_slug,omitempty"`
+	StartedAt         time.Time `json:"started_at"`
 
-	Steps     []SnapshotStep     `json:"steps"`
+	Steps     []SnapshotStep                    `json:"steps"`
 	Artifacts map[string][]execute.StepArtifact `json:"-"`
 
 	OpenGate    *SnapshotGate    `json:"open_gate,omitempty"`

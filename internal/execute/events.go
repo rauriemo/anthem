@@ -27,7 +27,7 @@ const (
 	// without any browser-side persistence. The payload is produced by
 	// plans/runs.Snapshot; see plans/runs/snapshot_event.go for the
 	// builder that translates it to a channel.OutgoingMessage.
-	EventPlanSnapshot     = "execution.plan_snapshot"
+	EventPlanSnapshot = "execution.plan_snapshot"
 )
 
 // planLoadedPayload is the wire shape Prism decodes on

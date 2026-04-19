@@ -32,15 +32,15 @@ import (
 type EventType string
 
 const (
-	EventRunStarted     EventType = "run_started"
-	EventStepQueued     EventType = "step_queued"
-	EventStepStarted    EventType = "step_started"
-	EventStepCompleted  EventType = "step_completed"
-	EventStepFailed     EventType = "step_failed"
-	EventGateOpened     EventType = "gate_opened"
-	EventGateResolved   EventType = "gate_resolved"
-	EventRunCompleted   EventType = "run_completed"
-	EventRunAborted     EventType = "run_aborted"
+	EventRunStarted    EventType = "run_started"
+	EventStepQueued    EventType = "step_queued"
+	EventStepStarted   EventType = "step_started"
+	EventStepCompleted EventType = "step_completed"
+	EventStepFailed    EventType = "step_failed"
+	EventGateOpened    EventType = "gate_opened"
+	EventGateResolved  EventType = "gate_resolved"
+	EventRunCompleted  EventType = "run_completed"
+	EventRunAborted    EventType = "run_aborted"
 )
 
 // Event is a single line in a run log. Only the fields relevant to a
@@ -54,25 +54,25 @@ type Event struct {
 	Timestamp time.Time `json:"ts"`
 
 	// run_started
-	PlanID            string `json:"plan_id,omitempty"`
-	CompileGeneration int    `json:"compile_generation,omitempty"`
-	Title             string `json:"title,omitempty"`
-	Description       string `json:"description,omitempty"`
+	PlanID            string   `json:"plan_id,omitempty"`
+	CompileGeneration int      `json:"compile_generation,omitempty"`
+	Title             string   `json:"title,omitempty"`
+	Description       string   `json:"description,omitempty"`
 	RequiredProfiles  []string `json:"required_profiles,omitempty"`
-	ProjectSlug       string `json:"project_slug,omitempty"`
+	ProjectSlug       string   `json:"project_slug,omitempty"`
 	// PlanSteps/PlanGates capture the compiled plan shape at run start so
 	// a replay can reconstruct the step list and gate attachments without
 	// reading the compiled sidecar. This makes Snapshot self-contained
 	// and resilient to subsequent recompiles.
-	PlanSteps []execute.PlanStep    `json:"plan_steps,omitempty"`
+	PlanSteps []execute.PlanStep     `json:"plan_steps,omitempty"`
 	PlanGates []execute.ApprovalGate `json:"plan_gates,omitempty"`
 
 	// step_* + gate_*
-	StepID    string                `json:"step_id,omitempty"`
-	AgentID   string                `json:"agent_id,omitempty"`
-	AgentName string                `json:"agent_name,omitempty"`
+	StepID    string                 `json:"step_id,omitempty"`
+	AgentID   string                 `json:"agent_id,omitempty"`
+	AgentName string                 `json:"agent_name,omitempty"`
 	Artifacts []execute.StepArtifact `json:"artifacts,omitempty"`
-	Error     string                `json:"error,omitempty"`
+	Error     string                 `json:"error,omitempty"`
 
 	// gate_opened
 	GateID         string             `json:"gate_id,omitempty"`
