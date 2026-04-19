@@ -27,11 +27,10 @@ func TestFilterArtifactsByGlobs_EmptyGlobsReturnsUnchanged(t *testing.T) {
 
 // TestFilterArtifactsByGlobs_DropsNonImageInImageGallery is the real-world
 // motivating case: Miyazaki's review.kind:image-gallery declares
-// artifact_globs: ["Assets/_Project/Art/Generated/**/*.png",
-//                  "Assets/_Project/Art/Generated/**/*.jpg"].
-// When a step also produces a .md design doc (character reference), the
-// doc must not reach ImageGalleryView or it renders as a broken <img>
-// tile.
+// artifact_globs of "Assets/_Project/Art/Generated/**/*.png" and the
+// equivalent *.jpg pattern. When a step also produces a .md design doc
+// (character reference), the doc must not reach ImageGalleryView or it
+// renders as a broken <img> tile.
 func TestFilterArtifactsByGlobs_DropsNonImageInImageGallery(t *testing.T) {
 	globs := []string{
 		"Assets/_Project/Art/Generated/**/*.png",
