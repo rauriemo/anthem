@@ -118,7 +118,7 @@ Anthem's competitive gap analysis identified 11 improvements across three tiers.
   - After every orchestrator consult: record trace with type "orchestrator".
   - After every executor dispatch completion: record trace with type "executor".
   - After every reviewer run: record trace with type "reviewer".
-  - After every lean message: record trace with type "lean".
+  - After every Chat-mode (legacy "lean") orchestrator turn: record trace with type "chat". Historical rows may still carry "lean"; consumers must treat both as equivalent for reporting.
   - Add query methods: `TracesForTask`, `TracesForWave`, `RecentTraces`, `TraceStats`.
   - Update tests.
 

@@ -149,7 +149,7 @@ Both must be on PATH when Anthem starts. The post-process pipeline degrades grac
 | Command | Description |
 |---------|-------------|
 | `anthem init` | Create starter `WORKFLOW.md`, `agents/orchestrator.md`, `.context/`, and bootstrap `~/.anthem/` |
-| `anthem run` | Start the runtime (Chat mode by default; Loop starts if enabled in config) |
+| `anthem run` | Start the runtime. Default mode is **Chat** without a tracker and **Loop** when `WORKFLOW.md` declares `tracker:`. Explicit `[system:<mode>]` tags override per-message. |
 | `anthem run -w path/to/WORKFLOW.md` | Use a specific workflow file |
 | `anthem run --log-level debug` | Verbose logging |
 | `anthem validate` | Check `WORKFLOW.md` syntax without starting |

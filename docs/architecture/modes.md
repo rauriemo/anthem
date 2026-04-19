@@ -30,9 +30,11 @@ Modes are selected explicitly. The inbound `req` frame carries the raw text; the
 | `[system:plan:new]` | Plan (archive the current draft and start a fresh one; stripped before processing) |
 | `[system:execute]` | Execute (compile + dispatch a plan) |
 | `[system:loop]` | Loop (start the configured execution backend) |
-| *(no tag)* | Chat (default) |
+| *(no tag)* | `Orchestrator.CurrentMode` (Chat by default; Loop when a tracker is configured in `WORKFLOW.md`; otherwise whichever mode the user last switched to) |
 
-Tag detection is strict: `parseControlTags` only recognises `[system:…]` / `[model:…]` at the leading prefix of the message, ignoring tag-literals that appear inside backticks, fenced code blocks, or the middle of prose. Prism's chat-mode dropdown translates its UI selection into the right tag before sending. Legacy tags from the pre-refactor codebase (`[system:fast]`, `[system:agent]`, `[system:build]`, `[system:status]`) are accepted at the prefix and remapped for backward compatibility.
+`CurrentMode` is initialized in `NewOrchestrator`: Chat when `cfg.Tracker.Kind` is empty, Loop when a tracker is declared. Explicit tags still override it on a per-message basis.
+
+Tag detection is strict: `parseControlTags` only recognises `[system:…]` / `[model:…]` at the leading prefix of the message, ignoring tag-literals that appear inside backticks, fenced code blocks, or the middle of prose. Prism's chat-mode dropdown translates its UI selection into the right tag before sending. Legacy tags from the pre-refactor codebase (`[system:fast]`, `[system:build]`, `[system:status]`) are accepted at the prefix and remapped for backward compatibility.
 
 ## Chat mode
 
@@ -206,7 +208,7 @@ Where `<action>` is `approve`, `revise`, or `abort`. The `compileGeneration` pre
 | `execution.gate_opened` | Gate active, waiting | `{gate_id, prompt, artifacts, allowed_actions}` |
 | `execution.gate_resolved` | Human resolved gate | `{gate_id, resolution, feedback}` |
 | `execution.plan_completed` | Every step completed | `{title, total_steps, completed_steps}` |
-| `execution.plan_aborted` | Plan aborted | `{title, total_steps, completed_steps}` |
+| `execution.plan_aborted` | Plan aborted | `{title, total_steps, completed_steps, reason}` (`reason` omitted when empty) |
 
 Payloads are JSON-encoded in the `OutgoingMessage.Text` field; the `EventType` field carries the event name. Prism routes by `EventType`.
 

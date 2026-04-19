@@ -119,9 +119,13 @@ type GuestAgent struct {
 	// docs/architecture/review-kinds.md.
 	Review *ReviewSpec `json:"review,omitempty"`
 	// ReviewDiagnostics surfaces authoring-time problems found by
-	// ValidateReviewSpec. Logged at guest load time and forwarded to Prism
-	// via the guest-capability channel so a dev-mode overlay can render
-	// badges. Empty slice = clean.
+	// ValidateReviewSpec. These are logged at guest load time and persisted
+	// in the project's `.agents-index.json` cache (the `review_diagnostics`
+	// field on each cached entry) so `anthem validate-agents` and other
+	// tooling can surface them. They are NOT forwarded to Prism over the
+	// guest-roster wire; `internal/channel/prism/adapter.go`'s
+	// `guestAgentInfo` intentionally omits them to keep the live roster
+	// payload compact. Empty slice = clean.
 	ReviewDiagnostics []ReviewDiagnostic `json:"review_diagnostics,omitempty"`
 }
 

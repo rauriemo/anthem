@@ -49,7 +49,7 @@ Every `review:` block is passed through `ValidateReviewSpec` at `ScanDirectory` 
 | Severity | Effect | Emitted for |
 |---|---|---|
 | `error` | Spec dropped, guest still loads with `Review=nil` | missing kind, unknown kind (no extension match), missing panel `type`, unknown panel `type` |
-| `warning` | Spec kept, logged, surfaced in Prism dev overlay | invalid glob, redundant `partial_revise`, unknown `notification_template` variable, persona-shaped core kind ID |
+| `warning` | Spec kept, logged, and persisted in `.agents-index.json` for tooling (`anthem validate-agents`, lint passes) | invalid glob, redundant `partial_revise`, unknown `notification_template` variable, persona-shaped core kind ID |
 | `info` | Spec kept, advisory only | extension-kind usage (portability reminder) |
 
 The full diagnostic code catalog is in [`ValidateReviewSpec`](../../internal/guests/review.go).
@@ -184,7 +184,7 @@ GitHub Actions snippet:
 
 ## Pinned diagnostic codes
 
-For stability across the Anthem / Prism boundary, the `code` field on `ReviewDiagnostic` is pinned. Every code is of the form `review.<area>.<problem>`:
+For stability across consumers (`anthem validate-agents`, `.agents-index.json` readers, future Prism surfacing), the `code` field on `ReviewDiagnostic` is pinned. Every code is of the form `review.<area>.<problem>`:
 
 - `review.kind.missing`
 - `review.kind.unknown`
@@ -196,7 +196,7 @@ For stability across the Anthem / Prism boundary, the `code` field on `ReviewDia
 - `review.partial_revise.redundant`
 - `review.notification_template.unknown_var`
 
-Prism's diagnostic overlay groups by code; tests pin the string.
+Diagnostics are logged at guest-load time and persisted in each project's `.agents-index.json` so tooling can surface them. They are **not** forwarded on the live Prism guest-roster wire (`internal/channel/prism/adapter.go`'s `guestAgentInfo` intentionally omits them). Future dev overlays are expected to fetch from the index file or a dedicated diagnostics endpoint; the code strings are stable for that use.
 
 ---
 

@@ -49,7 +49,7 @@ type WaveSummary struct {
 
 type TraceRecord struct {
 	Timestamp       time.Time
-	TraceType       string // "orchestrator", "executor", "reviewer", "lean"
+	TraceType       string // "orchestrator", "executor", "reviewer", "chat" (Chat-mode orchestrator turns; historical rows may still be "lean")
 	TaskID          *string
 	SessionID       *string
 	WaveID          *string

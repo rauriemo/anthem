@@ -3121,7 +3121,7 @@ func (o *Orchestrator) handleLeanMessage(ctx context.Context, msg channel.Incomi
 	}
 
 	o.sendFollowUp(ctx, msg, strings.TrimRight(cleanText, "\n"))
-	o.recordTrace(ctx, "lean", "", result, promptText)
+	o.recordTrace(ctx, "chat", "", result, promptText)
 	var costPtr *float64
 	if result != nil && result.CostUSD > 0 {
 		costPtr = &result.CostUSD

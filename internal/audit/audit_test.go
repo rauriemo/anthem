@@ -298,7 +298,7 @@ func TestRecentTraces(t *testing.T) {
 	for i := range 5 {
 		err := logger.RecordTrace(ctx, TraceRecord{
 			Timestamp: time.Date(2026, 1, 1, 0, 0, i, 0, time.UTC),
-			TraceType: "lean",
+			TraceType: "chat",
 			TokensIn:  100,
 		})
 		if err != nil {
@@ -402,7 +402,7 @@ func TestGetTraceStats(t *testing.T) {
 		{Timestamp: time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC), TraceType: "executor", CostUSD: 0.10, TokensIn: 500, TokensOut: 200, DurationMS: 3000},
 		{Timestamp: time.Date(2026, 1, 1, 10, 1, 0, 0, time.UTC), TraceType: "executor", CostUSD: 0.20, TokensIn: 600, TokensOut: 300, DurationMS: 5000},
 		{Timestamp: time.Date(2026, 1, 1, 10, 2, 0, 0, time.UTC), TraceType: "reviewer", CostUSD: 0.03, TokensIn: 100, TokensOut: 50, DurationMS: 1000},
-		{Timestamp: time.Date(2026, 1, 1, 10, 3, 0, 0, time.UTC), TraceType: "lean", CostUSD: 0.01, TokensIn: 50, TokensOut: 20, DurationMS: 500},
+		{Timestamp: time.Date(2026, 1, 1, 10, 3, 0, 0, time.UTC), TraceType: "chat", CostUSD: 0.01, TokensIn: 50, TokensOut: 20, DurationMS: 500},
 	}
 	for i, tr := range traces {
 		if err := logger.RecordTrace(ctx, tr); err != nil {
@@ -446,9 +446,9 @@ func TestGetTraceStats(t *testing.T) {
 		t.Errorf("reviewer count = %d, want 1", rev.Count)
 	}
 
-	lean := byType["lean"]
-	if lean.Count != 1 {
-		t.Errorf("lean count = %d, want 1", lean.Count)
+	chat := byType["chat"]
+	if chat.Count != 1 {
+		t.Errorf("chat count = %d, want 1", chat.Count)
 	}
 }
 
