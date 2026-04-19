@@ -893,17 +893,29 @@ Your output is a SINGLE JSON object — no prose, no fenced block, no commentary
 You will receive:
 - The canonical markdown plan body under "## Markdown Plan".
 - The active guest roster under "## Active Guests" as a JSON list of objects
-  with "id" and optional "profile" / "description" fields. These are the ONLY
-  valid values for step.agent_id.
+  with "id", "name", "profile", and "description" fields. "id" is the
+  canonical handle (filename slug). "name" is the display string the plan
+  markdown often uses ("Tower", "Miyazaki"). "profile" is the guest's
+  declared role ("orchestrator", "artist").
 - (Optional) "## Prior Compilation" carrying the last ExecutionPlan JSON we
   produced, plus a "## Revise Feedback" section with the user's edit request.
 
 ### Hard rules
 
-1. Every step.agent_id MUST appear in the active guest roster. If the markdown
-   requests a role that no active guest can fulfill, emit a top-level
-   "error" field naming the missing profile and nothing else. Example:
-   {"error": "missing profile: animator"}.
+1. Every step.agent_id MUST equal one of the listed "id" values — not a
+   "name", not a "profile". The plan markdown may refer to a guest by any
+   of the three (e.g. "Tower scaffolds the context", "Profile: artist",
+   "orchestrator reviews"). In every case, resolve the reference down to
+   that guest's "id" before emitting step.agent_id. Concrete mapping using
+   the sample roster:
+     {"id":"orchestrator","name":"Tower","profile":"orchestrator"}
+     {"id":"miyazaki","name":"Miyazaki","profile":"artist"}
+     {"id":"walt","name":"Walt","profile":"animator"}
+   A plan line "Tower drafts the outline" emits agent_id "orchestrator".
+   A plan line "Profile: artist" emits agent_id "miyazaki". Only when the
+   markdown requests a role, name, OR id that no guest in the roster can
+   fulfill should you emit a top-level "error" field naming the missing
+   token and nothing else. Example: {"error": "missing profile: animator"}.
 2. When "## Prior Compilation" is provided, REUSE the existing step.id values
    and gate.id values for any semantically matching step/gate. Generate new
    ids only for newly added steps/gates. This is what lets Prism preserve
@@ -926,8 +938,8 @@ You will receive:
 
 {
   "steps": [
-    {"id": "s1", "agent_id": "artist", "description": "…", "depends_on": ""},
-    {"id": "s2", "agent_id": "animator", "description": "…", "depends_on": "s1"}
+    {"id": "s1", "agent_id": "miyazaki", "description": "…", "depends_on": ""},
+    {"id": "s2", "agent_id": "walt", "description": "…", "depends_on": "s1"}
   ],
   "gates": [
     {"id": "g1", "after_step": "s1", "prompt": "Review the generated sprites"}
@@ -938,13 +950,23 @@ You will receive:
   }
 }
 
+Note: agent_id values above are guest "id" strings, NOT "profile" strings.
+"artist" or "animator" would be wrong — those are profile values, not ids.
+
 Emit ONLY this object. Do not include backticks. Do not include commentary.`
 
 // GuestProfile is the shape the orchestrator sees when compiling a plan: the
-// active guest roster at compile time. It is intentionally lean — description
-// and profile are hints, id is the canonical handle.
+// active guest roster at compile time. id is the canonical handle Validate()
+// checks step.agent_id against. name is the display string the plan markdown
+// and the user are likely to reference ("Tower", "Miyazaki"). profile is the
+// guest's declared role ("orchestrator", "artist"). The LLM is told in
+// compilePromptSuffix to accept any of these three as a reference surface
+// and to resolve them down to id when emitting step.agent_id. If the LLM
+// still emits a name/profile literal, the server-side resolveGuestAlias
+// helper in execcompile.go rewrites it before the plan reaches Validate().
 type GuestProfile struct {
 	ID          string `json:"id"`
+	Name        string `json:"name,omitempty"`
 	Profile     string `json:"profile,omitempty"`
 	Description string `json:"description,omitempty"`
 }

@@ -2861,6 +2861,7 @@ func (o *Orchestrator) handleExecuteMessageWithPlan(
 		PlanID:            planID,
 		CompileGeneration: compileGen,
 		RunLog:            runLog,
+		OrchestratorAgent: o.orchestratorGuestAgent(),
 	})
 
 	o.mu.Lock()
@@ -2885,24 +2886,28 @@ func (o *Orchestrator) handleExecuteMessageWithPlan(
 	}()
 }
 
-// HydrationEventsForConnect returns the set of OutgoingMessages the
-// Prism adapter should send to a newly-authenticated client so the
-// client can hydrate its Execute view and Active Chains list without
-// any browser-side persistence. The orchestrator scans every project
-// directory under ~/.anthem/plans/ for non-terminal run logs,
-// reduces each to a Snapshot, and emits one execution.plan_snapshot
-// per active run.
+// HistoryEventsForConnect returns the set of OutgoingMessages the
+// Prism adapter should send to a newly-authenticated client (or to a
+// client that explicitly asks to re-hydrate via a {"type":"hydrate"}
+// frame) so the client can populate its scrollable Execute history
+// without any browser-side persistence. The orchestrator scans every
+// project directory under ~/.anthem/plans/ for run logs (active
+// AND terminal), reduces each to a Snapshot, and emits a single
+// execution.run_history message carrying the newest-first list --
+// capped at runs.DefaultHistoryLimit per plan so the wire footprint
+// stays bounded even with years of accumulated runs on disk.
 //
-// Called by the adapter's on-connect hook (wired in cmd/anthem/main.go).
-// Safe to call concurrently: the file scan is read-only and every
-// returned message is a fresh copy, so two clients connecting at the
-// same time each receive their own snapshot stream.
+// Called by the adapter's on-connect hook and its inbound hydrate
+// handler (see cmd/anthem/main.go and channel/prism/adapter.go). Safe
+// to call concurrently: the file scan is read-only and every returned
+// message is a fresh copy, so two clients connecting at the same time
+// each receive their own history stream.
 //
 // On error (missing root, unreadable run log) the orchestrator logs
 // and continues: a hydration failure must not break the WebSocket
 // handshake. In the worst case the client starts with an empty
 // executionStore and the user re-dispatches manually.
-func (o *Orchestrator) HydrationEventsForConnect(ctx context.Context) []channel.OutgoingMessage {
+func (o *Orchestrator) HistoryEventsForConnect(ctx context.Context) []channel.OutgoingMessage {
 	if o.planStore == nil {
 		return nil
 	}
@@ -2914,42 +2919,40 @@ func (o *Orchestrator) HydrationEventsForConnect(ctx context.Context) []channel.
 		}
 		return nil
 	}
-	var msgs []channel.OutgoingMessage
+	var all []runs.Snapshot
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		projectDir := filepath.Join(root, e.Name())
-		active, err := runs.ListActive(projectDir)
+		history, err := runs.ListAll(projectDir, runs.DefaultHistoryLimit)
 		if err != nil {
-			o.logger.Warn("hydrate: list active", "dir", projectDir, "error", err)
+			o.logger.Warn("hydrate: list all", "dir", projectDir, "error", err)
 			continue
 		}
-		// Same "one active run per plan" dedupe the startup replay
-		// uses: keep the most recent non-terminal per plan path so a
-		// client with two crashed logs on the same plan doesn't see
-		// two live-looking chains.
-		mostRecent := make(map[string]runs.ActiveRun)
-		for _, ar := range active {
-			cur, ok := mostRecent[ar.PlanPath]
-			if !ok || ar.StartedAt.After(cur.StartedAt) {
-				mostRecent[ar.PlanPath] = ar
-			}
-		}
-		for _, ar := range mostRecent {
-			snap, err := runs.ReplayToSnapshot(ar.RunPath)
-			if err != nil {
-				o.logger.Warn("hydrate: snapshot", "run", ar.RunPath, "error", err)
-				continue
-			}
-			if snap.Terminal {
-				continue
-			}
-			threadID := fmt.Sprintf("resume:%s", snap.PlanID)
-			msgs = append(msgs, runs.PlanSnapshotEvent(snap, threadID))
+		for _, entry := range history {
+			all = append(all, entry.Snapshot)
 		}
 	}
-	return msgs
+	// Order the combined list newest-first so Prism's
+	// executionStore can index runs directly without a secondary
+	// sort. ListAll already sorted per-project; re-sort the
+	// cross-project concatenation.
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].StartedAt.After(all[j].StartedAt)
+	})
+	if len(all) == 0 {
+		return nil
+	}
+	return []channel.OutgoingMessage{runs.RunHistoryEvent(all, "execute:history")}
+}
+
+// HydrationEventsForConnect is retained as a thin backwards-compatible
+// wrapper over HistoryEventsForConnect so older callers (tests, legacy
+// main.go) keep working during the transition. New code should wire
+// HistoryEventsForConnect directly.
+func (o *Orchestrator) HydrationEventsForConnect(ctx context.Context) []channel.OutgoingMessage {
+	return o.HistoryEventsForConnect(ctx)
 }
 
 // replayRunLogsOnStartup scans every project's plan directory under
@@ -3125,6 +3128,7 @@ func (o *Orchestrator) reconstructGateParkedRunner(ctx context.Context, ar runs.
 		PlanID:            snap.PlanID,
 		CompileGeneration: snap.CompileGeneration,
 		RunLog:            runs.NewFileAppender(ar.RunPath, o.logger),
+		OrchestratorAgent: o.orchestratorGuestAgent(),
 	})
 
 	o.mu.Lock()
@@ -3195,6 +3199,29 @@ func (o *Orchestrator) supersedePreviousRun(planPath string) {
 // guestsDir returns the path to the project's agents/ directory.
 func (o *Orchestrator) guestsDir() string {
 	return filepath.Join(o.projectRoot(), "agents")
+}
+
+// orchestratorGuestAgent loads the orchestrator's frontmatter fresh from
+// agents/orchestrator.md (or, as a fallback, any .md with role:
+// orchestrator) so PlanRunner can dispatch orchestrator steps through the
+// same persona, model, allowed tools, and MCP config that activeGuestProfiles
+// advertises to the compile LLM. Returns nil when no orchestrator file
+// exists or parse fails — callers treat nil as "no dispatch override" and
+// fall through to the PlanRunner's baseline defaults, matching how guest
+// steps behave today when their agent is missing from the guest index.
+func (o *Orchestrator) orchestratorGuestAgent() *guests.GuestAgent {
+	agent, err := guests.ReadOrchestratorAgent(o.guestsDir())
+	if err != nil {
+		o.logger.Warn("failed to read orchestrator frontmatter for dispatch",
+			"agents_dir", o.guestsDir(),
+			"error", err,
+		)
+		return nil
+	}
+	if agent.ID == "" && agent.Name == "" && agent.Role == "" {
+		return nil
+	}
+	return &agent
 }
 
 var modelTagRe = regexp.MustCompile(`\[model:([^\]]+)\]`)

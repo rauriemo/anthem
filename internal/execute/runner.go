@@ -52,6 +52,17 @@ type RunnerOpts struct {
 	// used so the runner remains drop-in compatible with tests and
 	// legacy paths that have no plan identity.
 	RunLog RunEventAppender
+	// OrchestratorAgent carries the parsed frontmatter of
+	// agents/orchestrator.md so PlanRunner can dispatch steps whose
+	// AgentID is guests.OrchestratorGuestID through the orchestrator's
+	// own persona, model, allowed tools, and MCP config. The guest
+	// scan intentionally excludes orchestrator.md from GuestIndex, so
+	// without this field an orchestrator step would fall through the
+	// map lookup in buildRunOpts and run with bare defaults. May be
+	// nil for dispatch paths that never produce orchestrator steps
+	// (legacy inline [execute:plan] fixtures, tests that don't seed
+	// an agents directory).
+	OrchestratorAgent *guests.GuestAgent
 }
 
 type gateMsg struct {
@@ -161,6 +172,7 @@ func (r *PlanRunner) driveSteps(ctx context.Context, plan *ExecutionPlan, thread
 			if done {
 				r.opts.RunLog.AppendRunCompleted()
 				r.broadcast(ctx, PlanCompletedEvent(plan, threadID))
+				r.broadcast(ctx, RunArchivedEvent(r.opts.PlanID, r.opts.CompileGeneration, "", threadID))
 				return nil
 			}
 			// No step is ready but plan isn't done -- blocked by deps or all failed
@@ -227,6 +239,7 @@ func (r *PlanRunner) ResumeAtGate(
 			r.opts.RunLog.AppendRunAborted("aborted at gate")
 			r.deactivateStepAgent(ctx, step, fmt.Sprintf("step %s aborted", step.ID), threadID)
 			r.broadcast(ctx, PlanAbortedEvent(r.plan, "aborted at gate", threadID))
+			r.broadcast(ctx, RunArchivedEvent(r.opts.PlanID, r.opts.CompileGeneration, "aborted at gate", threadID))
 			return fmt.Errorf("plan aborted at gate %q", openGate.ID)
 		}
 	}
@@ -372,6 +385,7 @@ func (r *PlanRunner) handleStepFailure(ctx context.Context, step *PlanStep, thre
 			r.opts.RunLog.AppendRunAborted("step failure aborted by user")
 			r.deactivateStepAgent(ctx, step, fmt.Sprintf("step %s aborted", step.ID), threadID)
 			r.broadcast(ctx, PlanAbortedEvent(r.plan, "step failure aborted by user", threadID))
+			r.broadcast(ctx, RunArchivedEvent(r.opts.PlanID, r.opts.CompileGeneration, "step failure aborted by user", threadID))
 			return fmt.Errorf("plan aborted at step %q", step.ID)
 		}
 	}
@@ -469,6 +483,7 @@ func (r *PlanRunner) handleGate(ctx context.Context, gate *ApprovalGate, step *P
 			r.opts.RunLog.AppendRunAborted("aborted at gate")
 			r.deactivateStepAgent(ctx, step, fmt.Sprintf("step %s aborted", step.ID), threadID)
 			r.broadcast(ctx, PlanAbortedEvent(r.plan, "aborted at gate", threadID))
+			r.broadcast(ctx, RunArchivedEvent(r.opts.PlanID, r.opts.CompileGeneration, "aborted at gate", threadID))
 			return fmt.Errorf("plan aborted at gate %q", gate.ID)
 		}
 	}
@@ -714,7 +729,23 @@ func (r *PlanRunner) buildRunOpts(step *PlanStep, prompt string, threadID string
 	var httpTools map[string]guests.HTTPToolConfig
 	var agent guests.GuestAgent
 
-	if r.opts.GuestIndex != nil {
+	// Orchestrator branch: the guest scan excludes orchestrator.md from
+	// GuestIndex, so a step routed to guests.OrchestratorGuestID can't be
+	// resolved through the normal map lookup. Route through the injected
+	// OrchestratorAgent instead, which carries the orchestrator's model,
+	// max_turns, allowed tools, and MCP/HTTP tool config from
+	// agents/orchestrator.md frontmatter. Persona loading below
+	// (via LoadPersona keyed on guestID) already resolves
+	// agents/orchestrator.md by slug, so no special case needed there.
+	if guestID == guests.OrchestratorGuestID && r.opts.OrchestratorAgent != nil {
+		agent = *r.opts.OrchestratorAgent
+		if agent.Model != "" {
+			model = agent.Model
+		}
+		allowedTools = agent.AllowedTools
+		guestMCPServers = agent.MCPServers
+		httpTools = agent.HTTPTools
+	} else if r.opts.GuestIndex != nil {
 		if ag, ok := r.opts.GuestIndex.Agents[guestID]; ok {
 			agent = ag
 			if ag.Model != "" {

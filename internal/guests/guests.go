@@ -298,6 +298,62 @@ func LoadPersona(dir string, slug string) (string, error) {
 	return body, nil
 }
 
+// OrchestratorGuestID is the canonical id used to refer to the orchestrator
+// agent in execution plans and dispatch code paths. ScanDirectory
+// intentionally excludes orchestrator.md from the GuestIndex (the
+// orchestrator lives outside the guest lifecycle), so any code that needs to
+// treat the orchestrator as a first-class participant — compile roster,
+// plan validation, PlanRunner step dispatch — should key on this constant
+// instead of hard-coding the string "orchestrator" or scanning for role:
+// orchestrator on its own.
+const OrchestratorGuestID = "orchestrator"
+
+// ReadOrchestratorAgent returns the parsed frontmatter of the orchestrator
+// agent markdown, which ScanDirectory intentionally leaves out of the
+// GuestIndex. It prefers agents/orchestrator.md and falls back to scanning
+// for any agent with role: orchestrator (e.g. agents/tower.md). When no
+// orchestrator definition is found it returns a zero GuestAgent with a nil
+// error so callers can layer safe defaults on top without an error branch —
+// the orchestrator's identity is allowed to be absent on fresh projects.
+func ReadOrchestratorAgent(agentsDir string) (GuestAgent, error) {
+	data, err := os.ReadFile(filepath.Join(agentsDir, "orchestrator.md"))
+	if err == nil {
+		agent, perr := ParseFrontmatter(data)
+		if perr != nil {
+			return GuestAgent{}, fmt.Errorf("parsing orchestrator.md frontmatter: %w", perr)
+		}
+		if agent.ID == "" {
+			agent.ID = OrchestratorGuestID
+		}
+		return agent, nil
+	}
+
+	entries, derr := os.ReadDir(agentsDir)
+	if derr != nil {
+		return GuestAgent{}, nil
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		fdata, ferr := os.ReadFile(filepath.Join(agentsDir, entry.Name()))
+		if ferr != nil {
+			continue
+		}
+		agent, perr := ParseFrontmatter(fdata)
+		if perr != nil {
+			continue
+		}
+		if agent.Role == OrchestratorGuestID {
+			if agent.ID == "" {
+				agent.ID = OrchestratorGuestID
+			}
+			return agent, nil
+		}
+	}
+	return GuestAgent{}, nil
+}
+
 // LoadOrchestratorPersona loads agents/orchestrator.md body, returning empty
 // string if the file doesn't exist. Separate from ScanDirectory so the guest
 // index stays clean.

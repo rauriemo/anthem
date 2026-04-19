@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"regexp"
 	"sort"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/execute"
+	"github.com/rauriemo/anthem/internal/guests"
 	"github.com/rauriemo/anthem/internal/plans"
 )
 
@@ -223,6 +225,46 @@ func (o *Orchestrator) handleExecuteMarkdown(ctx context.Context, msg channel.In
 		o.recordAudit(ctx, "channel.execute_compile_failed", "", strPtr("execute"))
 		return
 	}
+	// MissingProfile alias recovery: when the compile LLM bails with
+	// "missing profile: X" but X actually resolves to one of the active
+	// guests via its name or profile (common when the plan markdown
+	// refers to a guest by display name like "Tower" instead of its id
+	// "orchestrator"), retry the compile once with an explicit
+	// Feedback hint naming the resolved id. This keeps plan-authoring
+	// agnostic about whether the user wrote "Tower", "orchestrator", or
+	// the agent's role in their markdown. A single retry is enough —
+	// if the second pass still bails, surface the original error so
+	// the user disambiguates explicitly.
+	if compileResult.MissingProfile != "" {
+		resolved := resolveGuestAlias(compileResult.MissingProfile, guests)
+		if resolved != "" {
+			o.logger.Info("execute: resolved missing profile alias, retrying compile",
+				"missing", compileResult.MissingProfile,
+				"resolved_id", resolved,
+			)
+			hint := fmt.Sprintf(
+				"The plan referenced %q which matches an active guest with id %q. "+
+					"Emit agent_id %q for every step that referenced %q.",
+				compileResult.MissingProfile, resolved, resolved, compileResult.MissingProfile,
+			)
+			retryFeedback := hint
+			if feedback != "" {
+				retryFeedback = feedback + "\n\n" + hint
+			}
+			compileResult, err = o.orchAgent.ConsultCompilePlan(ctx, CompilePlanInput{
+				MarkdownPlan:     markdown,
+				ActiveGuests:     guests,
+				PriorCompilation: priorBody,
+				Feedback:         retryFeedback,
+			})
+			if err != nil {
+				o.logger.Warn("execute: compile retry after alias resolution failed", "error", err)
+				o.sendFollowUp(ctx, msg, fmt.Sprintf("Failed to compile plan: %v", err))
+				o.recordAudit(ctx, "channel.execute_compile_failed", "", strPtr("execute"))
+				return
+			}
+		}
+	}
 	if compileResult.MissingProfile != "" {
 		o.sendFollowUp(ctx, msg,
 			fmt.Sprintf("Cannot compile plan: no active guest can fulfill profile %q. "+
@@ -233,10 +275,19 @@ func (o *Orchestrator) handleExecuteMarkdown(ctx context.Context, msg channel.In
 	compiled := compileResult.Plan
 
 	guestIDs := make([]string, 0, len(guests))
-	requiredProfiles := requiredProfilesFromPlan(compiled)
 	for _, g := range guests {
 		guestIDs = append(guestIDs, g.ID)
 	}
+	// Validate alias recovery: even after the retry above (or on a
+	// first-pass success) the LLM may still emit a step.agent_id that
+	// happens to match a guest name or profile instead of the guest id
+	// — e.g. a step.agent_id of "Tower" when the guest id is
+	// "orchestrator". Walk the steps once and rewrite any such unique
+	// alias to its id before Validate sees them. Unknown tokens that
+	// don't resolve are left in place so Validate surfaces a clear
+	// error pointing at the real offender.
+	rewriteStepAliases(compiled, guests, o.logger)
+	requiredProfiles := requiredProfilesFromPlan(compiled)
 	if err := compiled.Validate(guestIDs); err != nil {
 		o.sendFollowUp(ctx, msg, fmt.Sprintf("Compiled plan failed validation: %v", err))
 		o.recordAudit(ctx, "channel.execute_validate_failed", "", strPtr("execute"))
@@ -310,21 +361,137 @@ func (o *Orchestrator) resolveExecuteMarkdownSource(text string) (string, string
 // recorded in Plan.Frontmatter.RequiredProfiles so a roster change between
 // compile and approve is explicitly rejected instead of silently dispatched.
 func (o *Orchestrator) activeGuestProfiles() []GuestProfile {
-	if o.guestIndex == nil {
-		return nil
+	out := make([]GuestProfile, 0)
+	if o.guestIndex != nil {
+		for id, g := range o.guestIndex.Agents {
+			if id == guests.OrchestratorGuestID {
+				// ScanDirectory excludes orchestrator.md from the guest
+				// index in production; a test harness may still seed it.
+				// Drop the index copy here so the synthetic entry below
+				// (sourced from agents/orchestrator.md frontmatter) wins
+				// and both code paths see the same shape.
+				continue
+			}
+			out = append(out, GuestProfile{
+				ID:          id,
+				Name:        g.Name,
+				Profile:     g.Role,
+				Description: g.Description,
+			})
+		}
 	}
-	out := make([]GuestProfile, 0, len(o.guestIndex.Agents))
-	for id, g := range o.guestIndex.Agents {
-		out = append(out, GuestProfile{
-			ID:          id,
-			Profile:     g.Role,
-			Description: g.Description,
-		})
+
+	// Always append the orchestrator as a first-class roster entry. The
+	// guest scan intentionally excludes orchestrator.md so the
+	// orchestrator can't accidentally be invited/removed via the guest
+	// lifecycle, but the compile LLM must still see it so plan authors
+	// can route coordination and review steps to "Tower" (or whatever the
+	// project names the orchestrator) without the MissingProfile alias
+	// recovery path kicking in every compile. When orchestrator.md is
+	// missing we still emit a synthetic entry with Tower-flavored
+	// defaults so fresh projects compile plans that mention "Tower".
+	orchEntry := GuestProfile{
+		ID:      guests.OrchestratorGuestID,
+		Profile: guests.OrchestratorGuestID,
 	}
+	if orchAgent, err := guests.ReadOrchestratorAgent(o.guestsDir()); err == nil {
+		orchEntry.Name = orchAgent.Name
+		orchEntry.Description = orchAgent.Description
+	}
+	if orchEntry.Name == "" && o.guestIndex != nil {
+		if g, ok := o.guestIndex.Agents[guests.OrchestratorGuestID]; ok {
+			orchEntry.Name = g.Name
+			if orchEntry.Description == "" {
+				orchEntry.Description = g.Description
+			}
+		}
+	}
+	if orchEntry.Name == "" {
+		orchEntry.Name = "Tower"
+	}
+	if orchEntry.Description == "" {
+		orchEntry.Description = "Project orchestrator. Coordinates guests, writes plans, and handles coordination or review steps that don't require a specialized guest."
+	}
+	out = append(out, orchEntry)
+
 	// Deterministic ordering so compiler output stays diff-stable between
 	// compile and revise even if the map iteration order shuffles.
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
+}
+
+// resolveGuestAlias tries to map a token the compile LLM produced (either as
+// a "missing profile: X" bailout or as a step.agent_id that fails
+// Validate) back to a real guest ID. It matches case-insensitively against
+// each guest's ID, Name, and Profile fields. The returned string is the
+// matched guest's ID when exactly one guest matches across all three
+// fields; when zero guests match, or when two or more guests match (for
+// example two agents sharing a profile), it returns "". Callers treat ""
+// as "no safe rewrite" and surface the existing user-facing error so the
+// user can disambiguate explicitly rather than silently routing to the
+// wrong guest. The match is on exact-equality of the (trimmed, lowered)
+// token — substring matches are intentionally NOT performed because they
+// would conflate siblings like "walt" and "walter".
+func resolveGuestAlias(token string, guests []GuestProfile) string {
+	needle := strings.ToLower(strings.TrimSpace(token))
+	if needle == "" {
+		return ""
+	}
+	matches := make(map[string]struct{}, 2)
+	for _, g := range guests {
+		if strings.ToLower(g.ID) == needle ||
+			strings.ToLower(g.Name) == needle ||
+			strings.ToLower(g.Profile) == needle {
+			matches[g.ID] = struct{}{}
+		}
+	}
+	if len(matches) != 1 {
+		return ""
+	}
+	for id := range matches {
+		return id
+	}
+	return ""
+}
+
+// rewriteStepAliases walks plan.Steps and, for each step whose AgentID does
+// not already match one of the active guest ids, attempts to resolve the
+// AgentID through resolveGuestAlias. On a unique match the step's AgentID
+// is rewritten in place to the canonical guest id; on ambiguous or no
+// match it is left alone so Validate surfaces the failure. This is a
+// second-chance layer on top of the compilePromptSuffix guidance and
+// the MissingProfile retry path: even if the LLM emits "Tower" as a
+// step.agent_id instead of "orchestrator", the plan still validates and
+// dispatches correctly.
+func rewriteStepAliases(plan *execute.ExecutionPlan, guests []GuestProfile, logger *slog.Logger) {
+	if plan == nil || len(plan.Steps) == 0 || len(guests) == 0 {
+		return
+	}
+	known := make(map[string]struct{}, len(guests))
+	for _, g := range guests {
+		known[g.ID] = struct{}{}
+	}
+	for i := range plan.Steps {
+		agentID := plan.Steps[i].AgentID
+		if agentID == "" {
+			continue
+		}
+		if _, ok := known[agentID]; ok {
+			continue
+		}
+		resolved := resolveGuestAlias(agentID, guests)
+		if resolved == "" {
+			continue
+		}
+		if logger != nil {
+			logger.Info("execute: rewrote step agent_id alias",
+				"step_id", plan.Steps[i].ID,
+				"from", agentID,
+				"to", resolved,
+			)
+		}
+		plan.Steps[i].AgentID = resolved
+	}
 }
 
 // requiredProfilesFromPlan extracts the sorted unique set of agent IDs used

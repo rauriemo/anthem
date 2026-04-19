@@ -892,6 +892,96 @@ func TestLoadOrchestratorPersona_NoFrontmatter(t *testing.T) {
 	}
 }
 
+func TestReadOrchestratorAgent_FromOrchestratorMd(t *testing.T) {
+	dir := t.TempDir()
+	body := "---\n" +
+		"name: Tower\n" +
+		"role: orchestrator\n" +
+		"description: Project coordinator.\n" +
+		"model: claude-opus-5\n" +
+		"max_turns: 16\n" +
+		"---\n\nTower body.\n"
+	if err := os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	agent, err := ReadOrchestratorAgent(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if agent.ID != OrchestratorGuestID {
+		t.Errorf("ID = %q, want %q (default when frontmatter omits id)", agent.ID, OrchestratorGuestID)
+	}
+	if agent.Name != "Tower" {
+		t.Errorf("Name = %q, want Tower", agent.Name)
+	}
+	if agent.Role != "orchestrator" {
+		t.Errorf("Role = %q, want orchestrator", agent.Role)
+	}
+	if agent.Model != "claude-opus-5" {
+		t.Errorf("Model = %q, want claude-opus-5", agent.Model)
+	}
+	if agent.MaxTurns != 16 {
+		t.Errorf("MaxTurns = %d, want 16", agent.MaxTurns)
+	}
+}
+
+func TestReadOrchestratorAgent_FallsBackToRoleScan(t *testing.T) {
+	// When agents/orchestrator.md is absent, any .md with
+	// role: orchestrator must be picked up so projects that name their
+	// orchestrator file after its character (e.g. agents/tower.md) still
+	// dispatch correctly.
+	dir := t.TempDir()
+	body := "---\n" +
+		"name: Tower\n" +
+		"role: orchestrator\n" +
+		"description: Picked up via fallback scan.\n" +
+		"---\n\nbody\n"
+	if err := os.WriteFile(filepath.Join(dir, "tower.md"), []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	agent, err := ReadOrchestratorAgent(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if agent.Name != "Tower" {
+		t.Errorf("Name = %q, want Tower (from fallback scan)", agent.Name)
+	}
+	if agent.Role != "orchestrator" {
+		t.Errorf("Role = %q, want orchestrator", agent.Role)
+	}
+}
+
+func TestReadOrchestratorAgent_MissingReturnsZero(t *testing.T) {
+	// Fresh project with no agents directory at all: caller treats the
+	// zero GuestAgent as "no dispatch override" and layers defaults. No
+	// error is returned because absence is a valid state.
+	dir := t.TempDir()
+	agent, err := ReadOrchestratorAgent(dir)
+	if err != nil {
+		t.Fatalf("unexpected error for missing orchestrator: %v", err)
+	}
+	if agent.Name != "" || agent.Role != "" || agent.ID != "" {
+		t.Errorf("expected zero GuestAgent for missing orchestrator; got %+v", agent)
+	}
+}
+
+func TestReadOrchestratorAgent_MalformedOrchestratorMdErrors(t *testing.T) {
+	// When orchestrator.md exists but has broken YAML, surface the error
+	// instead of silently falling through to scan — the file is explicit
+	// intent and a malformed one deserves a clear signal.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte("no frontmatter here"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ReadOrchestratorAgent(dir)
+	if err == nil {
+		t.Error("expected error for orchestrator.md without frontmatter")
+	}
+}
+
 func TestLoadAgentFrontmatter_Exists(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agent.md")

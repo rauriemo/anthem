@@ -168,6 +168,7 @@ func TestPlanRunner_HappyPath(t *testing.T) {
 		EventStepStarted,
 		EventStepCompleted,
 		EventPlanCompleted,
+		EventRunArchived,
 	}
 	if len(events) != len(want) {
 		t.Fatalf("events mismatch:\ngot:  %v\nwant: %v", events, want)
@@ -176,6 +177,127 @@ func TestPlanRunner_HappyPath(t *testing.T) {
 		if events[i] != want[i] {
 			t.Errorf("event[%d] = %q, want %q", i, events[i], want[i])
 		}
+	}
+}
+
+// TestPlanRunner_RunArchived_EmittedOnCompletion pins the archive
+// wire contract for the happy path: after PlanCompleted, the
+// runner broadcasts exactly one RunArchived event so the frontend
+// can demote the history entry from LIVE to COMPLETED without a
+// full re-fetch. The event carries the plan_id + compile_generation
+// configured on RunnerOpts so the frontend can match the entry.
+func TestPlanRunner_RunArchived_EmittedOnCompletion(t *testing.T) {
+	runner := newMockRunner()
+	bc := &mockBroadcaster{}
+
+	pr := NewPlanRunner(RunnerOpts{
+		GuestIndex:        testGuestIndex(),
+		Runner:            runner,
+		ChannelMgr:        bc,
+		PlanID:            "plan-xyz",
+		CompileGeneration: 7,
+	})
+
+	if err := pr.Run(context.Background(), twoStepPlan(), "thread-archive"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	var archiveCount int
+	var gotPayload struct {
+		PlanID            string `json:"plan_id"`
+		CompileGeneration int    `json:"compile_generation"`
+		Reason            string `json:"reason,omitempty"`
+		Terminal          bool   `json:"terminal"`
+	}
+	for _, e := range bc.events {
+		if e.EventType != EventRunArchived {
+			continue
+		}
+		archiveCount++
+		if err := json.Unmarshal([]byte(e.Text), &gotPayload); err != nil {
+			t.Fatalf("unmarshal archive payload: %v", err)
+		}
+	}
+	if archiveCount != 1 {
+		t.Fatalf("archive event count = %d, want exactly 1", archiveCount)
+	}
+	if gotPayload.PlanID != "plan-xyz" {
+		t.Errorf("archive plan_id = %q, want %q", gotPayload.PlanID, "plan-xyz")
+	}
+	if gotPayload.CompileGeneration != 7 {
+		t.Errorf("archive compile_generation = %d, want 7", gotPayload.CompileGeneration)
+	}
+	if !gotPayload.Terminal {
+		t.Errorf("archive terminal = false, want true")
+	}
+	if gotPayload.Reason != "" {
+		t.Errorf("archive reason = %q, want empty for completed run", gotPayload.Reason)
+	}
+}
+
+// TestPlanRunner_RunArchived_EmittedOnGateAbort verifies that the
+// gate-abort path (user clicks Abort in the ReviewDrawer) also
+// publishes a RunArchived event with a populated reason. This is
+// the signal the frontend uses to flip an aborted live run to
+// terminal in the Active Chains list without refetching the
+// full history.
+func TestPlanRunner_RunArchived_EmittedOnGateAbort(t *testing.T) {
+	runner := newMockRunner()
+	bc := &mockBroadcaster{}
+
+	pr := NewPlanRunner(RunnerOpts{
+		GuestIndex:        testGuestIndex(),
+		Runner:            runner,
+		ChannelMgr:        bc,
+		PlanID:            "plan-abort",
+		CompileGeneration: 3,
+	})
+
+	plan := twoStepPlan()
+	plan.Gates = []ApprovalGate{{ID: "g1", AfterStep: "s1", Prompt: "Approve sprites?"}}
+
+	go func() {
+		for {
+			for _, et := range bc.eventTypes() {
+				if et == EventGateOpened {
+					pr.ResolveGate("g1", GateResolution{Action: GateAbort})
+					return
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	_ = pr.Run(context.Background(), plan, "thread-abort") // expected to return an error
+
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	var archiveCount int
+	var gotReason string
+	for _, e := range bc.events {
+		if e.EventType != EventRunArchived {
+			continue
+		}
+		archiveCount++
+		var payload struct {
+			Reason   string `json:"reason,omitempty"`
+			Terminal bool   `json:"terminal"`
+		}
+		if err := json.Unmarshal([]byte(e.Text), &payload); err != nil {
+			t.Fatalf("unmarshal archive payload: %v", err)
+		}
+		if !payload.Terminal {
+			t.Errorf("archive terminal = false on gate abort")
+		}
+		gotReason = payload.Reason
+	}
+	if archiveCount != 1 {
+		t.Fatalf("archive event count on gate abort = %d, want 1", archiveCount)
+	}
+	if gotReason == "" {
+		t.Errorf("archive reason should be non-empty on gate abort")
 	}
 }
 
@@ -1015,5 +1137,71 @@ func TestPlanRunner_BuildRunOptsMaxTurns(t *testing.T) {
 				t.Errorf("MaxTurns = %d, want %d", opts.MaxTurns, tt.want)
 			}
 		})
+	}
+}
+
+// TestPlanRunner_BuildRunOpts_OrchestratorStepUsesInjectedAgent pins the
+// Option-A dispatch path: when a step's AgentID is the canonical
+// orchestrator id, PlanRunner must pull model/allowed_tools/max_turns
+// from the injected OrchestratorAgent frontmatter, not from a zero-value
+// fallback. ScanDirectory excludes orchestrator.md from GuestIndex, so
+// without this branch an orchestrator step would silently run on the
+// default model with no allowed tools — breaking plans that route
+// coordination/review work to Tower.
+func TestPlanRunner_BuildRunOpts_OrchestratorStepUsesInjectedAgent(t *testing.T) {
+	runner := newMockRunner()
+	orchAgent := &guests.GuestAgent{
+		ID:           guests.OrchestratorGuestID,
+		Name:         "Tower",
+		Role:         "orchestrator",
+		Model:        "claude-opus-5",
+		AllowedTools: []string{"Read", "Bash"},
+		MaxTurns:     16,
+	}
+	idx := &guests.GuestIndex{
+		Agents: map[string]guests.GuestAgent{
+			"miyazaki": {ID: "miyazaki", Name: "Miyazaki", Role: "artist"},
+		},
+	}
+	pr := NewPlanRunner(RunnerOpts{
+		GuestIndex:        idx,
+		Runner:            runner,
+		ProjectRoot:       t.TempDir(),
+		OrchestratorAgent: orchAgent,
+	})
+
+	step := &PlanStep{ID: "s1", AgentID: guests.OrchestratorGuestID, Description: "coordinate"}
+	opts := pr.buildRunOpts(step, "prompt", "thread-orch")
+
+	if opts.Model != "claude-opus-5" {
+		t.Errorf("Model = %q, want claude-opus-5 (from injected OrchestratorAgent)", opts.Model)
+	}
+	if len(opts.AllowedTools) != 2 || opts.AllowedTools[0] != "Read" || opts.AllowedTools[1] != "Bash" {
+		t.Errorf("AllowedTools = %v, want [Read Bash]", opts.AllowedTools)
+	}
+	if opts.MaxTurns != 16 {
+		t.Errorf("MaxTurns = %d, want 16", opts.MaxTurns)
+	}
+}
+
+// TestPlanRunner_BuildRunOpts_OrchestratorStepWithNilAgent_FallsThrough
+// guards the legacy dispatch path: when OrchestratorAgent is nil (old
+// code paths that construct RunnerOpts without the new field, or tests
+// that don't seed an agents directory), an orchestrator step must fall
+// through to baseline defaults instead of panicking or silently masking
+// the absence of config.
+func TestPlanRunner_BuildRunOpts_OrchestratorStepWithNilAgent_FallsThrough(t *testing.T) {
+	runner := newMockRunner()
+	pr := NewPlanRunner(RunnerOpts{
+		Runner:      runner,
+		ProjectRoot: t.TempDir(),
+	})
+	step := &PlanStep{ID: "s1", AgentID: guests.OrchestratorGuestID, Description: "x"}
+	opts := pr.buildRunOpts(step, "p", "th")
+	if opts.Model != "claude-sonnet-4-5" {
+		t.Errorf("Model = %q, want default claude-sonnet-4-5", opts.Model)
+	}
+	if len(opts.AllowedTools) != 0 {
+		t.Errorf("AllowedTools = %v, want empty (no config)", opts.AllowedTools)
 	}
 }
