@@ -1347,3 +1347,107 @@ func TestCreateSubtasks_NoActiveLabelsConfigured(t *testing.T) {
 		t.Errorf("created task labels = %v, want [type:bug] (no auto-add when Active is empty)", created.Labels)
 	}
 }
+
+// TestRouteIsolation_FacadesWiredAtConstruction is the end-to-end
+// regression for Layers 2 and 3. It exercises the real
+// Orchestrator.New construction path (no direct facade
+// instantiation) and verifies that:
+//
+//   - In Execute mode, calling tracker.CreateIssue via the
+//     orchestrator's tracker field returns
+//     ErrTrackerMutationDeniedInMode and the inner MockTracker's
+//     Tasks list does not grow. This is the core regression for the
+//     "9 issues silently created" incident: even if some future
+//     refactor calls o.tracker.CreateIssue outside executeActions,
+//     the facade catches it.
+//   - In Execute mode, calling runner.Run via the orchestrator's
+//     runner field forwards RunOpts with the default deny list
+//     injected. Claude Code would honor this as
+//     --disallowedTools Bash(gh *) etc. and reject any remote
+//     shell-out.
+//   - Flipping CurrentMode to ModeLoop reverts both behaviors:
+//     CreateIssue succeeds, and DeniedTools no longer carries the
+//     default denies.
+//
+// If either facade is skipped at construction (e.g. someone
+// assigns opts.Tracker directly without wrapping), this test
+// fails immediately.
+func TestRouteIsolation_FacadesWiredAtConstruction(t *testing.T) {
+	innerTracker := tracker.NewMockTracker(nil)
+
+	var observedRunOpts types.RunOpts
+	innerRunner := agent.NewMockRunner()
+	innerRunner.RunFunc = func(_ context.Context, opts types.RunOpts) (*types.RunResult, error) {
+		observedRunOpts = opts
+		return &types.RunResult{SessionID: "s", ExitCode: 0}, nil
+	}
+
+	cfg := config.DefaultConfig()
+
+	orch := New(Opts{
+		Config:       &cfg,
+		TemplateBody: "",
+		Tracker:      innerTracker,
+		Runner:       innerRunner,
+		Workspace:    workspace.NewMockWorkspaceManager(),
+		EventBus:     NewMockEventBus(),
+		Logger:       testLogger(),
+	})
+
+	// --- Execute mode: mutations denied, denies injected ---
+	orch.CurrentMode = types.ModeExecute
+
+	id, err := orch.tracker.CreateIssue(context.Background(), "Should Not Be Created", "body", []string{"todo"})
+	if !errors.Is(err, ErrTrackerMutationDeniedInMode) {
+		t.Errorf("Execute-mode CreateIssue err = %v, want ErrTrackerMutationDeniedInMode", err)
+	}
+	if id != "" {
+		t.Errorf("Execute-mode CreateIssue id = %q, want empty", id)
+	}
+	if got := len(innerTracker.Tasks); got != 0 {
+		t.Errorf("Execute-mode inner MockTracker.Tasks = %d, want 0 (facade not wired at construction)", got)
+	}
+
+	_, err = orch.runner.Run(context.Background(), types.RunOpts{Prompt: "x"})
+	if err != nil {
+		t.Fatalf("Execute-mode Run err = %v", err)
+	}
+	foundGH := false
+	for _, d := range observedRunOpts.DeniedTools {
+		if d == "Bash(gh *)" {
+			foundGH = true
+			break
+		}
+	}
+	if !foundGH {
+		t.Errorf("Execute-mode observed.DeniedTools = %v, want to contain 'Bash(gh *)' (runner facade not wired)",
+			observedRunOpts.DeniedTools)
+	}
+
+	// --- Loop mode: both facades become pass-through ---
+	orch.CurrentMode = types.ModeLoop
+
+	id, err = orch.tracker.CreateIssue(context.Background(), "Created", "body", []string{"todo"})
+	if err != nil {
+		t.Fatalf("Loop-mode CreateIssue err = %v", err)
+	}
+	if id == "" {
+		t.Error("Loop-mode CreateIssue returned empty id")
+	}
+	if got := len(innerTracker.Tasks); got != 1 {
+		t.Errorf("Loop-mode inner MockTracker.Tasks = %d, want 1", got)
+	}
+
+	observedRunOpts = types.RunOpts{} // reset
+	_, err = orch.runner.Run(context.Background(), types.RunOpts{Prompt: "y"})
+	if err != nil {
+		t.Fatalf("Loop-mode Run err = %v", err)
+	}
+	for _, d := range observedRunOpts.DeniedTools {
+		if d == "Bash(gh *)" {
+			t.Errorf("Loop-mode observed.DeniedTools = %v, must not contain default denies (facade injected in Loop)",
+				observedRunOpts.DeniedTools)
+			break
+		}
+	}
+}

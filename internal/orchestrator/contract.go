@@ -272,12 +272,31 @@ func SchemaOnly(_ ActionType) bool {
 // prompts and must never create or mutate remote work items on the
 // user's behalf.
 //
-// The orchestrator gates the executeActions dispatch on this helper:
-// when CurrentMode != ModeLoop, loop-only actions are logged,
-// audited as blocked, and dropped without calling the tracker. See
-// Orchestrator.executeActions for the enforcement point.
+// This predicate powers Layer 1 of a three-layer route-isolation
+// boundary. All three layers must hold for the invariant "no
+// remote-tracker mutation outside Loop mode" to be enforceable:
 //
-// Keep the set conservative: adding a new action here silently
+//   - Layer 1 (this file + executeActions): blocks the
+//     orchestrator-action dispatch path. The orchestrator gates
+//     executeActions on IsLoopOnlyAction -- when CurrentMode !=
+//     ModeLoop, loop-only actions are logged, audited as blocked,
+//     and dropped without calling the tracker. This is the
+//     immediate fix for the "9 issues silently created during an
+//     Execute-mode approval gate" regression.
+//   - Layer 2 (runner_gate.go, modeGatedRunner): blocks the
+//     Claude-tool path. Appends DefaultInteractiveDeniedTools
+//     (Bash(gh *), WebFetch, mcp__github__*, etc.) to RunOpts and
+//     ContinueOpts so Claude cannot shell out to gh/curl or fetch
+//     GitHub APIs directly even under
+//     --dangerously-skip-permissions.
+//   - Layer 3 (tracker_gate.go, modeGatedTracker): blocks the
+//     direct Go-code path. Every mutating method on
+//     tracker.IssueTracker returns
+//     ErrTrackerMutationDeniedInMode outside Loop, so any future
+//     refactor that reaches for o.tracker.CreateIssue outside
+//     executeActions is also caught.
+//
+// Keep this set conservative: adding a new action here silently
 // disables it in Chat/Plan/Execute, so only include actions whose
 // intent is meaningless outside of Loop.
 func IsLoopOnlyAction(actionType ActionType) bool {

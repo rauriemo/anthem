@@ -155,6 +155,15 @@ type ContinueOpts struct {
 	PermissionMode string
 	AdditionalDirs []string
 	OnStream       func(delta string)
+
+	// DeniedTools is forwarded to Claude Code as --disallowedTools
+	// during a Continue call. Parallels RunOpts.DeniedTools so the
+	// mode-gated runner facade (orchestrator.modeGatedRunner) can
+	// inject the same deny list across both Run and Continue without
+	// branching. Claude Code honors --disallowedTools even when
+	// --dangerously-skip-permissions is set, which is why this field
+	// is the enforcement point for route isolation.
+	DeniedTools []string
 }
 
 type RunResult struct {

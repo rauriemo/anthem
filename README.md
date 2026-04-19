@@ -27,6 +27,16 @@ Loop is what Anthem used to be by default. It is now one explicit mode that you 
 
 See [docs/architecture/modes.md](docs/architecture/modes.md) for the canonical description of how each mode is wired.
 
+### Route Isolation (Chat / Plan / Execute vs. Loop)
+
+Chat, Plan, and Execute are deliberately "light" routes: Claude Code CLI with context injection, no task creation, no remote tracker mutation. Only Loop is allowed to create, update, comment on, or label tracker issues. The invariant is enforced at three layers, all wrapped once in `Orchestrator.New` so no call site has to remember to gate itself:
+
+- **Layer 1 — Action dispatch gate** (`internal/orchestrator/contract.go` + `executeActions`). Loop-only control actions (`dispatch`, `create_subtasks`, `comment`, `skip`, `request_approval`, `close_wave`) are dropped with an audit entry when `CurrentMode != ModeLoop`.
+- **Layer 2 — Runner facade** (`internal/orchestrator/runner_gate.go`, `modeGatedRunner`). Injects `DefaultInteractiveDeniedTools` (`Bash(gh *)`, `Bash(curl *)`, `WebFetch`, `mcp__github__*`, ...) into every `Run`/`Continue` outside Loop. Claude honors `--disallowedTools` even under `--dangerously-skip-permissions`, so this closes the "agent shells out to gh issue create" path.
+- **Layer 3 — Tracker facade** (`internal/orchestrator/tracker_gate.go`, `modeGatedTracker`). Every mutating method on `tracker.IssueTracker` returns `ErrTrackerMutationDeniedInMode` outside Loop; reads pass through. This closes the direct Go-code path for current and future callers.
+
+All three layers become pass-throughs in Loop mode, so issue-driven workflows are unchanged. Mode transitions are picked up on the next call because the facades capture `o.CurrentMode` via closure.
+
 ## Quick Start
 
 For a conversational project agent (default):

@@ -95,6 +95,9 @@ func (d *Driver) Continue(ctx context.Context, sessionID string, prompt string, 
 	default:
 		args = append(args, "--permission-mode", "dontAsk")
 	}
+	for _, tool := range opts.DeniedTools {
+		args = append(args, "--disallowedTools", tool)
+	}
 	if len(opts.AllowedTools) > 0 {
 		for _, tool := range opts.AllowedTools {
 			args = append(args, "--allowedTools", tool)

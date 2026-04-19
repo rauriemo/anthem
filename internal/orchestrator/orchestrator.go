@@ -132,8 +132,6 @@ func New(opts Opts) *Orchestrator {
 	o := &Orchestrator{
 		cfg:             opts.Config,
 		body:            opts.TemplateBody,
-		tracker:         opts.Tracker,
-		runner:          opts.Runner,
 		ws:              opts.Workspace,
 		events:          opts.EventBus,
 		rules:           rules.NewEngine(opts.Config.Rules, logger),
@@ -154,6 +152,21 @@ func New(opts Opts) *Orchestrator {
 		proposalStore:   NewProposalStore(30 * time.Minute),
 		compileInFlight: make(map[string]bool),
 		CurrentMode:     defaultMode,
+	}
+
+	// Wrap the tracker and runner in mode-gated facades so every
+	// call site (current and future) inherits the Loop-only
+	// invariant without having to remember to gate itself. See
+	// tracker_gate.go and runner_gate.go for the three-layer route
+	// isolation rationale. Closures capture o so that mode
+	// transitions (chat -> plan -> execute -> loop) take effect on
+	// every subsequent call with no re-wrap.
+	modeFn := func() types.Mode { return o.CurrentMode }
+	if opts.Tracker != nil {
+		o.tracker = newModeGatedTracker(opts.Tracker, modeFn)
+	}
+	if opts.Runner != nil {
+		o.runner = newModeGatedRunner(opts.Runner, modeFn)
 	}
 
 	return o
