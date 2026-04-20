@@ -18,6 +18,7 @@ import (
 	"github.com/rauriemo/anthem/internal/guests"
 	"github.com/rauriemo/anthem/internal/harness"
 	"github.com/rauriemo/anthem/internal/plans"
+	"github.com/rauriemo/anthem/internal/prompt"
 	"github.com/rauriemo/anthem/internal/types"
 	"github.com/rauriemo/conduit/pkg/mcpconfig"
 )
@@ -35,6 +36,11 @@ type RoutingResult struct {
 	ContextUpdate       string            `json:"context_update"`
 }
 
+// GuestPromptOpts retains the legacy field set used by the chat
+// dispatch paths and by the extensive guestdispatch_test.go suite. It
+// is translated into prompt.GuestPromptOpts + prompt.LiveContext by
+// buildGuestPrompt below, so callers in orchestrator do not need to
+// know about the new prompt package.
 type GuestPromptOpts struct {
 	Mode           types.Mode
 	ChannelKind    string
@@ -193,156 +199,65 @@ func updateContextAfterRound(
 	}
 }
 
+// buildGuestPrompt is a thin adapter over prompt.BuildGuestPrompt that
+// preserves the long-standing signature used by orchestrator call sites
+// and by guestdispatch_test.go. The actual assembly logic lives in the
+// internal/prompt package so the execute runner can share it without
+// dragging the orchestrator's feature-context yaml types into a chained
+// step's dependency graph.
+//
+// Character Commitment is always on for chat/plan dispatch here, per
+// plan decision D7 (parity with Execute).
 func buildGuestPrompt(persona, projectSummary, sharedCtx, history, userMsg string, opts GuestPromptOpts) string {
+	live := prompt.LiveContext{
+		UserContext:    opts.UserContext,
+		ProjectSummary: projectSummary,
+		FeatureContext: opts.FeatureContext,
+		SharedCtxText:  sharedCtx,
+		HistoryText:    history,
+	}
+	return prompt.BuildGuestPrompt(persona, live, userMsg, prompt.GuestPromptOpts{
+		Mode:                       opts.Mode,
+		ChannelKind:                opts.ChannelKind,
+		PlanContent:                opts.PlanContent,
+		StoryContextText:           renderStoryContextText(opts.StoryContext),
+		FocusText:                  opts.FocusText,
+		IncludeCharacterCommitment: true,
+	})
+}
+
+// renderStoryContextText flattens a *StoryContext into the "Story
+// Bible" markdown block the prompt package stitches into the final
+// output. Kept in orchestrator because StoryContext is sourced from
+// orchestrator's StoryStore and the prompt package deliberately stays
+// string-only.
+func renderStoryContextText(sc *StoryContext) string {
+	if sc == nil {
+		return ""
+	}
 	var sb strings.Builder
-
-	sb.WriteString(persona)
+	sb.WriteString("## Story Bible\n\n")
+	sb.WriteString("### Project Context\n")
+	sb.WriteString(sc.Config)
 	sb.WriteString("\n\n")
-
-	sb.WriteString("## Character Commitment\n\n")
-	sb.WriteString("You ARE this character. Embody their creative philosophy, voice, and perspective at all times. ")
-	sb.WriteString("Never break character. Never say you are an AI, a language model, or Claude. ")
-	sb.WriteString("When asked personal questions, draw from your namesake's documented views, creative works, and known history. ")
-	sb.WriteString("Your expertise, opinions, and personality are theirs.\n\n")
-
-	if opts.UserContext != "" {
-		sb.WriteString("## User Context\n\n")
-		sb.WriteString(opts.UserContext)
-		sb.WriteString("\n\n")
+	for name, content := range sc.Files {
+		fmt.Fprintf(&sb, "### %s\n\n%s\n\n", name, content)
 	}
-
-	if projectSummary != "" {
-		sb.WriteString("## Project Context\n")
-		sb.WriteString(projectSummary)
-		sb.WriteString("\n\n")
-	}
-
-	if opts.FeatureContext != "" {
-		sb.WriteString(opts.FeatureContext)
-		sb.WriteString("\n\n")
-	}
-
-	if sharedCtx != "" {
-		sb.WriteString("## Session Context\n")
-		sb.WriteString(sharedCtx)
-		sb.WriteString("\n\n")
-	}
-
-	if history != "" {
-		sb.WriteString(history)
-		sb.WriteString("\n")
-	}
-
-	if opts.Mode == types.ModePlan && opts.PlanContent != "" {
-		sb.WriteString("## Current Plan\n\n")
-		sb.WriteString(opts.PlanContent)
-		sb.WriteString("\n\n## Your Task\n\n")
-		sb.WriteString("Review and contribute to this plan from your area of expertise.\n")
-		sb.WriteString("- To EDIT the plan, include your updated markdown in a ```plan-edit code block.\n")
-		sb.WriteString("  Only include the sections you are changing.\n")
-		sb.WriteString("- To COMMENT without editing, just respond normally.\n\n")
-	}
-
-	if opts.Mode == types.ModePlan {
-		sb.WriteString("## Plan Mode Tool Policy\n\n")
-		sb.WriteString("You MUST NOT call any tools this turn. Respond in text only. ")
-		sb.WriteString("To modify the plan, emit a ```plan-edit fenced block. ")
-		sb.WriteString("No MCP calls, no HTTP tools, no Bash, no Edit/Write. ")
-		sb.WriteString("Tool access is stripped at the harness level — attempted tool calls will fail.\n\n")
-	}
-
-	if opts.StoryContext != nil {
-		sb.WriteString("## Story Bible\n\n")
-		sb.WriteString("### Project Context\n")
-		sb.WriteString(opts.StoryContext.Config)
-		sb.WriteString("\n\n")
-		for name, content := range opts.StoryContext.Files {
-			fmt.Fprintf(&sb, "### %s\n\n%s\n\n", name, content)
+	sb.WriteString("### Section Hashes\n\n")
+	sb.WriteString("| section_id | file | rev |\n|---|---|---|\n")
+	for file, secs := range sc.Sections {
+		for id, hash := range secs {
+			fmt.Fprintf(&sb, "| %s | %s | %s |\n", id, file, hash)
 		}
-		sb.WriteString("### Section Hashes\n\n")
-		sb.WriteString("| section_id | file | rev |\n|---|---|---|\n")
-		for file, secs := range opts.StoryContext.Sections {
-			for id, hash := range secs {
-				fmt.Fprintf(&sb, "| %s | %s | %s |\n", id, file, hash)
-			}
-		}
-		sb.WriteString("\n## Story Edit Instructions\n\n")
-		sb.WriteString("You are the narrative engine for this project.\n")
-		sb.WriteString("Your edits are PROPOSALS -- the user accepts or rejects each one.\n")
-		sb.WriteString("- To REPLACE: ```story-edit target=\"file.md\" section=\"id\" rev=\"hash\"\n")
-		sb.WriteString("- To INSERT: ```story-edit target=\"file.md\" after=\"id\"\n")
-		sb.WriteString("- To APPEND: ```story-edit target=\"file.md\" (no section or after)\n")
-		sb.WriteString("- New sections MUST include <!-- id: snake_case --> anchor.\n")
-		sb.WriteString("- To DISCUSS: respond normally, no fenced block.\n\n")
 	}
-
-	if opts.ChannelKind == "prism" {
-		sb.WriteString("## Visual Output\n\n")
-		sb.WriteString("You are connected to Prism, a visual interface. EVERY response MUST include a visual artifact.\n")
-		sb.WriteString("Put your visual content in a fenced ```html block:\n\n")
-		sb.WriteString("```html\n")
-		sb.WriteString("<div style=\"font-family: system-ui; padding: 2rem;\">\n")
-		sb.WriteString("  <h1>Title</h1>\n")
-		sb.WriteString("  <p>Self-contained HTML with all styles inline.</p>\n")
-		sb.WriteString("</div>\n")
-		sb.WriteString("```\n\n")
-		sb.WriteString("The HTML block will be rendered as a rich visual artifact in the display pane.\n")
-		sb.WriteString("HTML must be fully self-contained with all styles inline (no external stylesheets).\n")
-		sb.WriteString("You can also use ```markdown blocks for formatted text artifacts.\n")
-		sb.WriteString("Include a brief text explanation outside the block.\n\n")
-		sb.WriteString("### Images from tools (Unity MCP, etc.)\n\n")
-		sb.WriteString("When embedding captures as `<img src=\"...\">`, use a **single-line** `data:image/png;base64,<payload>` URL copied **verbatim** from tool output.\n")
-		sb.WriteString("Do **not** insert line breaks, spaces, or line-wrapping inside the base64 payload — the browser will reject the URL (`ERR_INVALID_URL`).\n")
-		sb.WriteString("Do not use placeholders, ellipses, or shortened base64; paste the full string from the tool result.\n\n")
-	}
-
-	if opts.FeatureContext != "" {
-		sb.WriteString("## Context Reporting\n\n")
-		sb.WriteString("After your response, you may optionally include a structured report so the system can track your work.\n")
-		sb.WriteString("Place this JSON block at the END of your response (after all conversational text):\n\n")
-		sb.WriteString("```json\n")
-		sb.WriteString("{\"context_report\": {\n")
-		sb.WriteString("  \"action\": \"asset_created | document_edit | decision_made | task_completed\",\n")
-		sb.WriteString("  \"summary\": \"Brief description of what you did\",\n")
-		sb.WriteString("  \"artifact\": {\n")
-		sb.WriteString("    \"id\": \"kebab-case-id\",\n")
-		sb.WriteString("    \"type\": \"image/png | text/markdown | ...\",\n")
-		sb.WriteString("    \"path\": \"relative/path/to/file\",\n")
-		sb.WriteString("    \"description\": \"What this artifact is\",\n")
-		sb.WriteString("    \"tags\": [\"tag1\", \"tag2\"],\n")
-		sb.WriteString("    \"metadata\": {\"key\": \"value\"},\n")
-		sb.WriteString("    \"depends_on\": [\"source-artifact-id\"],\n")
-		sb.WriteString("    \"status\": \"draft\"\n")
-		sb.WriteString("  },\n")
-		sb.WriteString("  \"progress\": \"3/8 sprites complete\",\n")
-		sb.WriteString("  \"blocked_on\": null,\n")
-		sb.WriteString("  \"produces\": [\"artifact-id-1\", \"artifact-id-2\"]\n")
-		sb.WriteString("}}\n")
-		sb.WriteString("```\n\n")
-		sb.WriteString("Rules:\n")
-		sb.WriteString("- The report is optional. If you don't include one, a generic task_completed entry is created.\n")
-		sb.WriteString("- Include \"artifact\" only when you create or modify a file.\n")
-		sb.WriteString("- Use stable kebab-case IDs for all references.\n")
-		sb.WriteString("- \"progress\" and \"blocked_on\" help other agents understand your status.\n")
-		sb.WriteString("- Use canonical metadata keys: ")
-		sb.WriteString("sprite (width, height, frames, palette, format), ")
-		sb.WriteString("document (word_count, sections, format), ")
-		sb.WriteString("scene (tile_count, layers, dimensions), ")
-		sb.WriteString("audio (duration_ms, sample_rate, channels).\n\n")
-	}
-
-	fmt.Fprintf(&sb, "## User Message\n\n%s\n", userMsg)
-
-	if opts.FocusText != "" {
-		sb.WriteString("\n## Your Focus\n\n")
-		fmt.Fprintf(&sb, "> %s\n\n", opts.FocusText)
-		sb.WriteString("Respond to this specific instruction. The full message above is provided for context.\n")
-	}
-
-	if opts.Mode == types.ModeChat {
-		sb.WriteString("\nBe concise.\n")
-	}
-
+	sb.WriteString("\n## Story Edit Instructions\n\n")
+	sb.WriteString("You are the narrative engine for this project.\n")
+	sb.WriteString("Your edits are PROPOSALS -- the user accepts or rejects each one.\n")
+	sb.WriteString("- To REPLACE: ```story-edit target=\"file.md\" section=\"id\" rev=\"hash\"\n")
+	sb.WriteString("- To INSERT: ```story-edit target=\"file.md\" after=\"id\"\n")
+	sb.WriteString("- To APPEND: ```story-edit target=\"file.md\" (no section or after)\n")
+	sb.WriteString("- New sections MUST include <!-- id: snake_case --> anchor.\n")
+	sb.WriteString("- To DISCUSS: respond normally, no fenced block.\n\n")
 	return sb.String()
 }
 
@@ -579,7 +494,7 @@ func dispatchSelectedGuests(p guestDispatchParams) {
 						if art.Status == "" {
 							art.Status = "draft"
 						}
-						if aErr := AppendArtifact(p.projectRoot, p.activeFeature, art); aErr != nil {
+						if aErr := AppendArtifact(p.projectRoot, p.activeFeature, art, ChatOrigin{AgentID: guestID}); aErr != nil {
 							p.logger.Warn("failed to register artifact", "guest", guestID, "error", aErr)
 						}
 					}

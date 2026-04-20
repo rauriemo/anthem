@@ -125,9 +125,27 @@ func SetTaskActive(projectRoot, feature, agentName, taskDescription string, opts
 	return writeYAML(path, &ts)
 }
 
-// AppendArtifact adds an entry to artifacts.yaml for the given feature.
-// Writes are serialized per feature path via featureLock.
-func AppendArtifact(projectRoot, feature string, entry ArtifactEntry) error {
+// AppendArtifact adds an entry to artifacts.yaml for the given feature,
+// stamped with the origin carried by the sealed OriginTag. Writes are
+// serialized per feature path via featureLock and legacy entries
+// discovered on disk get a one-shot {kind: legacy} backfill before the
+// new row is appended, so a mixed-origin file self-heals on first write
+// after the schema PR lands.
+//
+// The runtime invariant on Execute-origin writes ("StepID must not be
+// empty") panics in development to surface wiring bugs immediately;
+// production callers that can't tolerate a panic should validate the
+// tag before calling. See plan decision D13 for the full contract.
+func AppendArtifact(projectRoot, feature string, entry ArtifactEntry, tag OriginTag) error {
+	if tag == nil {
+		return fmt.Errorf("featurewriter.AppendArtifact: origin tag is required")
+	}
+	origin := tag.toOrigin()
+	if origin.Kind == OriginKindExecute && origin.StepID == "" {
+		panic("featurewriter.AppendArtifact: execute-origin with empty step_id")
+	}
+	entry.Origin = &origin
+
 	dir := featureDir(projectRoot, feature)
 	path := filepath.Join(dir, "artifacts.yaml")
 
@@ -135,28 +153,29 @@ func AppendArtifact(projectRoot, feature string, entry ArtifactEntry) error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	var af ArtifactsFile
-	data, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("reading artifacts: %w", err)
-	}
-	if err == nil {
-		if err := yaml.Unmarshal(data, &af); err != nil {
-			return fmt.Errorf("parsing artifacts: %w", err)
-		}
+	af, existed, err := readArtifactsFileLocked(path)
+	if err != nil {
+		return err
 	}
 
 	if af.SchemaVersion == "" {
 		af.SchemaVersion = "1"
 	}
 
+	backfillLegacyOrigins(af.Artifacts)
+
 	af.Artifacts = append(af.Artifacts, entry)
-	return writeYAML(path, &af)
+	if err := writeYAML(path, &af); err != nil {
+		return err
+	}
+	_ = existed
+	logArtifactWrite(entry, origin, "append")
+	return nil
 }
 
 // AppendArtifactValidated adds an entry to artifacts.yaml and logs a warning
 // for any metadata keys not in the registry for the entry's artifact type.
-func AppendArtifactValidated(projectRoot, feature string, entry ArtifactEntry, knownKeys map[string][]MetadataKeyDef, logger *slog.Logger) error {
+func AppendArtifactValidated(projectRoot, feature string, entry ArtifactEntry, tag OriginTag, knownKeys map[string][]MetadataKeyDef, logger *slog.Logger) error {
 	if len(entry.Metadata) > 0 && knownKeys != nil && logger != nil {
 		typeName := strings.SplitN(entry.Type, "/", 2)[0]
 		defs := knownKeys[typeName]
@@ -171,7 +190,104 @@ func AppendArtifactValidated(projectRoot, feature string, entry ArtifactEntry, k
 			}
 		}
 	}
-	return AppendArtifact(projectRoot, feature, entry)
+	return AppendArtifact(projectRoot, feature, entry, tag)
+}
+
+// SupersedeStepArtifacts stamps superseded_at on every live artifact
+// whose origin matches the (runID, stepID) pair, so the re-run cleanup
+// pass described in plan decision D13 keeps the audit trail but drops
+// the stale rows from upstream scoping. Legacy / chat / cross-run
+// entries are left untouched. Missing file is a no-op.
+func SupersedeStepArtifacts(projectRoot, feature, planID, runID, stepID string) error {
+	if stepID == "" {
+		return fmt.Errorf("SupersedeStepArtifacts: stepID is required")
+	}
+	dir := featureDir(projectRoot, feature)
+	path := filepath.Join(dir, "artifacts.yaml")
+
+	mu := featureLock(dir)
+	mu.Lock()
+	defer mu.Unlock()
+
+	af, existed, err := readArtifactsFileLocked(path)
+	if err != nil {
+		return err
+	}
+	if !existed {
+		return nil
+	}
+
+	backfillLegacyOrigins(af.Artifacts)
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	changed := false
+	for i := range af.Artifacts {
+		a := &af.Artifacts[i]
+		if a.Origin == nil || a.Origin.Kind != OriginKindExecute {
+			continue
+		}
+		if a.Origin.RunID != runID || a.Origin.StepID != stepID {
+			continue
+		}
+		if planID != "" && a.Origin.PlanID != planID {
+			continue
+		}
+		if a.SupersededAt != "" {
+			continue
+		}
+		a.SupersededAt = now
+		changed = true
+	}
+
+	if !changed {
+		return nil
+	}
+	return writeYAML(path, &af)
+}
+
+// readArtifactsFileLocked reads and parses the artifacts.yaml file.
+// Caller must hold featureLock. Returns existed=false with a zero
+// ArtifactsFile when the file is missing.
+func readArtifactsFileLocked(path string) (ArtifactsFile, bool, error) {
+	var af ArtifactsFile
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return af, false, nil
+		}
+		return af, false, fmt.Errorf("reading artifacts: %w", err)
+	}
+	if err := yaml.Unmarshal(data, &af); err != nil {
+		return af, true, fmt.Errorf("parsing artifacts: %w", err)
+	}
+	return af, true, nil
+}
+
+// backfillLegacyOrigins stamps {kind: legacy} onto every entry that has
+// no origin block yet. Idempotent: entries with an origin are left
+// alone, so the pass is safe to run on every write and read. This is
+// the migration path described in plan decision D13 -- pre-PR
+// artifacts.yaml files self-heal the next time any Execute or Chat
+// write touches them.
+func backfillLegacyOrigins(entries []ArtifactEntry) {
+	for i := range entries {
+		if entries[i].Origin == nil {
+			o := legacyOrigin()
+			entries[i].Origin = &o
+		}
+	}
+}
+
+func logArtifactWrite(entry ArtifactEntry, origin ArtifactOrigin, op string) {
+	slog.Info("featurewriter artifact write",
+		"op", op,
+		"id", entry.ID,
+		"kind", string(origin.Kind),
+		"plan_id", origin.PlanID,
+		"run_id", origin.RunID,
+		"step_id", origin.StepID,
+		"agent_id", origin.AgentID,
+	)
 }
 
 // AppendChangelog adds a changelog entry to changelog.yaml for the given feature.

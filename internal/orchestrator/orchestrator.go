@@ -2877,7 +2877,12 @@ func (o *Orchestrator) handleExecuteMessageWithPlan(
 		PlanID:            planID,
 		CompileGeneration: compileGen,
 		RunLog:            runLog,
+		RunLogPath:        runLogPath,
 		OrchestratorAgent: o.orchestratorGuestAgent(),
+		Context:           o.ExecuteContextSources(),
+		ActiveFeature:     o.cfg.ActiveFeature,
+		ChannelKey:        msg.ChannelKind,
+		RunStartedAt:      time.Now().UTC(),
 	})
 
 	o.mu.Lock()
@@ -3138,7 +3143,12 @@ func (o *Orchestrator) reconstructGateParkedRunner(ctx context.Context, ar runs.
 		PlanID:            snap.PlanID,
 		CompileGeneration: snap.CompileGeneration,
 		RunLog:            runs.NewFileAppender(ar.RunPath, o.logger),
+		RunLogPath:        ar.RunPath,
 		OrchestratorAgent: o.orchestratorGuestAgent(),
+		Context:           o.ExecuteContextSources(),
+		ActiveFeature:     o.cfg.ActiveFeature,
+		ChannelKey:        "",
+		RunStartedAt:      time.Now().UTC(),
 	})
 
 	o.mu.Lock()

@@ -131,9 +131,24 @@ func (d *Driver) execute(ctx context.Context, workDir string, args []string, opt
 		return nil, fmt.Errorf("creating stdout pipe: %w", err)
 	}
 
+	// Capture stderr so step_failed events can surface the concrete
+	// Claude Code failure reason (network timeout, auth rejection,
+	// tool denied) rather than the opaque exit code. Bounded to
+	// stderrCapBytes so a misbehaving driver can't balloon the run
+	// log (plan decision D8).
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("creating stderr pipe: %w", err)
+	}
+
 	if err := d.pm.Start(cmd); err != nil {
 		return nil, fmt.Errorf("starting claude process: %w", err)
 	}
+
+	stderrCh := make(chan string, 1)
+	go func() {
+		stderrCh <- readCappedString(stderrPipe, stderrCapBytes)
+	}()
 
 	stallTimeout := time.Duration(opts.StallTimeoutMS) * time.Millisecond
 	if stallTimeout == 0 {
@@ -194,22 +209,70 @@ func (d *Driver) execute(ctx context.Context, workDir string, args []string, opt
 
 	waitErr := cmd.Wait()
 
+	var stderrText string
+	select {
+	case stderrText = <-stderrCh:
+	default:
+	}
+
 	if result != nil {
 		mergeOutputFromStreamBuffer(result, streamAccum.String())
+		result.Stderr = stderrText
 		result.Duration = time.Since(start)
 		return result, nil
 	}
 	if scanErr != nil {
-		return nil, fmt.Errorf("reading claude output: %w", scanErr)
+		return nil, fmt.Errorf("reading claude output: %w (stderr: %s)", scanErr, truncateForErr(stderrText))
 	}
 	if waitErr != nil {
-		return nil, fmt.Errorf("claude process exited: %w", waitErr)
+		return nil, fmt.Errorf("claude process exited: %w (stderr: %s)", waitErr, truncateForErr(stderrText))
 	}
 
 	return &types.RunResult{
 		ExitCode: -1,
+		Stderr:   stderrText,
 		Duration: time.Since(start),
 	}, nil
+}
+
+// stderrCapBytes bounds the amount of driver stderr we retain on a
+// RunResult (and echo into wrapper errors). 16 KiB is enough to hold
+// a Claude Code stack trace or auth rejection message without making
+// step_failed events unboundedly large.
+const stderrCapBytes = 16 * 1024
+
+func readCappedString(r io.Reader, cap int) string {
+	if r == nil {
+		return ""
+	}
+	buf := make([]byte, 0, cap)
+	tmp := make([]byte, 4096)
+	for len(buf) < cap {
+		n, err := r.Read(tmp)
+		if n > 0 {
+			remaining := cap - len(buf)
+			if n > remaining {
+				n = remaining
+			}
+			buf = append(buf, tmp[:n]...)
+		}
+		if err != nil {
+			break
+		}
+	}
+	// Drain the rest so the pipe closes cleanly even after we stop
+	// appending; otherwise cmd.Wait can block indefinitely.
+	_, _ = io.Copy(io.Discard, r)
+	return string(buf)
+}
+
+func truncateForErr(s string) string {
+	const limit = 256
+	s = strings.TrimSpace(s)
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "..."
 }
 
 // mergeOutputFromStreamBuffer fills empty RunResult.Output from streamed deltas.

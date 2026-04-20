@@ -179,7 +179,7 @@ artifacts:
 		Tags:        []string{"sprite", "enemy"},
 	}
 
-	if err := AppendArtifact(root, feature, entry); err != nil {
+	if err := AppendArtifact(root, feature, entry, ChatOrigin{AgentID: "miyazaki"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -221,7 +221,7 @@ artifacts: []
 		Description: "First artifact",
 	}
 
-	if err := AppendArtifact(root, feature, entry); err != nil {
+	if err := AppendArtifact(root, feature, entry, ChatOrigin{AgentID: "miyazaki"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -258,7 +258,7 @@ func TestAppendArtifact_FileNotExist(t *testing.T) {
 		Status: "pending-review",
 	}
 
-	if err := AppendArtifact(root, feature, entry); err != nil {
+	if err := AppendArtifact(root, feature, entry, ChatOrigin{AgentID: "miyazaki"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -456,7 +456,7 @@ artifacts: []
 				Path:   fmt.Sprintf("assets/sprite-%d.png", idx),
 				Status: "pending-review",
 			}
-			_ = AppendArtifact(root, feature, entry)
+			_ = AppendArtifact(root, feature, entry, ChatOrigin{AgentID: "miyazaki"})
 		}(i)
 	}
 	wg.Wait()
@@ -775,7 +775,7 @@ artifacts: []
 		Consumers:   []string{"eiji"},
 	}
 
-	if err := AppendArtifact(root, feature, entry); err != nil {
+	if err := AppendArtifact(root, feature, entry, ChatOrigin{AgentID: "miyazaki"}); err != nil {
 		t.Fatal(err)
 	}
 

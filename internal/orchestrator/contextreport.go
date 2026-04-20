@@ -17,6 +17,16 @@ type ContextReport struct {
 }
 
 // ReportArtifact is the artifact sub-object within a context_report.
+//
+// Origin-bearing keys (origin, plan_id, run_id, step_id, agent_id,
+// superseded_at) are deliberately NOT modeled: plan decision D13
+// requires the origin block to be stamped only by the featurewriter
+// call site, never by the agent. json.Unmarshal drops unknown keys
+// silently, so any origin-shaped fields a well-meaning or malicious
+// agent emits are discarded here before they ever reach
+// ArtifactEntry. The writer then stamps the authoritative origin from
+// the call-site tag (ExecuteOrigin / ChatOrigin) so there is exactly
+// one source of truth for provenance.
 type ReportArtifact struct {
 	ID          string            `json:"id"`
 	Type        string            `json:"type"`

@@ -4,13 +4,17 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rauriemo/anthem/internal/agent"
 	"github.com/rauriemo/anthem/internal/channel"
 	"github.com/rauriemo/anthem/internal/guests"
 	"github.com/rauriemo/anthem/internal/harness"
+	"github.com/rauriemo/anthem/internal/prompt"
 	"github.com/rauriemo/anthem/internal/types"
 	"github.com/rauriemo/conduit/pkg/mcpconfig"
 )
@@ -52,6 +56,13 @@ type RunnerOpts struct {
 	// used so the runner remains drop-in compatible with tests and
 	// legacy paths that have no plan identity.
 	RunLog RunEventAppender
+	// RunLogPath is the filesystem path of the run log .jsonl file
+	// (see plans/runs.NewRunLogPath). When set, PlanRunner dumps the
+	// final assembled prompt of every step to a sibling file named
+	// step-<id>.prompt.txt so operators can diff exactly what each
+	// agent saw (plan decision D6). Empty disables the dump; legacy
+	// inline-dispatch paths pass "" and remain silent.
+	RunLogPath string
 	// OrchestratorAgent carries the parsed frontmatter of
 	// agents/orchestrator.md so PlanRunner can dispatch steps whose
 	// AgentID is guests.OrchestratorGuestID through the orchestrator's
@@ -63,6 +74,29 @@ type RunnerOpts struct {
 	// (legacy inline [execute:plan] fixtures, tests that don't seed
 	// an agents directory).
 	OrchestratorAgent *guests.GuestAgent
+	// Context is the live read-side handle for the five LiveContext
+	// slices (user context, project summary, feature context, shared
+	// context, conversation history). The runner re-queries it at the
+	// start of every step rather than snapshotting at run-start, so
+	// downstream steps see the outputs of upstream steps the moment
+	// they land (plan decision D1). May be nil for legacy test paths
+	// that don't exercise prompt-building.
+	Context prompt.ContextSources
+	// ActiveFeature is the feature slug (e.g. "character-sprites")
+	// that scopes HydrateFeatureContext lookups. When empty the
+	// feature context is suppressed, which matches the legacy behavior
+	// for runs launched outside a feature.
+	ActiveFeature string
+	// ChannelKey is the convo-buffer / shared-context key for the
+	// channel this run was dispatched from (e.g. "prism", "cli").
+	// Required for HistoryText/SharedContextText to resolve the right
+	// per-channel state; empty disables both slices.
+	ChannelKey string
+	// RunStartedAt is the plan-start timestamp used by HistoryText to
+	// filter out user messages that landed after dispatch (D12). Zero
+	// value disables filtering, which is the correct behavior for
+	// non-execute dispatch paths that reuse RunnerOpts in tests.
+	RunStartedAt time.Time
 }
 
 type gateMsg struct {
@@ -94,6 +128,13 @@ type PlanRunner struct {
 	// step has been through in a row so callers (tests, UX nudges) can
 	// detect coherence-decay risk. Reset on Approve/Abort/full revise.
 	consecutivePartialRevises map[string]int
+
+	// revisionState stores structured revision feedback keyed by step
+	// ID so the next run of that step can surface it as a dedicated
+	// "Prior Revision Feedback" section via prompt.BuildGuestPrompt
+	// (plan decision D4). Cleared on successful completion of the
+	// step or on gate approve/abort.
+	revisionState map[string]*prompt.RevisionFeedback
 }
 
 func NewPlanRunner(opts RunnerOpts) *PlanRunner {
@@ -111,6 +152,7 @@ func NewPlanRunner(opts RunnerOpts) *PlanRunner {
 		artifacts:                 make(map[string][]StepArtifact),
 		preservedArtifacts:        make(map[string][]StepArtifact),
 		consecutivePartialRevises: make(map[string]int),
+		revisionState:             make(map[string]*prompt.RevisionFeedback),
 	}
 }
 
@@ -291,8 +333,9 @@ func (r *PlanRunner) runStep(ctx context.Context, step *PlanStep, threadID strin
 		}
 	}
 
-	prompt := r.buildStepPrompt(step, upstream)
-	runOpts := r.buildRunOpts(step, prompt, threadID)
+	promptText := r.buildStepPrompt(step, upstream)
+	r.dumpStepPrompt(step.ID, promptText)
+	runOpts := r.buildRunOpts(step, promptText, threadID)
 
 	result, runErr := r.opts.Runner.Run(ctx, runOpts)
 
@@ -350,6 +393,15 @@ func (r *PlanRunner) handleStepFailure(ctx context.Context, step *PlanStep, thre
 		errMsg = runErr.Error()
 	} else if result != nil {
 		errMsg = fmt.Sprintf("exit code %d", result.ExitCode)
+	}
+
+	// Plan decision D8: append the driver's stderr tail so operators
+	// can triage "exit code 1" failures without digging into the run
+	// log's raw bytes. The driver caps stderr to 16 KiB, and we
+	// further trim to a human-friendly size so step_failed events
+	// stay wire-cheap.
+	if result != nil && strings.TrimSpace(result.Stderr) != "" {
+		errMsg = errMsg + " | stderr: " + trimStderr(result.Stderr)
 	}
 
 	r.opts.RunLog.AppendStepFailed(step.ID, step.AgentID, errMsg)
@@ -526,6 +578,15 @@ func (r *PlanRunner) applyRevise(stepID string, res GateResolution, artifacts []
 		r.mu.Lock()
 		delete(r.preservedArtifacts, stepID)
 		r.consecutivePartialRevises[stepID] = 0
+		prev := r.revisionState[stepID]
+		count := 1
+		if prev != nil {
+			count = prev.RevisionCount + 1
+		}
+		r.revisionState[stepID] = &prompt.RevisionFeedback{
+			RevisionCount: count,
+			UserNote:      res.Feedback,
+		}
 		for i := range r.plan.Steps {
 			if r.plan.Steps[i].ID == stepID {
 				r.plan.Steps[i].Description += "\n\nRevision: " + res.Feedback
@@ -556,6 +617,15 @@ func (r *PlanRunner) applyRevise(stepID string, res GateResolution, artifacts []
 	r.mu.Lock()
 	r.preservedArtifacts[stepID] = preserve
 	r.consecutivePartialRevises[stepID]++
+	prev := r.revisionState[stepID]
+	count := 1
+	if prev != nil {
+		count = prev.RevisionCount + 1
+	}
+	r.revisionState[stepID] = &prompt.RevisionFeedback{
+		RevisionCount: count,
+		UserNote:      res.Feedback,
+	}
 	for i := range r.plan.Steps {
 		if r.plan.Steps[i].ID == stepID {
 			r.plan.Steps[i].Description += "\n\n" + block
@@ -574,6 +644,7 @@ func (r *PlanRunner) clearPartialReviseState(stepID string) {
 	r.mu.Lock()
 	delete(r.preservedArtifacts, stepID)
 	r.consecutivePartialRevises[stepID] = 0
+	delete(r.revisionState, stepID)
 	r.mu.Unlock()
 }
 
@@ -708,17 +779,197 @@ func coherenceHint(review *guests.ReviewSpec) string {
 	return "Keep the preserved items' style, palette, and tone consistent with the regenerated ones. The user approved the preserved items; do not contradict them."
 }
 
+// buildStepPrompt assembles the full guest-facing prompt for a chained
+// step. The output matches the shape produced by prompt.BuildGuestPrompt
+// for chat dispatch so agents see the same persona + context envelope
+// on every turn regardless of dispatch path (plan decision D10).
+//
+// When the optional prompt.ContextSources handle is not wired (legacy
+// tests that construct a bare RunnerOpts), the builder falls back to
+// the minimal Upstream Artifacts block so existing unit tests keep
+// their deterministic expectations.
 func (r *PlanRunner) buildStepPrompt(step *PlanStep, upstream []StepArtifact) string {
-	prompt := step.Description
+	if r.opts.Context == nil {
+		return legacyStepPrompt(step, upstream)
+	}
 
-	if len(upstream) > 0 {
-		prompt += "\n\n## Upstream Artifacts\n"
-		for _, a := range upstream {
-			prompt += fmt.Sprintf("- **%s** (%s): %s\n", a.Path, a.Kind, a.Summary)
+	upstreamIDs := make([]string, 0, len(upstream))
+	for _, a := range upstream {
+		if a.ArtifactID != "" {
+			upstreamIDs = append(upstreamIDs, a.ArtifactID)
 		}
 	}
 
-	return prompt
+	live := prompt.LoadLiveContext(
+		r.opts.Context,
+		r.opts.ActiveFeature,
+		r.opts.ChannelKey,
+		r.opts.RunStartedAt,
+		upstreamIDs,
+	)
+
+	persona := ""
+	if r.opts.AgentsDir != "" {
+		if body, err := guests.LoadPersona(r.opts.AgentsDir, step.AgentID); err == nil {
+			persona = body
+		}
+	}
+
+	planCtx := r.buildPlanContext(step, upstream)
+
+	upstreamSummaries := make([]prompt.ArtifactSummary, 0, len(upstream))
+	for _, a := range upstream {
+		upstreamSummaries = append(upstreamSummaries, prompt.ArtifactSummary{
+			ID:      a.ArtifactID,
+			Kind:    a.Kind,
+			Path:    a.Path,
+			Summary: a.Summary,
+		})
+	}
+
+	r.mu.Lock()
+	revState := r.revisionState[step.ID]
+	r.mu.Unlock()
+
+	opts := prompt.GuestPromptOpts{
+		Mode:                       types.ModeExecute,
+		ChannelKind:                r.opts.ChannelKey,
+		IncludeCharacterCommitment: true,
+		PlanContext:                planCtx,
+		PriorRevisionFeedback:      revState,
+		UpstreamArtifactsText:      prompt.RenderUpstreamArtifacts(upstreamSummaries),
+	}
+
+	return prompt.BuildGuestPrompt(persona, live, step.Description, opts)
+}
+
+// legacyStepPrompt preserves the pre-D10 minimal prompt shape for
+// test harnesses that build a RunnerOpts without a ContextSources
+// handle. New production paths always supply Context and route through
+// prompt.BuildGuestPrompt.
+func legacyStepPrompt(step *PlanStep, upstream []StepArtifact) string {
+	body := step.Description
+	if len(upstream) > 0 {
+		body += "\n\n## Upstream Artifacts\n"
+		for _, a := range upstream {
+			body += fmt.Sprintf("- **%s** (%s): %s\n", a.Path, a.Kind, a.Summary)
+		}
+	}
+	return body
+}
+
+// buildPlanContext assembles the surgical plan-position section
+// described in plan decision D5. Prior steps render as one-liners; the
+// step identified by DependsOn expands into a CompletedStepDetail so
+// the agent sees exactly what its upstream produced. The next-step
+// hint (if any) is derived by scanning plan.Steps for a step whose
+// DependsOn points at the current step.
+func (r *PlanRunner) buildPlanContext(step *PlanStep, upstream []StepArtifact) *prompt.PlanContextOpts {
+	r.mu.Lock()
+	plan := r.plan
+	r.mu.Unlock()
+	if plan == nil {
+		return nil
+	}
+
+	pc := &prompt.PlanContextOpts{
+		PlanTitle:       plan.Metadata.Title,
+		ThisStepID:      step.ID,
+		ThisStepTitle:   firstLine(step.Description),
+		ThisStepAgentID: step.AgentID,
+	}
+
+	for i := range plan.Steps {
+		s := plan.Steps[i]
+		if s.ID == step.ID {
+			continue
+		}
+		if s.Status != StepCompleted {
+			continue
+		}
+		pc.PriorStepSummaries = append(pc.PriorStepSummaries, prompt.StepOneLiner{
+			ID:      s.ID,
+			AgentID: s.AgentID,
+			Status:  string(s.Status),
+			Title:   firstLine(s.Description),
+		})
+	}
+
+	if step.DependsOn != "" {
+		if upstreamStep := findStepInPlan(plan, step.DependsOn); upstreamStep != nil {
+			detail := prompt.CompletedStepDetail{
+				ID:          upstreamStep.ID,
+				AgentID:     upstreamStep.AgentID,
+				Description: upstreamStep.Description,
+			}
+			for _, a := range upstream {
+				detail.Artifacts = append(detail.Artifacts, prompt.ArtifactSummary{
+					ID:      a.ArtifactID,
+					Kind:    a.Kind,
+					Path:    a.Path,
+					Summary: a.Summary,
+				})
+			}
+			pc.UpstreamDetail = append(pc.UpstreamDetail, detail)
+		}
+	}
+
+	for i := range plan.Steps {
+		s := plan.Steps[i]
+		if s.DependsOn == step.ID {
+			pc.NextStep = &prompt.NextStepHint{
+				ID:      s.ID,
+				AgentID: s.AgentID,
+				Title:   firstLine(s.Description),
+			}
+			break
+		}
+	}
+
+	return pc
+}
+
+// dumpStepPrompt writes the final assembled prompt for step to a
+// sibling file of the run log. Silently no-ops when RunLogPath is
+// empty or any filesystem op fails -- the dump is a diagnostic aid,
+// not a correctness requirement. File name is deterministic per step
+// so re-runs of the same step overwrite rather than accumulate.
+func (r *PlanRunner) dumpStepPrompt(stepID, promptText string) {
+	if r.opts.RunLogPath == "" {
+		return
+	}
+	dir := r.opts.RunLogPath + ".prompts"
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		r.logger.Debug("prompt dump: mkdir failed", "step", stepID, "error", err)
+		return
+	}
+	path := filepath.Join(dir, fmt.Sprintf("step-%s.prompt.txt", stepID))
+	if err := os.WriteFile(path, []byte(promptText), 0o644); err != nil {
+		r.logger.Debug("prompt dump: write failed", "step", stepID, "path", path, "error", err)
+	}
+}
+
+// trimStderr reduces a potentially-large stderr blob down to the
+// tail bytes that are typically actionable (last 1 KiB). Called only
+// on failure paths so hot runs pay no cost.
+func trimStderr(s string) string {
+	s = strings.TrimSpace(s)
+	const limit = 1024
+	if len(s) <= limit {
+		return s
+	}
+	return "..." + s[len(s)-limit:]
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	if len(s) > 120 {
+		return s[:117] + "..."
+	}
+	return s
 }
 
 func (r *PlanRunner) buildRunOpts(step *PlanStep, prompt string, threadID string) types.RunOpts {
@@ -757,8 +1008,11 @@ func (r *PlanRunner) buildRunOpts(step *PlanStep, prompt string, threadID string
 		}
 	}
 
-	// Load persona and prepend to prompt
-	if r.opts.AgentsDir != "" {
+	// Load persona and prepend to prompt when buildStepPrompt did not
+	// already inline it via prompt.BuildGuestPrompt (legacy test path
+	// with no ContextSources handle). The prefix check is cheap and
+	// keeps the harness contract backwards compatible.
+	if r.opts.AgentsDir != "" && r.opts.Context == nil {
 		if persona, err := guests.LoadPersona(r.opts.AgentsDir, guestID); err == nil && persona != "" {
 			prompt = persona + "\n\n---\n\n" + prompt
 		}

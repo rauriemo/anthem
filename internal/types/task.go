@@ -170,6 +170,12 @@ type RunResult struct {
 	SessionID string
 	ExitCode  int
 	Output    string
+	// Stderr carries the last bytes written to the driver process's
+	// stderr (bounded; see agent/claude.stderrCapBytes). Populated by
+	// the Claude Code driver so chained runs can surface the concrete
+	// failure reason in step_failed events (plan decision D8) rather
+	// than the opaque "exit code 1" the runner sees today.
+	Stderr    string
 	TokensIn  int
 	TokensOut int
 	CostUSD   float64

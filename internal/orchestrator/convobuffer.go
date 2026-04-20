@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -23,6 +24,14 @@ type ConvoResponse struct {
 type ConvoRound struct {
 	UserMessage string
 	Responses   []ConvoResponse
+	// CreatedAt is the wall-clock moment the user message that
+	// opened this round was recorded. Populated by
+	// RecordUserMessage and consumed by HistoryBefore so chained
+	// runs can filter out messages that arrived after the run
+	// started (plan decision D12). Zero for rounds created before
+	// timestamping landed -- HistoryBefore treats zero as "include"
+	// to preserve legacy behavior.
+	CreatedAt time.Time
 }
 
 type ConvoBuffer struct {
@@ -52,7 +61,30 @@ func (cb *ConvoBuffer) RecordUserMessage(key, text string) {
 		cb.history[key] = hist
 	}
 
-	cb.current[key] = &ConvoRound{UserMessage: text}
+	cb.current[key] = &ConvoRound{UserMessage: text, CreatedAt: time.Now()}
+}
+
+// HistoryBefore returns the same rounds as History but filters out
+// any round whose CreatedAt is after cutoff. Zero cutoff disables the
+// filter (matches History's semantics), which is what non-execute
+// callers pass in. Zero CreatedAt rounds (pre-D12 entries) always
+// pass the filter so legacy fixtures keep rendering.
+func (cb *ConvoBuffer) HistoryBefore(key string, cutoff time.Time) []*ConvoRound {
+	rounds := cb.History(key)
+	if cutoff.IsZero() {
+		return rounds
+	}
+	out := make([]*ConvoRound, 0, len(rounds))
+	for _, r := range rounds {
+		if r == nil {
+			continue
+		}
+		if !r.CreatedAt.IsZero() && !r.CreatedAt.Before(cutoff) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // RecordResponse appends a response to the current round.

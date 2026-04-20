@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -42,6 +43,18 @@ type ArtifactEntry struct {
 	Consumers      []string          `yaml:"consumers,omitempty"`
 	UpdatedAt      string            `yaml:"updated_at,omitempty"`
 	UpdatedBy      string            `yaml:"updated_by,omitempty"`
+	// Origin is the structured provenance block stamped by the
+	// featurewriter. Pointer semantics distinguish "never stamped"
+	// (legacy entries read before backfill has run) from an explicit
+	// legacy backfill (`kind: legacy`). Never populated from agent
+	// JSON -- the context_report parser strips any agent-supplied
+	// origin-shaped keys before the writer sees them.
+	Origin *ArtifactOrigin `yaml:"origin,omitempty"`
+	// SupersededAt is stamped by the re-run cleanup pass when a
+	// step re-executes: the old entry stays on disk for audit
+	// purposes but is filtered out of upstream scoping. Empty when
+	// the entry is still live.
+	SupersededAt string `yaml:"superseded_at,omitempty"`
 }
 
 type ArtifactsFile struct {
@@ -81,6 +94,27 @@ const changelogDisplayLimit = 15
 // and constructs a context injection string for guest agent prompts.
 // Output is split into Recent Activity (timeline) and Current State (snapshot).
 func HydrateFeatureContext(projectRoot, feature string) (string, error) {
+	return hydrateFeatureContext(projectRoot, feature, nil)
+}
+
+// HydrateFeatureContextForStep is the step-scoped variant of
+// HydrateFeatureContext. Artifacts whose IDs appear in focusIDs are
+// rendered with full metadata (path, creator, metadata, consumers,
+// depends_on) while every other artifact collapses to a single-line
+// reference (plan decision D11). Used by the execute runner so a
+// long-running feature with dozens of artifacts still keeps the
+// current step's upstream visually distinct from the rest.
+func HydrateFeatureContextForStep(projectRoot, feature string, focusIDs []string) (string, error) {
+	set := make(map[string]struct{}, len(focusIDs))
+	for _, id := range focusIDs {
+		if id != "" {
+			set[id] = struct{}{}
+		}
+	}
+	return hydrateFeatureContext(projectRoot, feature, set)
+}
+
+func hydrateFeatureContext(projectRoot, feature string, focus map[string]struct{}) (string, error) {
 	if feature == "" {
 		return "", nil
 	}
@@ -102,6 +136,27 @@ func HydrateFeatureContext(projectRoot, feature string) (string, error) {
 		sb.WriteString("\n### Plan Summary\n")
 		sb.WriteString(planBody)
 		sb.WriteString("\n")
+	}
+
+	// Feature Files (plan decision D2). Listing the contents of
+	// .context/features/<feature>/ lets a guest agent discover
+	// auxiliary files the orchestrator hasn't explicitly rendered
+	// (design notes, reference images, agent-authored research) and
+	// request them via Read. Deterministic ordering + kilobyte-scale
+	// sizing keeps the section stable across step runs so prompt
+	// dumps diff cleanly.
+	if files, err := listFeatureFiles(dir); err == nil && len(files) > 0 {
+		sb.WriteString("\n### Feature Files (ls .context/features/")
+		sb.WriteString(feature)
+		sb.WriteString("/)\n")
+		for _, f := range files {
+			if f.IsDir {
+				fmt.Fprintf(&sb, "- %s/\n", f.RelPath)
+				continue
+			}
+			fmt.Fprintf(&sb, "- %s (%d bytes)\n", f.RelPath, f.Size)
+		}
+		sb.WriteString("\nRead any of these with the Read tool if you need more detail than the sections above surface.\n")
 	}
 
 	// Decisions
@@ -173,31 +228,56 @@ func HydrateFeatureContext(projectRoot, feature string) (string, error) {
 
 	if hasArtifacts {
 		sb.WriteString("\n#### Available Artifacts\n")
-		for _, a := range artifacts {
-			fmt.Fprintf(&sb, "- %s (%s) [%s] -- %s\n", a.ID, a.Type, a.Status, a.Description)
-			fmt.Fprintf(&sb, "  Path: %s\n", a.Path)
-			if a.CreatedBy != "" {
-				line := fmt.Sprintf("  By: %s", a.CreatedBy)
-				if len(a.Metadata) > 0 {
-					var parts []string
-					for k, v := range a.Metadata {
-						parts = append(parts, k+": "+v)
-					}
-					line += " | " + strings.Join(parts, ", ")
-				}
-				sb.WriteString(line)
-				sb.WriteString("\n")
-			}
-			if len(a.Consumers) > 0 {
-				fmt.Fprintf(&sb, "  Needed by: %s\n", strings.Join(a.Consumers, ", "))
-			}
-			if len(a.DependsOn) > 0 {
-				fmt.Fprintf(&sb, "  Derived from: %s\n", strings.Join(a.DependsOn, ", "))
-			}
-		}
+		renderArtifactEntries(&sb, artifacts, focus)
 	}
 
 	return sb.String(), nil
+}
+
+// renderArtifactEntries writes the Available Artifacts block. When
+// focus is empty or nil, every artifact renders in full detail
+// (legacy behavior). When focus is non-empty, artifacts whose IDs are
+// in the set render with the full metadata block and every other
+// artifact collapses to a one-line reference so the prompt stays
+// compact for long-running features (plan decision D11).
+func renderArtifactEntries(sb *strings.Builder, artifacts []ArtifactEntry, focus map[string]struct{}) {
+	scoped := len(focus) > 0
+	for _, a := range artifacts {
+		if scoped {
+			if _, ok := focus[a.ID]; !ok {
+				fmt.Fprintf(sb, "- %s (%s) [%s] -- %s\n", a.ID, a.Type, a.Status, trimToLen(a.Description, 80))
+				continue
+			}
+		}
+		fmt.Fprintf(sb, "- %s (%s) [%s] -- %s\n", a.ID, a.Type, a.Status, a.Description)
+		fmt.Fprintf(sb, "  Path: %s\n", a.Path)
+		if a.CreatedBy != "" {
+			line := fmt.Sprintf("  By: %s", a.CreatedBy)
+			if len(a.Metadata) > 0 {
+				var parts []string
+				for k, v := range a.Metadata {
+					parts = append(parts, k+": "+v)
+				}
+				sort.Strings(parts)
+				line += " | " + strings.Join(parts, ", ")
+			}
+			sb.WriteString(line)
+			sb.WriteString("\n")
+		}
+		if len(a.Consumers) > 0 {
+			fmt.Fprintf(sb, "  Needed by: %s\n", strings.Join(a.Consumers, ", "))
+		}
+		if len(a.DependsOn) > 0 {
+			fmt.Fprintf(sb, "  Derived from: %s\n", strings.Join(a.DependsOn, ", "))
+		}
+	}
+}
+
+func trimToLen(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-3] + "..."
 }
 
 func readPlan(path string) (phase string, body string, err error) {
@@ -276,11 +356,24 @@ func readArtifacts(path string) ([]ArtifactEntry, error) {
 	if err := yaml.Unmarshal(data, &af); err != nil {
 		return nil, fmt.Errorf("parsing artifacts: %w", err)
 	}
+	// In-memory legacy backfill: readers downstream of this helper
+	// (HydrateFeatureContext, Available Artifacts rendering, and the
+	// upstream filter introduced in plan decision D11) treat
+	// Origin==nil as an unknown-provenance hazard and skip such entries
+	// from plan-scoped views. Stamping legacy origin here lets them
+	// render unconditionally without needing to disambiguate "pre-PR
+	// file we haven't touched yet" from "active write with missing
+	// tag".
+	backfillLegacyOrigins(af.Artifacts)
 	var available []ArtifactEntry
 	for _, a := range af.Artifacts {
-		if a.Status != "rejected" {
-			available = append(available, a)
+		if a.Status == "rejected" {
+			continue
 		}
+		if a.SupersededAt != "" {
+			continue
+		}
+		available = append(available, a)
 	}
 	return available, nil
 }
@@ -312,6 +405,70 @@ type ChangelogEntry struct {
 type ChangelogFile struct {
 	SchemaVersion string           `yaml:"schema_version"`
 	Entries       []ChangelogEntry `yaml:"entries"`
+}
+
+// featureFileEntry describes a single item inside
+// .context/features/<feature>/ as rendered by HydrateFeatureContext.
+// Kept deliberately flat so the Feature Files section serializes
+// deterministically (filepath.Walk traversal with path-sorted output).
+type featureFileEntry struct {
+	RelPath string
+	Size    int64
+	IsDir   bool
+}
+
+// listFeatureFiles walks the feature directory one level deep (plus
+// shallow subdirectory listings) and returns a sorted slice ready for
+// rendering. Large files are still listed by size so agents know what
+// to expect before calling Read; the section body in
+// HydrateFeatureContext does not embed their contents.
+//
+// The traversal caps at featureFilesMax entries so a feature with
+// thousands of generated sprites doesn't blow up the prompt. Remaining
+// items are surfaced via an "... (N more)" footer in the caller.
+func listFeatureFiles(dir string) ([]featureFileEntry, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]featureFileEntry, 0, len(entries))
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if e.IsDir() {
+			out = append(out, featureFileEntry{RelPath: name, IsDir: true})
+			sub, err := os.ReadDir(full)
+			if err != nil {
+				continue
+			}
+			for _, se := range sub {
+				if strings.HasPrefix(se.Name(), ".") {
+					continue
+				}
+				subInfo, err := se.Info()
+				if err != nil {
+					continue
+				}
+				rel := filepath.ToSlash(filepath.Join(name, se.Name()))
+				if se.IsDir() {
+					out = append(out, featureFileEntry{RelPath: rel + "/", IsDir: true})
+					continue
+				}
+				out = append(out, featureFileEntry{RelPath: rel, Size: subInfo.Size()})
+			}
+			continue
+		}
+		out = append(out, featureFileEntry{RelPath: name, Size: info.Size()})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].RelPath < out[j].RelPath })
+	return out, nil
 }
 
 func readChangelog(path string) ([]ChangelogEntry, error) {
