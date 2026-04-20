@@ -234,8 +234,8 @@ func TestContextReport_StripsAgentOrigin(t *testing.T) {
 		t.Fatalf("no artifact parsed")
 	}
 
-	marshalled, _ := json.Marshal(rep.Artifact)
-	blob := string(marshalled)
+	marshaled, _ := json.Marshal(rep.Artifact)
+	blob := string(marshaled)
 	for _, forbidden := range []string{"\"origin\"", "\"plan_id\"", "\"step_id\""} {
 		if containsJSON(blob, forbidden) {
 			t.Errorf("parser leaked %q into artifact: %s", forbidden, blob)
