@@ -36,3 +36,6 @@ Thumbs.db
 # Anthem runtime
 workspaces/
 .agents-index.json
+
+# Generated for Claude Code MCP (local paths; rewritten on guest dispatch)
+.mcp.json

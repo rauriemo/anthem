@@ -12,7 +12,7 @@ mcp_servers:
     args:
       - scheduler
       - stdio
-    command: C:\Users\I9 Ultra\alfred\bin\alfred.exe
+    command: C:\Users\rafa\Projects\alfred\bin\alfred.exe
     type: stdio
   gmail:
     args:
@@ -20,8 +20,8 @@ mcp_servers:
       - '@gongrzhe/server-gmail-autoauth-mcp'
     command: npx
     env:
-      GMAIL_OAUTH_CREDENTIALS: C:\Users\I9 Ultra\.alfred\google-credentials.json
-      GMAIL_OAUTH_TOKEN: C:\Users\I9 Ultra\.alfred\google-token.json
+      GMAIL_OAUTH_CREDENTIALS: C:\Users\rafa\.alfred\google-credentials.json
+      GMAIL_OAUTH_TOKEN: C:\Users\rafa\.alfred\google-token.json
     type: stdio
   google-calendar:
     args:
@@ -29,8 +29,8 @@ mcp_servers:
       - '@nspady/google-calendar-mcp'
     command: npx
     env:
-      GOOGLE_OAUTH_CREDENTIALS: C:\Users\I9 Ultra\.alfred\google-credentials.json
-      GOOGLE_OAUTH_TOKEN: C:\Users\I9 Ultra\.alfred\google-token.json
+      GOOGLE_OAUTH_CREDENTIALS: C:\Users\rafa\.alfred\google-credentials.json
+      GOOGLE_OAUTH_TOKEN: C:\Users\rafa\.alfred\google-token.json
     type: stdio
 name: Alfred
 role: orchestrator

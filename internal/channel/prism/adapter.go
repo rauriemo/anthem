@@ -99,7 +99,7 @@ type frame struct {
 	// plan, optionally with additional user feedback. The
 	// orchestrator loads the saved plan markdown for plan_id,
 	// appends a "## Addendum" block carrying the feedback, and
-	// synthesises a fresh [system:execute] chat message so the
+	// synthesizes a fresh [system:execute] chat message so the
 	// existing compile path runs unchanged.
 	PlanID   string `json:"plan_id,omitempty"`
 	Feedback string `json:"feedback,omitempty"`

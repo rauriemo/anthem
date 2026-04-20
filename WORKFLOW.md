@@ -27,7 +27,7 @@ agent:
     # schedule_email, schedule_recurring, list_scheduled, cancel)
     scheduler:
       type: stdio
-      command: "C:\\Users\\I9 Ultra\\alfred\\bin\\alfred.exe"
+      command: "C:\\Users\\rafa\\Projects\\alfred\\bin\\alfred.exe"
       args:
         - scheduler
         - stdio
@@ -39,8 +39,8 @@ agent:
         - "-y"
         - "@gongrzhe/server-gmail-autoauth-mcp"
       env:
-        GMAIL_OAUTH_CREDENTIALS: "C:\\Users\\I9 Ultra\\.alfred\\google-credentials.json"
-        GMAIL_OAUTH_TOKEN: "C:\\Users\\I9 Ultra\\.alfred\\google-token.json"
+        GMAIL_OAUTH_CREDENTIALS: "C:\\Users\\rafa\\.alfred\\google-credentials.json"
+        GMAIL_OAUTH_TOKEN: "C:\\Users\\rafa\\.alfred\\google-token.json"
     # Google Calendar (view events, check availability)
     google-calendar:
       type: stdio
@@ -49,8 +49,8 @@ agent:
         - "-y"
         - "@nspady/google-calendar-mcp"
       env:
-        GOOGLE_OAUTH_CREDENTIALS: "C:\\Users\\I9 Ultra\\.alfred\\google-credentials.json"
-        GOOGLE_OAUTH_TOKEN: "C:\\Users\\I9 Ultra\\.alfred\\google-token.json"
+        GOOGLE_OAUTH_CREDENTIALS: "C:\\Users\\rafa\\.alfred\\google-credentials.json"
+        GOOGLE_OAUTH_TOKEN: "C:\\Users\\rafa\\.alfred\\google-token.json"
 
 rules:
   - match:
@@ -64,21 +64,6 @@ system:
     - "Do not commit secrets or credentials"
 
 channels:
-  - kind: slack
-    target: "C0ANBSDP40N"
-    events:
-      - task.completed
-      - task.failed
-      - task.waiting_approval
-      - task.budget_exceeded
-      - maintenance.suggested
-      - wave.completed
-  - kind: dispatch
-    target: "localhost:8081"
-    events:
-      - task.completed
-      - task.failed
-      - maintenance.suggested
   - kind: prism
     target: "localhost:3105"
     events:
