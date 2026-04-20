@@ -2906,12 +2906,23 @@ func (o *Orchestrator) handleExecuteMessageWithPlan(
 // Prism adapter should send to a newly-authenticated client (or to a
 // client that explicitly asks to re-hydrate via a {"type":"hydrate"}
 // frame) so the client can populate its scrollable Execute history
-// without any browser-side persistence. The orchestrator scans every
-// project directory under ~/.anthem/plans/ for run logs (active
-// AND terminal), reduces each to a Snapshot, and emits a single
-// execution.run_history message carrying the newest-first list --
-// capped at runs.DefaultHistoryLimit per plan so the wire footprint
-// stays bounded even with years of accumulated runs on disk.
+// without any browser-side persistence. The orchestrator scans THIS
+// anthem's project directory under ~/.anthem/plans/<slug>/ for run
+// logs (active AND terminal), reduces each to a Snapshot, and emits a
+// single execution.run_history message carrying the newest-first
+// list -- capped at runs.DefaultHistoryLimit per plan so the wire
+// footprint stays bounded even with years of accumulated runs on
+// disk.
+//
+// Scoping to o.projectSlug() is mandatory: multiple anthem processes
+// running under the same user share ~/.anthem/plans/, so a
+// cross-project scan would return every project's runs from every
+// agent's socket. Prism keys runs by the agent id that delivered the
+// frame, which would then produce duplicate rows in the cross-agent
+// aggregated view (one copy per agent that hydrated). Each anthem
+// owns exactly one project (via cfg.Tracker.Repo), so the correct
+// contract is "my agent's hydrate = my project's runs" and cross-
+// project portfolio views are assembled client-side.
 //
 // Called by the adapter's on-connect hook and its inbound hydrate
 // handler (see cmd/anthem/main.go and channel/prism/adapter.go). Safe
@@ -2927,39 +2938,22 @@ func (o *Orchestrator) HistoryEventsForConnect(ctx context.Context) []channel.Ou
 	if o.planStore == nil {
 		return nil
 	}
-	root := o.planStore.Root()
-	entries, err := os.ReadDir(root)
+	projectDir := o.planStore.ProjectDir(o.projectSlug())
+	history, err := runs.ListAll(projectDir, runs.DefaultHistoryLimit)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			o.logger.Warn("hydrate: read plans root", "error", err)
-		}
+		o.logger.Warn("hydrate: list all", "dir", projectDir, "error", err)
 		return nil
 	}
-	var all []runs.Snapshot
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		projectDir := filepath.Join(root, e.Name())
-		history, err := runs.ListAll(projectDir, runs.DefaultHistoryLimit)
-		if err != nil {
-			o.logger.Warn("hydrate: list all", "dir", projectDir, "error", err)
-			continue
-		}
-		for _, entry := range history {
-			all = append(all, entry.Snapshot)
-		}
-	}
-	// Order the combined list newest-first so Prism's
-	// executionStore can index runs directly without a secondary
-	// sort. ListAll already sorted per-project; re-sort the
-	// cross-project concatenation.
-	sort.Slice(all, func(i, j int) bool {
-		return all[i].StartedAt.After(all[j].StartedAt)
-	})
-	if len(all) == 0 {
+	if len(history) == 0 {
 		return nil
 	}
+	all := make([]runs.Snapshot, 0, len(history))
+	for _, entry := range history {
+		all = append(all, entry.Snapshot)
+	}
+	// ListAll already sorted newest-first per plan and then globally
+	// across plans for the single project, so no secondary sort is
+	// needed here.
 	return []channel.OutgoingMessage{runs.RunHistoryEvent(all, "execute:history")}
 }
 
