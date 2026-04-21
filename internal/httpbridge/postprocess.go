@@ -419,18 +419,18 @@ type CheckFrameConsistencyProcessor struct {
 }
 
 type driftResult struct {
-	Status           string    `json:"status"`
-	Device           string    `json:"device"`
-	FramesProcessed  int       `json:"frames_processed"`
-	AnchorThreshold  float64   `json:"anchor_threshold"`
-	WindowThreshold  float64   `json:"window_threshold"`
-	WindowSize       int       `json:"window_size"`
-	AnchorScores     []float64 `json:"anchor_scores"`
-	WindowScores     []float64 `json:"window_scores"`
-	AnchorOutliers   []int     `json:"anchor_outliers"`
-	WindowOutliers   []int     `json:"window_outliers"`
-	ElapsedMS        int       `json:"elapsed_ms"`
-	Error            string    `json:"error,omitempty"`
+	Status          string    `json:"status"`
+	Device          string    `json:"device"`
+	FramesProcessed int       `json:"frames_processed"`
+	AnchorThreshold float64   `json:"anchor_threshold"`
+	WindowThreshold float64   `json:"window_threshold"`
+	WindowSize      int       `json:"window_size"`
+	AnchorScores    []float64 `json:"anchor_scores"`
+	WindowScores    []float64 `json:"window_scores"`
+	AnchorOutliers  []int     `json:"anchor_outliers"`
+	WindowOutliers  []int     `json:"window_outliers"`
+	ElapsedMS       int       `json:"elapsed_ms"`
+	Error           string    `json:"error,omitempty"`
 }
 
 func (p *CheckFrameConsistencyProcessor) Run(artifactPath string, cfg map[string]string, state PipelineState, log *slog.Logger) PostProcessResult {
