@@ -145,10 +145,10 @@ func initializeResult() map[string]any {
 func toolsList(tools []ToolConfig) map[string]any {
 	list := make([]map[string]any, 0, len(tools))
 	for _, t := range tools {
-		inputVars := ExtractInputVars(t.Config.RequestTemplate)
-		properties := make(map[string]any, len(inputVars))
-		required := make([]string, 0, len(inputVars))
-		for _, v := range inputVars {
+		requiredVars, optionalVars := ExtractAllInputVars(t.Config.RequestTemplate)
+		properties := make(map[string]any, len(requiredVars)+len(optionalVars))
+		required := make([]string, 0, len(requiredVars))
+		describeVar := func(v string, isOptional bool) map[string]any {
 			prop := map[string]any{"type": "string"}
 			if spec, ok := t.Config.InputTypes[v]; ok && spec.Type == "file" {
 				maxMB := spec.MaxSizeMB
@@ -161,8 +161,23 @@ func toolsList(tools []ToolConfig) map[string]any {
 				}
 				prop["description"] = fmt.Sprintf("Relative file path (max %dMB, will be %s-encoded by the bridge)", maxMB, enc)
 			}
-			properties[v] = prop
+			if isOptional {
+				existing, _ := prop["description"].(string)
+				suffix := "Optional; a YAML-declared default is used when omitted."
+				if existing != "" {
+					prop["description"] = existing + " " + suffix
+				} else {
+					prop["description"] = suffix
+				}
+			}
+			return prop
+		}
+		for _, v := range requiredVars {
+			properties[v] = describeVar(v, false)
 			required = append(required, v)
+		}
+		for _, v := range optionalVars {
+			properties[v] = describeVar(v, true)
 		}
 
 		// filename is always available for artifact save_to resolution

@@ -288,6 +288,70 @@ func TestMCPProtocol_ToolsList(t *testing.T) {
 	}
 }
 
+// TestMCPProtocol_ToolsList_OptionalInputs regression-tests the matting-pipeline
+// bug where Nano Banana's aspect_ratio — declared in YAML as
+// ${input.aspect_ratio | '1:1'} — was hidden from the MCP tool schema because
+// ExtractInputVars dropped every fallback-default reference. Claude had no way
+// to pass the parameter, so every animation-bound sprite came back 1024x1024.
+// The tool schema must now list optional inputs in `properties` while keeping
+// them out of `required`.
+func TestMCPProtocol_ToolsList_OptionalInputs(t *testing.T) {
+	tools := []ToolConfig{{
+		ID: "image-gen",
+		Config: guests.HTTPToolConfig{
+			URL:    "http://example.com/generate",
+			Method: "POST",
+			RequestTemplate: map[string]any{
+				"prompt":       "${input.prompt}",
+				"aspect_ratio": "${input.aspect_ratio | '1:1'}",
+			},
+		},
+	}}
+
+	input := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}` + "\n"
+	var out bytes.Buffer
+	if err := Run(tools, t.TempDir(), strings.NewReader(input), &out); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := parseResponse(t, out.Bytes())
+	result := resultMap(t, resp)
+	toolList := result["tools"].([]any)
+	tool := toolList[0].(map[string]any)
+	schema := tool["inputSchema"].(map[string]any)
+	props := schema["properties"].(map[string]any)
+	required, _ := schema["required"].([]any)
+
+	if _, ok := props["prompt"]; !ok {
+		t.Error("prompt must be in properties")
+	}
+	if _, ok := props["aspect_ratio"]; !ok {
+		t.Error("aspect_ratio must be in properties even though it has a fallback default")
+	}
+
+	foundRequired := make(map[string]bool)
+	for _, v := range required {
+		if s, ok := v.(string); ok {
+			foundRequired[s] = true
+		}
+	}
+	if !foundRequired["prompt"] {
+		t.Error("prompt must be in required")
+	}
+	if foundRequired["aspect_ratio"] {
+		t.Error("aspect_ratio must NOT be in required — the fallback default makes it optional")
+	}
+
+	aspectProp, ok := props["aspect_ratio"].(map[string]any)
+	if !ok {
+		t.Fatal("aspect_ratio property is not a map")
+	}
+	desc, _ := aspectProp["description"].(string)
+	if !strings.Contains(desc, "default") && !strings.Contains(desc, "Optional") {
+		t.Errorf("optional property description should mention default/optional, got %q", desc)
+	}
+}
+
 func TestMCPProtocol_ToolCall_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any

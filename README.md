@@ -178,8 +178,14 @@ Anthem discovers the sidecar via two environment variables:
 - `MATTE_PYTHON` — absolute path to the venv's Python interpreter (required).
   If unset, Anthem falls back to `python3`/`python` on `PATH`.
 - `MATTE_SCRIPT` — absolute path to `tools/matte/matte.py` (optional). If unset,
-  Anthem derives it from `ANTHEM_HTTP_BRIDGE_ROOT` or the current working
-  directory.
+  Anthem derives it from `ANTHEM_REPO_ROOT`, then by walking up from the
+  anthem binary's directory, then from the current working directory.
+- `ANTHEM_REPO_ROOT` — absolute path to the anthem source tree (optional).
+  Set this when you run `go install ./cmd/anthem` and spawn anthem from a
+  downstream project (e.g. Prism launching anthem with cwd set to a game
+  project); otherwise the matting locator cannot find `tools/matte/matte.py`.
+  **Do not confuse with `ANTHEM_HTTP_BRIDGE_ROOT`**, which is the per-project
+  sandbox root used by the HTTP bridge to confine file-write operations.
 
 If neither leg resolves, the matting ops report `skipped` rather than failing
 the pipeline — matting is optional tooling and a fresh clone should not fail.
@@ -191,6 +197,37 @@ still strictly better than the old `rembg` backend.
 
 Full setup, model-download commands, CPU vs GPU notes, and troubleshooting
 live in [`tools/matte/README.md`](tools/matte/README.md).
+
+### Sprite-sheet sizing (`normalize_frames` scale_factor)
+
+`normalize_frames` accepts a `scale_factor` config knob (integer ≥ 1,
+default 1) that integer-divides the post-centering canvas before
+`stitch_spritesheet` packs frames into a grid. It uses CatmullRom
+(cubic) resampling from `golang.org/x/image/draw`, which is the
+best-quality filter available in Go and closely matches LANCZOS on
+2–8× downscales while preserving the soft alpha edges produced by
+matting.
+
+The knob exists to keep Walt-produced sheets under Unity's 16384-px
+max texture size. Raw 1080p Veo frames normalize to ~1447×3132 per
+frame and stitch to 11560×25128 at 8 cols × 24 rows, which Unity
+rejects on import with *"Failed to initialize texture, out of range
+height got 25128 max supported 16384"*. `scale_factor: "4"` (Walt's
+production default; see
+[`RebelTower/agents/walt.md`](../RebelTower/agents/walt.md)) brings
+the sheet to ~2888×6264 — Unity-safe, visually indistinguishable at
+the typical 2× in-game render target, and ~16 MB instead of 250 MB.
+
+Config precedence (highest wins):
+
+1. `post_process[normalize_frames].config.scale_factor` literal.
+2. `${input.scale_factor | '<default>'}` resolved from the caller's
+   request, if the agent template exposes it (Walt does — it's a
+   per-request override with default 4).
+
+Invalid values (non-integer, < 1) log a warning and fall back to 1.
+If `scale_factor` would collapse the canvas below 1px on any axis,
+the op fails rather than silently producing unusable output.
 
 ## CLI Commands
 

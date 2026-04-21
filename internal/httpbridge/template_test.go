@@ -105,6 +105,84 @@ func TestExtractInputVars_FallbackDefaultsAreOptional(t *testing.T) {
 	}
 }
 
+// TestExtractAllInputVars covers the split required/optional surfaces that
+// feed the MCP tool schema. Without this the MCP client never sees
+// fallback-default inputs (aspect_ratio, spritesheet_columns, ...) and
+// can't override the YAML defaults.
+func TestExtractAllInputVars(t *testing.T) {
+	tests := []struct {
+		name         string
+		tmpl         map[string]any
+		wantRequired []string
+		wantOptional []string
+	}{
+		{
+			name: "required and optional split",
+			tmpl: map[string]any{
+				"prompt":       "${input.prompt}",
+				"aspect_ratio": "${input.aspect_ratio | '1:1'}",
+				"style":        "${input.style | 'painterly'}",
+			},
+			wantRequired: []string{"prompt"},
+			wantOptional: []string{"aspect_ratio", "style"},
+		},
+		{
+			name: "required appearance wins when var referenced both ways",
+			tmpl: map[string]any{
+				"with_default":    "${input.prompt | 'hi'}",
+				"without_default": "${input.prompt}",
+			},
+			wantRequired: []string{"prompt"},
+			wantOptional: []string{},
+		},
+		{
+			name: "nested template with fallbacks",
+			tmpl: map[string]any{
+				"gen_config": map[string]any{
+					"image_config": map[string]any{
+						"aspect_ratio": "${input.aspect_ratio | '1:1'}",
+					},
+				},
+				"contents": []any{
+					map[string]any{"text": "${input.prompt}"},
+				},
+			},
+			wantRequired: []string{"prompt"},
+			wantOptional: []string{"aspect_ratio"},
+		},
+		{
+			name:         "no vars",
+			tmpl:         map[string]any{"static": "value"},
+			wantRequired: []string{},
+			wantOptional: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotRequired, gotOptional := ExtractAllInputVars(tt.tmpl)
+			if !slicesEqual(gotRequired, tt.wantRequired) {
+				t.Errorf("required = %v, want %v", gotRequired, tt.wantRequired)
+			}
+			if !slicesEqual(gotOptional, tt.wantOptional) {
+				t.Errorf("optional = %v, want %v", gotOptional, tt.wantOptional)
+			}
+		})
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // TestResolvePostProcess covers the new helper that applies input-var
 // resolution to post_process config values, the main motivation for Section
 // 1.5 of the plan (walt.md wires fps and spritesheet_columns via this path).

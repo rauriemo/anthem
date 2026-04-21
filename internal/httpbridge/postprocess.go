@@ -19,6 +19,14 @@ import (
 
 	"log/slog"
 
+	// xdraw.CatmullRom is a higher-quality resampling kernel than anything in
+	// stdlib image/draw (which only offers NearestNeighbor and Src composites
+	// via image.Draw). Needed by NormalizeFramesProcessor's scale_factor
+	// downscale path so alpha edges stay soft when packing large Veo frames
+	// into a Unity-safe sprite sheet. Aliased to avoid clashing with the
+	// stdlib `draw` already imported above for the bbox-centering copy.
+	xdraw "golang.org/x/image/draw"
+
 	"github.com/rauriemo/anthem/internal/guests"
 )
 
@@ -109,16 +117,34 @@ type matteSidecar struct {
 
 // locateMattePython resolves how to invoke the matting sidecar.
 //
-//   - Python binary: MATTE_PYTHON env var if set; otherwise lookPath("python3")
-//     then lookPath("python"). Explicit env override wins even when neither
-//     name resolves on PATH (e.g. a venv interpreter).
-//   - Script path: MATTE_SCRIPT env var if set; otherwise derived from
-//     ANTHEM_HTTP_BRIDGE_ROOT + "tools/matte/matte.py", falling back to the
-//     process cwd if the env var is unset.
+// Python binary (first hit wins):
+//  1. MATTE_PYTHON env var — explicit override, used even when the named
+//     interpreter is not on PATH (e.g. a venv interpreter).
+//  2. lookPath("python3")
+//  3. lookPath("python")
 //
-// Returns a skip-friendly error when either leg is missing so processors can
-// emit PostProcessSkipped instead of PostProcessFailed — matting is optional
-// tooling and a fresh-clone environment should not fail the pipeline.
+// Script path (first existing file wins; others are recorded in the error
+// message if every candidate misses):
+//  1. MATTE_SCRIPT env var — absolute path to matte.py.
+//  2. ANTHEM_REPO_ROOT + "tools/matte/matte.py" — install-scoped pointer to
+//     the anthem source tree. This MUST be a distinct env var from
+//     ANTHEM_HTTP_BRIDGE_ROOT, which is the *project* sandbox root set per
+//     downstream project by callers like Prism. Re-using the bridge-root
+//     var caused a naming collision that silently skipped matting when
+//     anthem was spawned with cwd inside a downstream project.
+//  3. Walk up from os.Executable() directory checking
+//     "<dir>/tools/matte/matte.py" at each level (handles source-tree
+//     builds like `go run ./cmd/anthem`; `go install`-ed binaries that live
+//     far from the source tree can't resolve via this path and must rely on
+//     MATTE_SCRIPT or ANTHEM_REPO_ROOT). Bounded to 8 levels so a
+//     misconfigured installation can't cause an unbounded stat storm.
+//  4. os.Getwd() + "tools/matte/matte.py" — preserves the original
+//     dev-from-repo-root ergonomics for contributors running `go run` from
+//     the anthem repo root.
+//
+// Still skip-friendly: processors emit PostProcessSkipped instead of
+// PostProcessFailed when this returns an error — matting is optional tooling
+// and a missing sidecar should not break unrelated tool calls.
 func locateMattePython(lookPath func(file string) (string, error)) (*matteSidecar, error) {
 	if lookPath == nil {
 		lookPath = exec.LookPath
@@ -137,25 +163,64 @@ func locateMattePython(lookPath func(file string) (string, error)) (*matteSideca
 		return nil, fmt.Errorf("matte sidecar: python not found (set MATTE_PYTHON or add python to PATH)")
 	}
 
-	script := os.Getenv("MATTE_SCRIPT")
-	if script == "" {
-		root := os.Getenv("ANTHEM_HTTP_BRIDGE_ROOT")
-		if root == "" {
-			if wd, err := os.Getwd(); err == nil {
-				root = wd
+	type candidate struct {
+		path   string
+		source string
+	}
+	var tried []candidate
+
+	tryScript := func(path, source string) (string, bool) {
+		if path == "" {
+			return "", false
+		}
+		tried = append(tried, candidate{path: path, source: source})
+		if _, err := os.Stat(path); err == nil {
+			return path, true
+		}
+		return "", false
+	}
+
+	if override := os.Getenv("MATTE_SCRIPT"); override != "" {
+		if script, ok := tryScript(override, "MATTE_SCRIPT"); ok {
+			return &matteSidecar{Python: python, Script: script}, nil
+		}
+	}
+
+	if root := os.Getenv("ANTHEM_REPO_ROOT"); root != "" {
+		if script, ok := tryScript(filepath.Join(root, "tools", "matte", "matte.py"), "ANTHEM_REPO_ROOT"); ok {
+			return &matteSidecar{Python: python, Script: script}, nil
+		}
+	}
+
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		for i := 0; i < 8; i++ {
+			source := fmt.Sprintf("exe dir (%d up)", i)
+			if script, ok := tryScript(filepath.Join(dir, "tools", "matte", "matte.py"), source); ok {
+				return &matteSidecar{Python: python, Script: script}, nil
 			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
 		}
-		if root != "" {
-			script = filepath.Join(root, "tools", "matte", "matte.py")
+	}
+
+	if wd, err := os.Getwd(); err == nil {
+		if script, ok := tryScript(filepath.Join(wd, "tools", "matte", "matte.py"), "cwd"); ok {
+			return &matteSidecar{Python: python, Script: script}, nil
 		}
 	}
-	if script == "" {
-		return nil, fmt.Errorf("matte sidecar: script path not resolvable (set MATTE_SCRIPT or ANTHEM_HTTP_BRIDGE_ROOT)")
+
+	if len(tried) == 0 {
+		return nil, fmt.Errorf("matte sidecar: script path not resolvable (set MATTE_SCRIPT or ANTHEM_REPO_ROOT)")
 	}
-	if _, err := os.Stat(script); err != nil {
-		return nil, fmt.Errorf("matte sidecar: %w", err)
+	paths := make([]string, len(tried))
+	for i, c := range tried {
+		paths[i] = fmt.Sprintf("%s (from %s)", c.path, c.source)
 	}
-	return &matteSidecar{Python: python, Script: script}, nil
+	return nil, fmt.Errorf("matte sidecar: matte.py not found; tried:\n  %s\nset MATTE_SCRIPT to the absolute matte.py path, or ANTHEM_REPO_ROOT to the anthem repo root (note: NOT ANTHEM_HTTP_BRIDGE_ROOT — that is the per-project sandbox root)", strings.Join(paths, "\n  "))
 }
 
 // extractSidecarJSON scans sidecar stdout for the last JSON object and
@@ -642,6 +707,24 @@ func (p *NormalizeFramesProcessor) Run(artifactPath string, cfg map[string]strin
 		}
 	}
 
+	// scale_factor: integer divisor applied after centering each frame on the
+	// uniform canvas. Used to bring oversized Veo 1080p outputs (1447x3132
+	// raw → 11560x25128 stitched at 8 cols) down to Unity-safe texture sizes
+	// (≤16384 on any axis). scale_factor=4 is the production default in
+	// Walt's creature pipeline (agents/walt.md). Values <1 or non-integer
+	// are ignored with a warning. Resampling uses CatmullRom (cubic) which
+	// is the best-quality filter shipped in x/image/draw — Lanczos isn't
+	// available in Go stdlib, and CatmullRom matches it closely for 2–8×
+	// downscales while preserving the soft alpha edges produced by matting.
+	scaleFactor := 1
+	if s := cfg["scale_factor"]; s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v >= 1 {
+			scaleFactor = v
+		} else {
+			log.Warn("normalize_frames: invalid scale_factor, using 1", "raw", s)
+		}
+	}
+
 	frames, err := listPNGs(frameDir)
 	if err != nil || len(frames) == 0 {
 		return PostProcessResult{Op: "normalize_frames", Status: PostProcessSkipped, Message: "no frames to normalize"}
@@ -682,6 +765,24 @@ func (p *NormalizeFramesProcessor) Run(artifactPath string, cfg map[string]strin
 	canvasW := unionBBox.Dx() + 2*padding
 	canvasH := unionBBox.Dy() + 2*padding
 
+	// Integer-divide dims so every frame lands on the same pixel grid.
+	// Rounding mode matches the Python patch-work reference (`//` floor div)
+	// so a scale_factor that produced a Unity-safe sheet during manual
+	// asset patching produces the same sheet when re-run through Walt.
+	outW, outH := canvasW, canvasH
+	if scaleFactor > 1 {
+		outW = canvasW / scaleFactor
+		outH = canvasH / scaleFactor
+		if outW < 1 || outH < 1 {
+			return PostProcessResult{
+				Op:     "normalize_frames",
+				Status: PostProcessFailed,
+				Message: fmt.Sprintf("scale_factor=%d collapses %dx%d canvas to <1px; refusing",
+					scaleFactor, canvasW, canvasH),
+			}
+		}
+	}
+
 	for i, fb := range loaded {
 		canvas := image.NewNRGBA(image.Rect(0, 0, canvasW, canvasH))
 		srcBounds := fb.img.Bounds()
@@ -689,18 +790,30 @@ func (p *NormalizeFramesProcessor) Run(artifactPath string, cfg map[string]strin
 		offsetY := padding - unionBBox.Min.Y + srcBounds.Min.Y
 		draw.Draw(canvas, image.Rect(offsetX, offsetY, offsetX+srcBounds.Dx(), offsetY+srcBounds.Dy()), fb.img, srcBounds.Min, draw.Src)
 
-		if err := encodePNG(frames[i], canvas); err != nil {
+		out := canvas
+		if scaleFactor > 1 {
+			scaled := image.NewNRGBA(image.Rect(0, 0, outW, outH))
+			xdraw.CatmullRom.Scale(scaled, scaled.Bounds(), canvas, canvas.Bounds(), xdraw.Over, nil)
+			out = scaled
+		}
+
+		if err := encodePNG(frames[i], out); err != nil {
 			return PostProcessResult{Op: "normalize_frames", Status: PostProcessFailed, Message: fmt.Sprintf("writing %s: %v", filepath.Base(frames[i]), err)}
 		}
 	}
 
-	state["normalized_width"] = strconv.Itoa(canvasW)
-	state["normalized_height"] = strconv.Itoa(canvasH)
+	state["normalized_width"] = strconv.Itoa(outW)
+	state["normalized_height"] = strconv.Itoa(outH)
 
+	msg := fmt.Sprintf("%d frames normalized to %dx%d (padding=%d)", len(frames), outW, outH, padding)
+	if scaleFactor > 1 {
+		msg = fmt.Sprintf("%d frames normalized to %dx%d (padding=%d, scale_factor=%d, pre-scale=%dx%d, CatmullRom)",
+			len(frames), outW, outH, padding, scaleFactor, canvasW, canvasH)
+	}
 	return PostProcessResult{
 		Op:      "normalize_frames",
 		Status:  PostProcessApplied,
-		Message: fmt.Sprintf("%d frames normalized to %dx%d (padding=%d)", len(frames), canvasW, canvasH, padding),
+		Message: msg,
 	}
 }
 

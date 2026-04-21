@@ -24,23 +24,49 @@ var inputVarRe = regexp.MustCompile(`\$\{input\.([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*\|
 // provide a literal default. Variables that only appear with a fallback are
 // treated as optional and left out of the required-input list.
 func ExtractInputVars(tmpl map[string]any) []string {
-	seen := make(map[string]bool)
+	required, _ := ExtractAllInputVars(tmpl)
+	return required
+}
+
+// ExtractAllInputVars splits template references into required vs optional.
+// A variable is "required" if any reference to it lacks a fallback default;
+// it is "optional" only when every appearance uses ${input.X | 'default'}
+// syntax. Returned slices are deduplicated, sorted, and disjoint.
+//
+// Surfacing optional vars separately lets the MCP tool schema advertise them
+// as allowed (but not required) parameters. Hiding them entirely — the old
+// behavior — made Claude blind to knobs like Nano Banana's aspect_ratio, so
+// it had no way to override the YAML-declared default even when the caller
+// asked for it.
+func ExtractAllInputVars(tmpl map[string]any) (required, optional []string) {
+	reqSeen := make(map[string]bool)
+	optSeen := make(map[string]bool)
 	walkTemplate(tmpl, func(s string) {
 		for _, match := range inputVarRe.FindAllStringSubmatch(s, -1) {
-			// Presence of "|" in the matched substring signals a fallback
-			// default; such references are not required from callers.
+			name := match[1]
 			if strings.Contains(match[0], "|") {
+				optSeen[name] = true
 				continue
 			}
-			seen[match[1]] = true
+			reqSeen[name] = true
 		}
 	})
-	vars := make([]string, 0, len(seen))
-	for v := range seen {
-		vars = append(vars, v)
+	// A var that appears both with and without a default is still required —
+	// the required reference dictates that the caller must supply it.
+	for name := range reqSeen {
+		delete(optSeen, name)
 	}
-	sort.Strings(vars)
-	return vars
+	required = make([]string, 0, len(reqSeen))
+	for v := range reqSeen {
+		required = append(required, v)
+	}
+	optional = make([]string, 0, len(optSeen))
+	for v := range optSeen {
+		optional = append(optional, v)
+	}
+	sort.Strings(required)
+	sort.Strings(optional)
+	return required, optional
 }
 
 // ResolveInputs pre-processes tool call arguments according to their declared

@@ -110,6 +110,20 @@ func fakeSidecar(t *testing.T) {
 	t.Setenv("MATTE_SCRIPT", script)
 }
 
+// isolateSidecarEnv neutralizes every fallback the locator would otherwise
+// try: clears ANTHEM_REPO_ROOT (the install-scoped matting locator var) and
+// cd's into an empty temp dir so neither the env-root nor the cwd candidate
+// can accidentally succeed. Exe-walk-up is still consulted, but the test
+// binary lives under the Go test-cache temp tree which does not contain
+// tools/matte/matte.py, so every candidate reliably misses. Tests that want
+// locateMattePython to fail (sidecar-missing paths) should call this before
+// setting their own MATTE_SCRIPT to a bogus path.
+func isolateSidecarEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("ANTHEM_REPO_ROOT", "")
+	t.Chdir(t.TempDir())
+}
+
 // helperCmd returns a CmdRunner that re-invokes the test binary with the
 // given helper mode. The mode name selects the behavior inside
 // TestHelperProcess.
@@ -229,10 +243,144 @@ func TestHelperProcess(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// locateMattePython fallback chain
+// ---------------------------------------------------------------------------
+
+// TestLocateMattePython_FallbackChain exercises every resolver step so a
+// regression that reinstates the old "first env var wins, no other candidates
+// checked" behavior is caught. Each sub-test seeds a single valid candidate
+// and asserts that the resolver picks it.
+func TestLocateMattePython_FallbackChain(t *testing.T) {
+	t.Run("MATTE_SCRIPT wins over every other candidate", func(t *testing.T) {
+		isolateSidecarEnv(t)
+		dir := t.TempDir()
+		script := filepath.Join(dir, "matte.py")
+		mustWriteFile(t, script)
+		t.Setenv("MATTE_PYTHON", "/fake/python")
+		t.Setenv("MATTE_SCRIPT", script)
+
+		sc, err := locateMattePython(noLookPath)
+		if err != nil {
+			t.Fatalf("locateMattePython: %v", err)
+		}
+		if sc.Script != script {
+			t.Errorf("Script = %q, want %q", sc.Script, script)
+		}
+	})
+
+	t.Run("ANTHEM_REPO_ROOT used when MATTE_SCRIPT misses", func(t *testing.T) {
+		isolateSidecarEnv(t)
+		root := t.TempDir()
+		mustMkdirAll(t, filepath.Join(root, "tools", "matte"))
+		script := filepath.Join(root, "tools", "matte", "matte.py")
+		mustWriteFile(t, script)
+		t.Setenv("MATTE_PYTHON", "/fake/python")
+		t.Setenv("MATTE_SCRIPT", filepath.Join(t.TempDir(), "missing.py"))
+		t.Setenv("ANTHEM_REPO_ROOT", root)
+
+		sc, err := locateMattePython(noLookPath)
+		if err != nil {
+			t.Fatalf("locateMattePython: %v", err)
+		}
+		if sc.Script != script {
+			t.Errorf("Script = %q, want %q", sc.Script, script)
+		}
+	})
+
+	// Regression: ANTHEM_HTTP_BRIDGE_ROOT is the per-project sandbox root and
+	// must NOT be consulted by the matting locator. When only
+	// ANTHEM_HTTP_BRIDGE_ROOT points at a valid anthem tree (a downstream
+	// project might intentionally sandbox to a different dir), the locator
+	// should still fail rather than leak project-scoped state into the
+	// install-scoped sidecar lookup.
+	t.Run("ANTHEM_HTTP_BRIDGE_ROOT is ignored by matting locator", func(t *testing.T) {
+		isolateSidecarEnv(t)
+		root := t.TempDir()
+		mustMkdirAll(t, filepath.Join(root, "tools", "matte"))
+		mustWriteFile(t, filepath.Join(root, "tools", "matte", "matte.py"))
+		t.Setenv("MATTE_PYTHON", "/fake/python")
+		t.Setenv("ANTHEM_HTTP_BRIDGE_ROOT", root)
+
+		_, err := locateMattePython(noLookPath)
+		if err == nil {
+			t.Fatal("locateMattePython: want error (HTTP_BRIDGE_ROOT must not resolve matte.py), got nil")
+		}
+		// The guidance text may mention ANTHEM_HTTP_BRIDGE_ROOT as a
+		// disambiguation warning; what must NOT appear is a tried-source
+		// tag labeling it as an attempted candidate.
+		if strings.Contains(err.Error(), "(from ANTHEM_HTTP_BRIDGE_ROOT)") {
+			t.Errorf("error must not list ANTHEM_HTTP_BRIDGE_ROOT as an attempted source, got %q", err.Error())
+		}
+	})
+
+	t.Run("cwd fallback when every env var misses", func(t *testing.T) {
+		isolateSidecarEnv(t)
+		// isolateSidecarEnv cd'd into an empty temp dir; seed matte.py
+		// underneath it so the cwd candidate resolves.
+		wd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("Getwd: %v", err)
+		}
+		mustMkdirAll(t, filepath.Join(wd, "tools", "matte"))
+		script := filepath.Join(wd, "tools", "matte", "matte.py")
+		mustWriteFile(t, script)
+		t.Setenv("MATTE_PYTHON", "/fake/python")
+
+		sc, err := locateMattePython(noLookPath)
+		if err != nil {
+			t.Fatalf("locateMattePython: %v", err)
+		}
+		if sc.Script != script {
+			t.Errorf("Script = %q, want %q", sc.Script, script)
+		}
+	})
+
+	t.Run("every candidate missing surfaces all attempted paths", func(t *testing.T) {
+		isolateSidecarEnv(t)
+		bogus := filepath.Join(t.TempDir(), "never.py")
+		t.Setenv("MATTE_PYTHON", "/fake/python")
+		t.Setenv("MATTE_SCRIPT", bogus)
+		t.Setenv("ANTHEM_REPO_ROOT", filepath.Join(t.TempDir(), "nowhere"))
+
+		_, err := locateMattePython(noLookPath)
+		if err == nil {
+			t.Fatal("locateMattePython: want error, got nil")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "MATTE_SCRIPT") {
+			t.Errorf("error should cite MATTE_SCRIPT source, got %q", msg)
+		}
+		if !strings.Contains(msg, "ANTHEM_REPO_ROOT") {
+			t.Errorf("error should cite ANTHEM_REPO_ROOT source, got %q", msg)
+		}
+		if !strings.Contains(msg, "cwd") {
+			t.Errorf("error should cite cwd source, got %q", msg)
+		}
+	})
+}
+
+func noLookPath(string) (string, error) { return "", fmt.Errorf("no PATH lookup in test") }
+
+func mustWriteFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, nil, 0644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+}
+
+func mustMkdirAll(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // RemoveBackgroundProcessor (BiRefNet sidecar)
 // ---------------------------------------------------------------------------
 
 func TestRemoveBackground_SidecarMissing(t *testing.T) {
+	isolateSidecarEnv(t)
 	t.Setenv("MATTE_PYTHON", "")
 	t.Setenv("MATTE_SCRIPT", filepath.Join(t.TempDir(), "does-not-exist.py"))
 	proc := &RemoveBackgroundProcessor{
@@ -356,6 +504,7 @@ func TestVideoMatte_NoFrameDir(t *testing.T) {
 }
 
 func TestVideoMatte_SidecarMissing(t *testing.T) {
+	isolateSidecarEnv(t)
 	t.Setenv("MATTE_PYTHON", "")
 	t.Setenv("MATTE_SCRIPT", filepath.Join(t.TempDir(), "nope.py"))
 	dir := t.TempDir()
@@ -852,6 +1001,207 @@ func TestNormalizeFrames_DefaultPadding(t *testing.T) {
 	}
 	if state["normalized_height"] != "18" {
 		t.Errorf("normalized_height = %q, want 18", state["normalized_height"])
+	}
+}
+
+// TestNormalizeFrames_ScaleFactorUnset asserts that absent/empty/"1"
+// scale_factor values preserve the legacy (pre-scale-factor) output
+// dimensions exactly. This is the regression guard for every existing
+// caller that doesn't know about scale_factor.
+func TestNormalizeFrames_ScaleFactorUnset(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  map[string]string
+	}{
+		{"absent", map[string]string{"padding": "2"}},
+		{"empty", map[string]string{"padding": "2", "scale_factor": ""}},
+		{"one", map[string]string{"padding": "2", "scale_factor": "1"}},
+		{"negative-ignored", map[string]string{"padding": "2", "scale_factor": "-3"}},
+		{"garbage-ignored", map[string]string{"padding": "2", "scale_factor": "abc"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			frameDir := filepath.Join(dir, "frames")
+			_ = os.Mkdir(frameDir, 0755)
+			writeSizedPNG(t, filepath.Join(frameDir, "frame_0001.png"), 40, 40, image.Rect(4, 4, 36, 36))
+
+			proc := &NormalizeFramesProcessor{}
+			state := PipelineState{"frame_dir": frameDir}
+			r := proc.Run("irrelevant", tc.cfg, state, slog.Default())
+			if r.Status != PostProcessApplied {
+				t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+			}
+
+			// 32x32 content + 2px padding on each side = 36x36.
+			if state["normalized_width"] != "36" || state["normalized_height"] != "36" {
+				t.Errorf("dims = %sx%s, want 36x36",
+					state["normalized_width"], state["normalized_height"])
+			}
+
+			img, err := decodePNG(filepath.Join(frameDir, "frame_0001.png"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b := img.Bounds(); b.Dx() != 36 || b.Dy() != 36 {
+				t.Errorf("frame bounds = %v, want 36x36", b)
+			}
+		})
+	}
+}
+
+// TestNormalizeFrames_ScaleFactorDownscale exercises the production path
+// (CatmullRom downscale for Unity-safe sheets). Checks that:
+//   - output dims follow canvas / scale_factor with floor rounding,
+//   - pipeline state reports post-scale dims (so stitch_spritesheet
+//     packs the correct size),
+//   - alpha is preserved end-to-end (no accidental opaque fill).
+func TestNormalizeFrames_ScaleFactorDownscale(t *testing.T) {
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+
+	// 400x400 canvas (after padding) → scale_factor=4 → 100x100.
+	// Content bbox is 392x392 (4px bleed kept off the edges so union bbox is
+	// tight), padding=4 gives canvas 400x400.
+	writeSizedPNG(t, filepath.Join(frameDir, "frame_0001.png"), 400, 400, image.Rect(4, 4, 396, 396))
+	writeSizedPNG(t, filepath.Join(frameDir, "frame_0002.png"), 400, 400, image.Rect(4, 4, 396, 396))
+
+	proc := &NormalizeFramesProcessor{}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run("irrelevant", map[string]string{
+		"padding":      "4",
+		"scale_factor": "4",
+	}, state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	if got := state["normalized_width"]; got != "100" {
+		t.Errorf("normalized_width = %q, want 100 (post-scale)", got)
+	}
+	if got := state["normalized_height"]; got != "100" {
+		t.Errorf("normalized_height = %q, want 100 (post-scale)", got)
+	}
+	if !strings.Contains(r.Message, "scale_factor=4") {
+		t.Errorf("Message %q does not mention scale_factor", r.Message)
+	}
+	if !strings.Contains(r.Message, "CatmullRom") {
+		t.Errorf("Message %q does not mention CatmullRom filter", r.Message)
+	}
+
+	for _, name := range []string{"frame_0001.png", "frame_0002.png"} {
+		img, err := decodePNG(filepath.Join(frameDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b := img.Bounds(); b.Dx() != 100 || b.Dy() != 100 {
+			t.Errorf("%s bounds = %v, want 100x100", name, b)
+		}
+		// Center pixel should still be opaque-ish (the content was fully
+		// opaque red; CatmullRom over Over composite on an empty NRGBA
+		// preserves both color and alpha).
+		nrgba, ok := img.(*image.NRGBA)
+		if !ok {
+			t.Fatalf("%s is not NRGBA: %T", name, img)
+		}
+		c := nrgba.NRGBAAt(50, 50)
+		if c.A < 250 {
+			t.Errorf("%s center alpha = %d, want opaque (>=250)", name, c.A)
+		}
+		if c.R < 200 {
+			t.Errorf("%s center R = %d, want red (>=200)", name, c.R)
+		}
+	}
+}
+
+// TestNormalizeFrames_ScaleFactorAlphaEdgePreserved verifies that soft
+// alpha edges produced by matting survive a 4× downscale. Fully
+// transparent input regions must stay transparent post-scale (within the
+// CatmullRom filter's tolerance), and the interior of the opaque region
+// must still be opaque — the two failure modes we care about for Unity
+// imports of Walt-produced sheets.
+func TestNormalizeFrames_ScaleFactorAlphaEdgePreserved(t *testing.T) {
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+
+	// 200x200 canvas, content is an opaque red square in the middle.
+	// A generous transparent border lets us sample post-downscale pixels
+	// that should be fully transparent.
+	w, h := 200, 200
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 60; y < 140; y++ {
+		for x := 60; x < 140; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 255, G: 0, B: 0, A: 255})
+		}
+	}
+	f, err := os.Create(filepath.Join(frameDir, "frame_0001.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	proc := &NormalizeFramesProcessor{}
+	state := PipelineState{"frame_dir": frameDir}
+	// padding=80 guarantees the transparent margin after bbox-tightening
+	// exceeds CatmullRom's support radius (~2 source px) for a scale_factor
+	// of 4, so corner samples cannot see any red contribution.
+	r := proc.Run("irrelevant", map[string]string{
+		"padding":      "80",
+		"scale_factor": "4",
+	}, state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	out, err := decodePNG(filepath.Join(frameDir, "frame_0001.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nrgba, ok := out.(*image.NRGBA)
+	if !ok {
+		t.Fatalf("decoded frame is not NRGBA: %T", out)
+	}
+
+	b := nrgba.Bounds()
+	mid := nrgba.NRGBAAt(b.Dx()/2, b.Dy()/2)
+	if mid.A < 250 {
+		t.Errorf("interior alpha = %d, want opaque", mid.A)
+	}
+
+	for _, p := range [][2]int{{0, 0}, {b.Dx() - 1, 0}, {0, b.Dy() - 1}, {b.Dx() - 1, b.Dy() - 1}} {
+		c := nrgba.NRGBAAt(p[0], p[1])
+		if c.A != 0 {
+			t.Errorf("corner (%d,%d) alpha = %d, want 0 (fully transparent)", p[0], p[1], c.A)
+		}
+	}
+}
+
+// TestNormalizeFrames_ScaleFactorCollapseRejected verifies we refuse to
+// write zero-pixel frames when an operator configures a nonsensical
+// scale_factor relative to the source canvas (rather than silently
+// producing unusable output).
+func TestNormalizeFrames_ScaleFactorCollapseRejected(t *testing.T) {
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+
+	writeSizedPNG(t, filepath.Join(frameDir, "frame_0001.png"), 20, 20, image.Rect(5, 5, 15, 15))
+
+	proc := &NormalizeFramesProcessor{}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run("irrelevant", map[string]string{
+		"padding":      "0",
+		"scale_factor": "64",
+	}, state, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Fatalf("Status = %q, want %q; Message: %s", r.Status, PostProcessFailed, r.Message)
+	}
+	if !strings.Contains(r.Message, "scale_factor=64") {
+		t.Errorf("Message %q does not mention scale_factor", r.Message)
 	}
 }
 
