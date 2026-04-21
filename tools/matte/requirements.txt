@@ -1,0 +1,32 @@
+# Matting sidecar dependencies.
+#
+# Install with a dedicated venv under tools/matte/.venv (gitignored) — see
+# tools/matte/README.md for the full setup flow, including the CUDA wheel
+# selection for torch/torchvision. The pins below are the minimum tested
+# versions; patch-level drift is fine.
+
+# Core DL runtime (CUDA or CPU build selected out of band via the PyTorch
+# index URL, see README).
+torch>=2.3.0
+torchvision>=0.18.0
+
+# BiRefNet weights + AutoModel wrapper live on HuggingFace; transformers
+# also serves DINOv2 for the drift check. BiRefNet's remote modeling code
+# additionally imports kornia at load time (not declared on HF), so we pin
+# it here.
+transformers>=4.44.0
+einops>=0.7.0
+timm>=0.9.16
+kornia>=0.7.0
+
+# SAM 2 (segment-anything-2, Apache 2.0) — installed from the Meta repo:
+#   pip install "git+https://github.com/facebookresearch/segment-anything-2.git"
+# Kept out of this pinned list because PyPI packaging has historically
+# drifted. See README for the exact git revision used in production.
+
+# Image I/O + guided filter (ximgproc is in opencv-contrib-python).
+opencv-contrib-python>=4.9.0
+pillow>=10.0.0
+numpy>=1.26.0
+
+# For the Go side we only care about stdout JSON; no server framework.

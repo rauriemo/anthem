@@ -138,11 +138,59 @@ On Windows, if Smart App Control blocks `go run`, build and run the binary direc
 ```bash
 winget install Gyan.FFmpeg          # Windows
 brew install ffmpeg                 # macOS
-pip install "rembg[cli,cpu]"        # CPU inference
-pip install "rembg[cli,gpu]"        # NVIDIA/CUDA GPU (faster)
 ```
 
-Both must be on PATH when Anthem starts. The post-process pipeline degrades gracefully: missing tools cause the corresponding step to be skipped.
+FFmpeg must be on PATH when Anthem starts. Matting and style-drift checks are
+handled by a separate Python sidecar (see next section). The post-process
+pipeline degrades gracefully: missing tools cause the corresponding step to be
+skipped, not failed.
+
+### Matting pipeline (BiRefNet + SAM 2 + DINOv2)
+
+Background removal, video matting, and style-drift detection are implemented in
+a standalone Python sidecar at [`tools/matte/`](tools/matte/). The Go
+post-process ops (`remove_background`, `video_matte`, `check_frame_consistency`)
+shell out to `tools/matte/matte.py` via `MATTE_PYTHON`. The sidecar replaces
+the legacy `rembg` backend with a hybrid stack:
+
+- **BiRefNet** — SOTA dichotomous image segmentation (MIT). Used for still
+  images and as keyframe seeds for video matting.
+- **SAM 2** — Meta's video-native segmentation model (Apache 2.0). Propagates
+  keyframe masks across the full sequence for temporal coherence.
+- **Guided filter** — edge-aware refinement to recover thin details (hair,
+  particles, VFX wisps) that segmentation alone tends to crush.
+- **DINOv2** — ViT embeddings used by the advisory `check_frame_consistency`
+  op to flag style-drift frames via anchor + rolling-window cosine similarity.
+
+**Setup (one-time):**
+
+```bash
+cd tools/matte
+python -m venv .venv
+.venv/Scripts/activate           # Windows PowerShell: .venv\Scripts\Activate.ps1
+# macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt  # CPU wheels by default; see tools/matte/README.md for CUDA
+# See tools/matte/README.md for SAM 2 source install and model checkpoint downloads.
+```
+
+Anthem discovers the sidecar via two environment variables:
+
+- `MATTE_PYTHON` — absolute path to the venv's Python interpreter (required).
+  If unset, Anthem falls back to `python3`/`python` on `PATH`.
+- `MATTE_SCRIPT` — absolute path to `tools/matte/matte.py` (optional). If unset,
+  Anthem derives it from `ANTHEM_HTTP_BRIDGE_ROOT` or the current working
+  directory.
+
+If neither leg resolves, the matting ops report `skipped` rather than failing
+the pipeline — matting is optional tooling and a fresh clone should not fail.
+
+**Degradation:** if SAM 2 fails to load or infer, the `video` sidecar falls
+back to per-frame BiRefNet (no temporal propagation). The Go side surfaces
+the degraded mode in the post-process result message. Per-frame BiRefNet is
+still strictly better than the old `rembg` backend.
+
+Full setup, model-download commands, CPU vs GPU notes, and troubleshooting
+live in [`tools/matte/README.md`](tools/matte/README.md).
 
 ## CLI Commands
 

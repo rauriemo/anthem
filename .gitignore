@@ -39,3 +39,12 @@ workspaces/
 
 # Generated for Claude Code MCP (local paths; rewritten on guest dispatch)
 .mcp.json
+
+# Matting sidecar local state (tools/matte/)
+# Model checkpoints are multi-GB and device-specific; contributors download
+# via tools/matte/README.md instructions on first setup.
+tools/matte/models/
+tools/matte/.venv/
+tools/matte/__pycache__/
+tools/matte/*.pyc
+tools/matte/.test/

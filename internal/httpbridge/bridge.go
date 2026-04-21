@@ -330,7 +330,11 @@ func handleArtifactResponse(artifact *guests.ArtifactTemplate, respBody []byte, 
 
 	msg := fmt.Sprintf("Saved %s (%s, %d bytes) to %s", artifact.Type, mimeType, len(imageBytes), savePath)
 	if len(artifact.PostProcess) > 0 {
-		results, state := RunPostProcess(artifact.PostProcess, savePath, slog.Default())
+		ops, err := ResolvePostProcess(artifact.PostProcess, args)
+		if err != nil {
+			return "", fmt.Errorf("resolving post_process config: %w", err)
+		}
+		results, state := RunPostProcess(ops, savePath, slog.Default())
 		if sp := state["spritesheet_path"]; sp != "" {
 			msg = fmt.Sprintf("Saved sprite sheet image/png to %s (from %s)", sp, savePath)
 		}
@@ -641,7 +645,11 @@ func handleAsyncArtifactDownload(cfg guests.HTTPToolConfig, artifactURI string, 
 	if len(cfg.ResponseArtifact.PostProcess) > 0 {
 		ppLog := postProcessFileLogger(savePath)
 		ppLog.Info("post-process pipeline starting", "ops", len(cfg.ResponseArtifact.PostProcess), "artifact", savePath)
-		results, state := RunPostProcess(cfg.ResponseArtifact.PostProcess, savePath, ppLog)
+		ops, err := ResolvePostProcess(cfg.ResponseArtifact.PostProcess, args)
+		if err != nil {
+			return "", fmt.Errorf("resolving post_process config: %w", err)
+		}
+		results, state := RunPostProcess(ops, savePath, ppLog)
 		if sp := state["spritesheet_path"]; sp != "" {
 			msg = fmt.Sprintf("Saved sprite sheet image/png to %s (from %s)", sp, savePath)
 		}

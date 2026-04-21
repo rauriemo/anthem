@@ -79,31 +79,162 @@ func noopCmd(ctx context.Context) *exec.Cmd {
 	return exec.CommandContext(ctx, "true")
 }
 
-// copyFileCmd creates a platform-appropriate exec.Cmd that copies src to dst.
-func copyFileCmd(ctx context.Context, src, dst string) *exec.Cmd {
-	if runtime.GOOS == "windows" {
-		return exec.CommandContext(ctx, "cmd", "/c", "copy", "/y", filepath.FromSlash(src), filepath.FromSlash(dst))
+// ---------------------------------------------------------------------------
+// Matte sidecar test harness
+//
+// The new matting pipeline shells out to tools/matte/matte.py. For unit tests
+// we mock both legs of locateMattePython:
+//
+//   - MATTE_PYTHON points at an arbitrary non-empty string (never executed;
+//     CmdRunner is fully injected).
+//   - MATTE_SCRIPT points at an empty temp file so os.Stat succeeds.
+//
+// The injected CmdRunner returns an exec.Cmd that re-invokes the current test
+// binary with GO_HELPER_PROCESS=1 and GO_HELPER_MODE=<mode>, hitting
+// TestHelperProcess below. That helper emulates the sidecar: it parses
+// --input / --output / --frames-dir / --output-dir from argv, copies files
+// as needed, emits the appropriate JSON status to stdout, and exits. This
+// pattern is the canonical one used by stdlib os/exec tests.
+// ---------------------------------------------------------------------------
+
+// fakeSidecar creates a zero-byte "script" under t.TempDir() and sets
+// MATTE_PYTHON + MATTE_SCRIPT env vars so locateMattePython succeeds. The
+// env vars are restored by t.Setenv at test teardown.
+func fakeSidecar(t *testing.T) {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "matte.py")
+	if err := os.WriteFile(script, nil, 0644); err != nil {
+		t.Fatalf("creating fake script: %v", err)
 	}
-	return exec.CommandContext(ctx, "cp", src, dst)
+	t.Setenv("MATTE_PYTHON", "/fake/python")
+	t.Setenv("MATTE_SCRIPT", script)
 }
 
-// mockCmdRunner returns a CmdRunner that copies src to the command's output
-// path (the last argument).
-func mockCmdRunner(src string, fail bool) func(ctx context.Context, name string, args ...string) *exec.Cmd {
+// helperCmd returns a CmdRunner that re-invokes the test binary with the
+// given helper mode. The mode name selects the behavior inside
+// TestHelperProcess.
+func helperCmd(mode string) func(ctx context.Context, name string, args ...string) *exec.Cmd {
 	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
-		if fail {
-			return failCmd(ctx)
-		}
-		outPath := args[len(args)-1]
-		return copyFileCmd(ctx, src, outPath)
+		cs := []string{"-test.run=TestHelperProcess", "--"}
+		cs = append(cs, args...)
+		cmd := exec.CommandContext(ctx, os.Args[0], cs...)
+		cmd.Env = append(os.Environ(),
+			"GO_HELPER_PROCESS=1",
+			"GO_HELPER_MODE="+mode,
+		)
+		return cmd
 	}
 }
 
+// TestHelperProcess is not a real test — it's the sidecar simulator invoked
+// via helperCmd. When GO_HELPER_PROCESS=1 it parses the args after "--",
+// performs the file-copy side effects expected by each processor, emits the
+// appropriate JSON status to stdout, and exits without running other tests.
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_HELPER_PROCESS") != "1" {
+		return
+	}
+
+	args := os.Args
+	for i, a := range args {
+		if a == "--" {
+			args = args[i+1:]
+			break
+		}
+	}
+	parse := func(flag string) string {
+		for i, a := range args {
+			if a == flag && i+1 < len(args) {
+				return args[i+1]
+			}
+		}
+		return ""
+	}
+
+	switch os.Getenv("GO_HELPER_MODE") {
+	case "image_transparent":
+		// Write an RGBA PNG with at least one fully transparent edge pixel so
+		// validateAlpha reports hasAlpha=true, fullyOpaque=false.
+		out := parse("--output")
+		img := image.NewNRGBA(image.Rect(0, 0, 8, 8))
+		for y := 0; y < 8; y++ {
+			for x := 0; x < 8; x++ {
+				if x == 0 && y == 0 {
+					img.SetNRGBA(x, y, color.NRGBA{A: 0})
+				} else {
+					img.SetNRGBA(x, y, color.NRGBA{R: 255, A: 255})
+				}
+			}
+		}
+		f, _ := os.Create(out)
+		_ = png.Encode(f, img)
+		f.Close()
+	case "image_opaque":
+		out := parse("--output")
+		img := image.NewNRGBA(image.Rect(0, 0, 8, 8))
+		for y := 0; y < 8; y++ {
+			for x := 0; x < 8; x++ {
+				img.SetNRGBA(x, y, color.NRGBA{R: 255, A: 255})
+			}
+		}
+		f, _ := os.Create(out)
+		_ = png.Encode(f, img)
+		f.Close()
+	case "image_fail":
+		fmt.Fprintln(os.Stderr, "birefnet boom")
+		os.Exit(1)
+	case "video_ok":
+		fd := parse("--frames-dir")
+		od := parse("--output-dir")
+		entries, _ := os.ReadDir(fd)
+		count := 0
+		for _, e := range entries {
+			if strings.HasSuffix(strings.ToLower(e.Name()), ".png") {
+				data, _ := os.ReadFile(filepath.Join(fd, e.Name()))
+				_ = os.WriteFile(filepath.Join(od, e.Name()), data, 0644)
+				count++
+			}
+		}
+		fmt.Printf(`{"status":"ok","mode":"birefnet+sam2+guided","device":"cpu","frames_processed":%d,"keyframes":2,"elapsed_ms":100}`+"\n", count)
+	case "video_degraded":
+		fd := parse("--frames-dir")
+		od := parse("--output-dir")
+		entries, _ := os.ReadDir(fd)
+		count := 0
+		for _, e := range entries {
+			if strings.HasSuffix(strings.ToLower(e.Name()), ".png") {
+				data, _ := os.ReadFile(filepath.Join(fd, e.Name()))
+				_ = os.WriteFile(filepath.Join(od, e.Name()), data, 0644)
+				count++
+			}
+		}
+		fmt.Printf(`{"status":"ok","mode":"birefnet-only","device":"cpu","frames_processed":%d,"keyframes":%d,"elapsed_ms":50}`+"\n", count, count)
+	case "video_no_output":
+		fmt.Println(`{"status":"ok","mode":"birefnet+sam2+guided","device":"cpu","frames_processed":0,"keyframes":0,"elapsed_ms":20}`)
+	case "video_json_error":
+		fmt.Println(`{"status":"error","error":"sam2 exploded"}`)
+	case "video_fail":
+		fmt.Fprintln(os.Stderr, "sidecar crashed")
+		os.Exit(2)
+	case "drift_clean":
+		fmt.Println(`{"status":"ok","device":"cpu","frames_processed":3,"anchor_threshold":0.85,"window_threshold":0.92,"window_size":3,"anchor_scores":[1.0,0.95,0.93],"window_scores":[1.0,0.95,0.95],"anchor_outliers":[],"window_outliers":[],"elapsed_ms":20}`)
+	case "drift_outliers":
+		fmt.Println(`{"status":"ok","device":"cpu","frames_processed":5,"anchor_threshold":0.85,"window_threshold":0.92,"window_size":3,"anchor_scores":[1.0,0.95,0.70,0.92,0.91],"window_scores":[1.0,0.95,0.70,0.80,0.90],"anchor_outliers":[2],"window_outliers":[2,3],"elapsed_ms":25}`)
+	case "drift_json_error":
+		fmt.Println(`{"status":"error","error":"no dinov2 checkpoint"}`)
+	case "drift_fail":
+		os.Exit(3)
+	}
+	os.Exit(0)
+}
+
 // ---------------------------------------------------------------------------
-// RemoveBackgroundProcessor -- single-file mode
+// RemoveBackgroundProcessor (BiRefNet sidecar)
 // ---------------------------------------------------------------------------
 
-func TestRemoveBackground_RembgNotInstalled(t *testing.T) {
+func TestRemoveBackground_SidecarMissing(t *testing.T) {
+	t.Setenv("MATTE_PYTHON", "")
+	t.Setenv("MATTE_SCRIPT", filepath.Join(t.TempDir(), "does-not-exist.py"))
 	proc := &RemoveBackgroundProcessor{
 		LookPath: func(string) (string, error) { return "", fmt.Errorf("not found") },
 	}
@@ -115,45 +246,43 @@ func TestRemoveBackground_RembgNotInstalled(t *testing.T) {
 	if r.Status != PostProcessSkipped {
 		t.Errorf("Status = %q, want %q", r.Status, PostProcessSkipped)
 	}
-	if !strings.Contains(r.Message, "not installed") {
-		t.Errorf("Message = %q, want mention of 'not installed'", r.Message)
+	if !strings.Contains(r.Message, "matte sidecar") {
+		t.Errorf("Message = %q, want mention of 'matte sidecar'", r.Message)
 	}
 }
 
 func TestRemoveBackground_Success(t *testing.T) {
+	fakeSidecar(t)
 	dir := t.TempDir()
 	artifact := filepath.Join(dir, "sprite.png")
 	writePNG(t, artifact, false)
-	transparentSrc := filepath.Join(dir, "transparent_src.png")
-	writePNG(t, transparentSrc, true)
 
 	proc := &RemoveBackgroundProcessor{
-		LookPath:  func(string) (string, error) { return "rembg", nil },
-		CmdRunner: mockCmdRunner(transparentSrc, false),
-	}
-	r := proc.Run(artifact, map[string]string{"model": "u2net"}, PipelineState{}, slog.Default())
-	if r.Status != PostProcessApplied {
-		t.Fatalf("Status = %q, want %q; Message: %s", r.Status, PostProcessApplied, r.Message)
-	}
-	if !strings.Contains(r.Message, "u2net") {
-		t.Errorf("Message = %q, should mention model name", r.Message)
-	}
-}
-
-func TestRemoveBackground_FullyOpaque(t *testing.T) {
-	dir := t.TempDir()
-	artifact := filepath.Join(dir, "sprite.png")
-	writePNG(t, artifact, false)
-	opaqueSrc := filepath.Join(dir, "opaque_src.png")
-	writePNG(t, opaqueSrc, false)
-
-	proc := &RemoveBackgroundProcessor{
-		LookPath:  func(string) (string, error) { return "rembg", nil },
-		CmdRunner: mockCmdRunner(opaqueSrc, false),
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("image_transparent"),
 	}
 	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
 	if r.Status != PostProcessApplied {
 		t.Fatalf("Status = %q, want %q; Message: %s", r.Status, PostProcessApplied, r.Message)
+	}
+	if !strings.Contains(r.Message, "birefnet") {
+		t.Errorf("Message = %q, should mention birefnet", r.Message)
+	}
+}
+
+func TestRemoveBackground_FullyOpaque(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "sprite.png")
+	writePNG(t, artifact, false)
+
+	proc := &RemoveBackgroundProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("image_opaque"),
+	}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
 	}
 	if !strings.Contains(r.Message, "fully opaque") {
 		t.Errorf("Message = %q, should warn about fully opaque output", r.Message)
@@ -161,16 +290,15 @@ func TestRemoveBackground_FullyOpaque(t *testing.T) {
 }
 
 func TestRemoveBackground_CmdFails(t *testing.T) {
+	fakeSidecar(t)
 	dir := t.TempDir()
 	artifact := filepath.Join(dir, "sprite.png")
 	writePNG(t, artifact, false)
 	origData, _ := os.ReadFile(artifact)
 
 	proc := &RemoveBackgroundProcessor{
-		LookPath: func(string) (string, error) { return "rembg", nil },
-		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
-			return failCmd(ctx)
-		},
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("image_fail"),
 	}
 	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
 	if r.Status != PostProcessFailed {
@@ -178,85 +306,26 @@ func TestRemoveBackground_CmdFails(t *testing.T) {
 	}
 	afterData, _ := os.ReadFile(artifact)
 	if string(afterData) != string(origData) {
-		t.Error("original artifact should be preserved when command fails")
-	}
-}
-
-func TestRemoveBackground_DefaultModel(t *testing.T) {
-	dir := t.TempDir()
-	artifact := filepath.Join(dir, "sprite.png")
-	writePNG(t, artifact, false)
-	transparentSrc := filepath.Join(dir, "transparent_src.png")
-	writePNG(t, transparentSrc, true)
-
-	var capturedArgs []string
-	proc := &RemoveBackgroundProcessor{
-		LookPath: func(string) (string, error) { return "rembg", nil },
-		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
-			capturedArgs = args
-			return mockCmdRunner(transparentSrc, false)(ctx, name, args...)
-		},
-	}
-	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
-	if r.Status != PostProcessApplied {
-		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
-	}
-	found := false
-	for i, arg := range capturedArgs {
-		if arg == "-m" && i+1 < len(capturedArgs) && capturedArgs[i+1] == "isnet-anime" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected default model isnet-anime in args: %v", capturedArgs)
-	}
-}
-
-func TestRemoveBackground_CustomModel(t *testing.T) {
-	dir := t.TempDir()
-	artifact := filepath.Join(dir, "sprite.png")
-	writePNG(t, artifact, false)
-	transparentSrc := filepath.Join(dir, "transparent_src.png")
-	writePNG(t, transparentSrc, true)
-
-	var capturedArgs []string
-	proc := &RemoveBackgroundProcessor{
-		LookPath: func(string) (string, error) { return "rembg", nil },
-		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
-			capturedArgs = args
-			return mockCmdRunner(transparentSrc, false)(ctx, name, args...)
-		},
-	}
-	r := proc.Run(artifact, map[string]string{"model": "u2net"}, PipelineState{}, slog.Default())
-	if r.Status != PostProcessApplied {
-		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
-	}
-	found := false
-	for i, arg := range capturedArgs {
-		if arg == "-m" && i+1 < len(capturedArgs) && capturedArgs[i+1] == "u2net" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected custom model u2net in args: %v", capturedArgs)
+		t.Error("original artifact should be preserved when sidecar fails")
 	}
 }
 
 func TestRemoveBackground_AtomicWrite(t *testing.T) {
+	fakeSidecar(t)
 	dir := t.TempDir()
 	artifact := filepath.Join(dir, "sprite.png")
 	writePNG(t, artifact, false)
-	transparentSrc := filepath.Join(dir, "transparent_src.png")
-	writePNG(t, transparentSrc, true)
 
 	var tempFilePath string
 	proc := &RemoveBackgroundProcessor{
-		LookPath: func(string) (string, error) { return "rembg", nil },
+		LookPath: func(string) (string, error) { return "/fake/python", nil },
 		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
-			tempFilePath = args[len(args)-1]
-			return mockCmdRunner(transparentSrc, false)(ctx, name, args...)
+			for i, a := range args {
+				if a == "--output" && i+1 < len(args) {
+					tempFilePath = args[i+1]
+				}
+			}
+			return helperCmd("image_transparent")(ctx, name, args...)
 		},
 	}
 	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
@@ -264,65 +333,38 @@ func TestRemoveBackground_AtomicWrite(t *testing.T) {
 		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
 	}
 	if tempFilePath == "" {
-		t.Fatal("temp file path not captured")
+		t.Fatal("--output temp path not captured")
 	}
 	if tempFilePath == artifact {
-		t.Error("rembg should write to a temp file, not the artifact itself")
+		t.Error("sidecar should write to a temp file, not the artifact itself")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// RemoveBackgroundProcessor -- batch mode
+// VideoMatteProcessor
 // ---------------------------------------------------------------------------
 
-func TestRemoveBackground_BatchMode(t *testing.T) {
+func TestVideoMatte_NoFrameDir(t *testing.T) {
+	proc := &VideoMatteProcessor{}
+	r := proc.Run("video.mp4", nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessSkipped {
+		t.Errorf("Status = %q, want %q", r.Status, PostProcessSkipped)
+	}
+	if !strings.Contains(r.Message, "no frame_dir") {
+		t.Errorf("Message = %q, should mention missing frame_dir", r.Message)
+	}
+}
+
+func TestVideoMatte_SidecarMissing(t *testing.T) {
+	t.Setenv("MATTE_PYTHON", "")
+	t.Setenv("MATTE_SCRIPT", filepath.Join(t.TempDir(), "nope.py"))
 	dir := t.TempDir()
 	frameDir := filepath.Join(dir, "frames")
 	_ = os.Mkdir(frameDir, 0755)
+	writePNG(t, filepath.Join(frameDir, "frame_0001.png"), false)
 
-	frameNames := []string{"frame_0001.png", "frame_0002.png", "frame_0003.png"}
-	for _, name := range frameNames {
-		writePNG(t, filepath.Join(frameDir, name), false)
-	}
-	transparentSrc := filepath.Join(dir, "transparent_src.png")
-	writePNG(t, transparentSrc, true)
-
-	var callCount int
-	proc := &RemoveBackgroundProcessor{
-		LookPath: func(string) (string, error) { return "rembg", nil },
-		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
-			callCount++
-			outDir := args[len(args)-1]
-			for _, fn := range frameNames {
-				_ = copyFile(transparentSrc, filepath.Join(outDir, fn))
-			}
-			return noopCmd(ctx)
-		},
-	}
-
-	state := PipelineState{"frame_dir": frameDir}
-	r := proc.Run(filepath.Join(dir, "video.mp4"), nil, state, slog.Default())
-	if r.Status != PostProcessApplied {
-		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
-	}
-	if callCount != 1 {
-		t.Errorf("expected 1 rembg batch call, got %d", callCount)
-	}
-	if !strings.Contains(r.Message, "3 frames") {
-		t.Errorf("Message = %q, should mention frame count", r.Message)
-	}
-	if !strings.Contains(r.Message, "batch") {
-		t.Errorf("Message = %q, should mention batch mode", r.Message)
-	}
-}
-
-func TestRemoveBackground_BatchNoFrames(t *testing.T) {
-	dir := t.TempDir()
-	frameDir := filepath.Join(dir, "empty_frames")
-	_ = os.Mkdir(frameDir, 0755)
-
-	proc := &RemoveBackgroundProcessor{
-		LookPath: func(string) (string, error) { return "rembg", nil },
+	proc := &VideoMatteProcessor{
+		LookPath: func(string) (string, error) { return "", fmt.Errorf("not found") },
 	}
 	state := PipelineState{"frame_dir": frameDir}
 	r := proc.Run(filepath.Join(dir, "video.mp4"), nil, state, slog.Default())
@@ -331,47 +373,288 @@ func TestRemoveBackground_BatchNoFrames(t *testing.T) {
 	}
 }
 
-func TestRemoveBackground_BatchFails(t *testing.T) {
+func TestVideoMatte_EmptyFrameDir(t *testing.T) {
+	fakeSidecar(t)
 	dir := t.TempDir()
 	frameDir := filepath.Join(dir, "frames")
 	_ = os.Mkdir(frameDir, 0755)
-	writePNG(t, filepath.Join(frameDir, "frame_0001.png"), false)
 
-	proc := &RemoveBackgroundProcessor{
-		LookPath: func(string) (string, error) { return "rembg", nil },
-		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
-			return failCmd(ctx)
-		},
+	proc := &VideoMatteProcessor{
+		LookPath: func(string) (string, error) { return "/fake/python", nil },
 	}
 	state := PipelineState{"frame_dir": frameDir}
 	r := proc.Run(filepath.Join(dir, "video.mp4"), nil, state, slog.Default())
-	if r.Status != PostProcessFailed {
-		t.Errorf("Status = %q, want %q", r.Status, PostProcessFailed)
-	}
-	if !strings.Contains(r.Message, "rembg batch failed") {
-		t.Errorf("Message = %q, should mention batch failure", r.Message)
+	if r.Status != PostProcessSkipped {
+		t.Errorf("Status = %q, want %q", r.Status, PostProcessSkipped)
 	}
 }
 
-func TestRemoveBackground_BatchNoOutput(t *testing.T) {
+func TestVideoMatte_Success(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+	for i := 1; i <= 3; i++ {
+		writePNG(t, filepath.Join(frameDir, fmt.Sprintf("frame_%04d.png", i)), false)
+	}
+
+	proc := &VideoMatteProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("video_ok"),
+	}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run(filepath.Join(dir, "video.mp4"), nil, state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	for _, needle := range []string{"3/3", "birefnet+sam2+guided", "cpu"} {
+		if !strings.Contains(r.Message, needle) {
+			t.Errorf("Message = %q, should contain %q", r.Message, needle)
+		}
+	}
+}
+
+func TestVideoMatte_DegradedFallback(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+	writePNG(t, filepath.Join(frameDir, "frame_0001.png"), false)
+	writePNG(t, filepath.Join(frameDir, "frame_0002.png"), false)
+
+	proc := &VideoMatteProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("video_degraded"),
+	}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run(filepath.Join(dir, "video.mp4"), nil, state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "birefnet-only") {
+		t.Errorf("Message = %q, should surface degraded mode 'birefnet-only'", r.Message)
+	}
+}
+
+func TestVideoMatte_NoOutput(t *testing.T) {
+	fakeSidecar(t)
 	dir := t.TempDir()
 	frameDir := filepath.Join(dir, "frames")
 	_ = os.Mkdir(frameDir, 0755)
 	writePNG(t, filepath.Join(frameDir, "frame_0001.png"), false)
 
-	proc := &RemoveBackgroundProcessor{
-		LookPath: func(string) (string, error) { return "rembg", nil },
-		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
-			return noopCmd(ctx)
-		},
+	proc := &VideoMatteProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("video_no_output"),
 	}
 	state := PipelineState{"frame_dir": frameDir}
 	r := proc.Run(filepath.Join(dir, "video.mp4"), nil, state, slog.Default())
 	if r.Status != PostProcessFailed {
 		t.Errorf("Status = %q, want %q", r.Status, PostProcessFailed)
 	}
-	if !strings.Contains(r.Message, "no output") {
-		t.Errorf("Message = %q, should mention no output", r.Message)
+	if !strings.Contains(r.Message, "no matted frames") {
+		t.Errorf("Message = %q, should mention empty output", r.Message)
+	}
+}
+
+func TestVideoMatte_JSONReportsError(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+	writePNG(t, filepath.Join(frameDir, "frame_0001.png"), false)
+
+	proc := &VideoMatteProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("video_json_error"),
+	}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run(filepath.Join(dir, "video.mp4"), nil, state, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Errorf("Status = %q, want %q", r.Status, PostProcessFailed)
+	}
+	if !strings.Contains(r.Message, "sam2 exploded") {
+		t.Errorf("Message = %q, should surface sidecar error", r.Message)
+	}
+}
+
+func TestVideoMatte_CmdFails(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+	writePNG(t, filepath.Join(frameDir, "frame_0001.png"), false)
+
+	proc := &VideoMatteProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("video_fail"),
+	}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run(filepath.Join(dir, "video.mp4"), nil, state, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Errorf("Status = %q, want %q", r.Status, PostProcessFailed)
+	}
+}
+
+func TestVideoMatte_ConfigForwarded(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+	writePNG(t, filepath.Join(frameDir, "frame_0001.png"), false)
+
+	var capturedArgs []string
+	proc := &VideoMatteProcessor{
+		LookPath: func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			capturedArgs = append([]string(nil), args...)
+			return helperCmd("video_ok")(ctx, name, args...)
+		},
+	}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run(filepath.Join(dir, "video.mp4"),
+		map[string]string{"keyframe_every": "12", "refine": "false", "radius": "4", "no_sam2": "true"},
+		state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	joined := strings.Join(capturedArgs, " ")
+	for _, need := range []string{"--keyframe-every 12", "--radius 4", "--no-sam2"} {
+		if !strings.Contains(joined, need) {
+			t.Errorf("expected %q in args: %v", need, capturedArgs)
+		}
+	}
+	if strings.Contains(joined, "--refine") {
+		t.Errorf("refine=false should drop --refine from args: %v", capturedArgs)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckFrameConsistencyProcessor
+// ---------------------------------------------------------------------------
+
+func TestCheckFrameConsistency_NoFrameDir(t *testing.T) {
+	proc := &CheckFrameConsistencyProcessor{}
+	r := proc.Run("irrelevant", nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessSkipped {
+		t.Errorf("Status = %q, want %q", r.Status, PostProcessSkipped)
+	}
+}
+
+func TestCheckFrameConsistency_Clean(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+
+	proc := &CheckFrameConsistencyProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("drift_clean"),
+	}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run("irrelevant", nil, state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "no drift") {
+		t.Errorf("Message = %q, should report no drift", r.Message)
+	}
+	if state["drift_frames"] != "" {
+		t.Errorf("drift_frames = %q, want empty for clean run", state["drift_frames"])
+	}
+}
+
+func TestCheckFrameConsistency_Outliers(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+
+	proc := &CheckFrameConsistencyProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("drift_outliers"),
+	}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run("irrelevant", nil, state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	// Union of anchor_outliers [2] and window_outliers [2,3] = {2, 3}
+	if state["drift_frames"] != "2,3" {
+		t.Errorf("drift_frames = %q, want '2,3'", state["drift_frames"])
+	}
+	if !strings.Contains(r.Message, "2 outlier frames") {
+		t.Errorf("Message = %q, should report outlier count", r.Message)
+	}
+	if state["drift_report"] == "" {
+		t.Error("drift_report should be populated for outlier runs")
+	}
+}
+
+func TestCheckFrameConsistency_JSONReportsError(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+
+	proc := &CheckFrameConsistencyProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("drift_json_error"),
+	}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run("irrelevant", nil, state, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Errorf("Status = %q, want %q", r.Status, PostProcessFailed)
+	}
+	if !strings.Contains(r.Message, "dinov2") {
+		t.Errorf("Message = %q, should surface sidecar error", r.Message)
+	}
+}
+
+func TestCheckFrameConsistency_CmdFails(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+
+	proc := &CheckFrameConsistencyProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("drift_fail"),
+	}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run("irrelevant", nil, state, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Errorf("Status = %q, want %q", r.Status, PostProcessFailed)
+	}
+}
+
+func TestCheckFrameConsistency_ConfigForwarded(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+
+	var capturedArgs []string
+	proc := &CheckFrameConsistencyProcessor{
+		LookPath: func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			capturedArgs = append([]string(nil), args...)
+			return helperCmd("drift_clean")(ctx, name, args...)
+		},
+	}
+	state := PipelineState{"frame_dir": frameDir}
+	r := proc.Run("irrelevant",
+		map[string]string{"anchor_threshold": "0.70", "window_threshold": "0.88", "window_size": "5"},
+		state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	joined := strings.Join(capturedArgs, " ")
+	for _, need := range []string{"--anchor-threshold 0.70", "--window-threshold 0.88", "--window-size 5"} {
+		if !strings.Contains(joined, need) {
+			t.Errorf("expected %q in args: %v", need, capturedArgs)
+		}
 	}
 }
 
@@ -824,11 +1107,11 @@ func TestRunPostProcess_EmptyOps(t *testing.T) {
 
 func TestFormatResults(t *testing.T) {
 	results := []PostProcessResult{
-		{Op: "remove_background", Status: PostProcessApplied, Message: "isnet-anime"},
+		{Op: "remove_background", Status: PostProcessApplied, Message: "birefnet"},
 		{Op: "unknown", Status: PostProcessSkipped, Message: "unknown operation"},
 	}
 	msg := FormatResults("Saved image/png to file.png", results)
-	if !strings.Contains(msg, "remove_background: applied (isnet-anime)") {
+	if !strings.Contains(msg, "remove_background: applied (birefnet)") {
 		t.Errorf("formatted message missing applied line: %s", msg)
 	}
 	if !strings.Contains(msg, "unknown: skipped (unknown operation)") {

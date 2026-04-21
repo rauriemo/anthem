@@ -12,14 +12,26 @@ import (
 	"github.com/rauriemo/anthem/internal/guests"
 )
 
-var inputVarRe = regexp.MustCompile(`\$\{input\.([a-zA-Z_][a-zA-Z0-9_]*)\}`)
+// inputVarRe matches ${input.NAME} and ${input.NAME | 'default'}. The first
+// capture group is the variable name; the second, if present, is a literal
+// default value used when the variable is absent from vars. The default value
+// syntax is only consulted inside post-process config (see ResolvePostProcess);
+// request templates treat missing variables as errors.
+var inputVarRe = regexp.MustCompile(`\$\{input\.([a-zA-Z_][a-zA-Z0-9_]*)(?:\s*\|\s*'([^']*)')?\}`)
 
 // ExtractInputVars scans a request template for ${input.*} patterns and returns
-// the deduplicated, sorted list of variable names.
+// the deduplicated, sorted list of variable names whose references do NOT
+// provide a literal default. Variables that only appear with a fallback are
+// treated as optional and left out of the required-input list.
 func ExtractInputVars(tmpl map[string]any) []string {
 	seen := make(map[string]bool)
 	walkTemplate(tmpl, func(s string) {
 		for _, match := range inputVarRe.FindAllStringSubmatch(s, -1) {
+			// Presence of "|" in the matched substring signals a fallback
+			// default; such references are not required from callers.
+			if strings.Contains(match[0], "|") {
+				continue
+			}
 			seen[match[1]] = true
 		}
 	})
@@ -164,17 +176,53 @@ func resolveString(s string, vars map[string]string) (string, error) {
 	result := inputVarRe.ReplaceAllStringFunc(s, func(match string) string {
 		sub := inputVarRe.FindStringSubmatch(match)
 		name := sub[1]
-		val, ok := vars[name]
-		if !ok {
-			missing = append(missing, name)
-			return match
+		if val, ok := vars[name]; ok {
+			return val
 		}
-		return val
+		// Fallback default when the reference uses ${input.X | 'default'}
+		// syntax; the "|" character anywhere in the match signals presence
+		// of a literal default. Missing-without-default stays an error.
+		if strings.Contains(match, "|") {
+			return sub[2]
+		}
+		missing = append(missing, name)
+		return match
 	})
 	if len(missing) > 0 {
 		return "", fmt.Errorf("missing template variables: %s", strings.Join(missing, ", "))
 	}
 	return result, nil
+}
+
+// ResolvePostProcess returns a copy of ops whose Config values have every
+// ${input.X} (or ${input.X | 'default'}) reference resolved against vars.
+// Unreferenced keys pass through verbatim. Signals an error when a reference
+// lacks both a matching input and a default.
+//
+// Lifts the same resolver used for the request template so post_process
+// configs (e.g. walt.md's fps and spritesheet columns) can be parameterized
+// by caller inputs with a YAML-declared fallback default.
+func ResolvePostProcess(ops []guests.PostProcessOp, vars map[string]string) ([]guests.PostProcessOp, error) {
+	if len(ops) == 0 {
+		return ops, nil
+	}
+	out := make([]guests.PostProcessOp, len(ops))
+	for i, op := range ops {
+		out[i] = guests.PostProcessOp{Op: op.Op}
+		if len(op.Config) == 0 {
+			continue
+		}
+		cfg := make(map[string]string, len(op.Config))
+		for k, v := range op.Config {
+			resolved, err := resolveString(v, vars)
+			if err != nil {
+				return nil, fmt.Errorf("op %q config %q: %w", op.Op, k, err)
+			}
+			cfg[k] = resolved
+		}
+		out[i].Config = cfg
+	}
+	return out, nil
 }
 
 func walkTemplate(v any, fn func(string)) {

@@ -49,10 +49,12 @@ type PostProcessor interface {
 }
 
 var processors = map[string]PostProcessor{
-	"remove_background":    &RemoveBackgroundProcessor{},
-	"extract_video_frames": &ExtractVideoFramesProcessor{},
-	"normalize_frames":     &NormalizeFramesProcessor{},
-	"stitch_spritesheet":   &StitchSpritesheetProcessor{},
+	"remove_background":       &RemoveBackgroundProcessor{},
+	"extract_video_frames":    &ExtractVideoFramesProcessor{},
+	"video_matte":             &VideoMatteProcessor{},
+	"check_frame_consistency": &CheckFrameConsistencyProcessor{},
+	"normalize_frames":        &NormalizeFramesProcessor{},
+	"stitch_spritesheet":      &StitchSpritesheetProcessor{},
 }
 
 // RunPostProcess executes an ordered list of post-processing operations on the
@@ -93,19 +95,98 @@ func FormatResults(msg string, results []PostProcessResult) string {
 }
 
 // ---------------------------------------------------------------------------
+// Shared matte-sidecar locator
+// ---------------------------------------------------------------------------
+
+// matteSidecar captures the resolved python + matte.py paths used by every
+// processor that shells out to tools/matte/matte.py. Keeping this in a struct
+// (rather than two return values) keeps the caller sites readable when we
+// start passing the resolved location into exec.CommandContext.
+type matteSidecar struct {
+	Python string
+	Script string
+}
+
+// locateMattePython resolves how to invoke the matting sidecar.
+//
+//   - Python binary: MATTE_PYTHON env var if set; otherwise lookPath("python3")
+//     then lookPath("python"). Explicit env override wins even when neither
+//     name resolves on PATH (e.g. a venv interpreter).
+//   - Script path: MATTE_SCRIPT env var if set; otherwise derived from
+//     ANTHEM_HTTP_BRIDGE_ROOT + "tools/matte/matte.py", falling back to the
+//     process cwd if the env var is unset.
+//
+// Returns a skip-friendly error when either leg is missing so processors can
+// emit PostProcessSkipped instead of PostProcessFailed — matting is optional
+// tooling and a fresh-clone environment should not fail the pipeline.
+func locateMattePython(lookPath func(file string) (string, error)) (*matteSidecar, error) {
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+
+	python := os.Getenv("MATTE_PYTHON")
+	if python == "" {
+		for _, candidate := range []string{"python3", "python"} {
+			if p, err := lookPath(candidate); err == nil {
+				python = p
+				break
+			}
+		}
+	}
+	if python == "" {
+		return nil, fmt.Errorf("matte sidecar: python not found (set MATTE_PYTHON or add python to PATH)")
+	}
+
+	script := os.Getenv("MATTE_SCRIPT")
+	if script == "" {
+		root := os.Getenv("ANTHEM_HTTP_BRIDGE_ROOT")
+		if root == "" {
+			if wd, err := os.Getwd(); err == nil {
+				root = wd
+			}
+		}
+		if root != "" {
+			script = filepath.Join(root, "tools", "matte", "matte.py")
+		}
+	}
+	if script == "" {
+		return nil, fmt.Errorf("matte sidecar: script path not resolvable (set MATTE_SCRIPT or ANTHEM_HTTP_BRIDGE_ROOT)")
+	}
+	if _, err := os.Stat(script); err != nil {
+		return nil, fmt.Errorf("matte sidecar: %w", err)
+	}
+	return &matteSidecar{Python: python, Script: script}, nil
+}
+
+// extractSidecarJSON scans sidecar stdout for the last JSON object and
+// unmarshals it into out. The sidecar emits a single JSON status line to
+// stdout; keeping this lenient ("take the last {...} line") avoids breaking
+// on accidental extra stdout from upstream libraries.
+func extractSidecarJSON(stdout []byte, out any) error {
+	lines := strings.Split(strings.TrimSpace(string(stdout)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
+			return json.Unmarshal([]byte(line), out)
+		}
+	}
+	return fmt.Errorf("no JSON status line in sidecar stdout")
+}
+
+// ---------------------------------------------------------------------------
 // RemoveBackgroundProcessor
 // ---------------------------------------------------------------------------
 
-// RemoveBackgroundProcessor removes the background from a PNG image using rembg.
-// Supports batch mode: if state["frame_dir"] is set, processes every PNG in that
-// directory instead of the single artifactPath. Both LookPath and CmdRunner are
-// injectable for testing; nil values fall back to the stdlib equivalents.
+// RemoveBackgroundProcessor removes the background from a PNG image using the
+// BiRefNet-backed matting sidecar. The legacy rembg backend and batch-mode
+// (state["frame_dir"]) entry point have both been removed — video matting is
+// now handled by VideoMatteProcessor, and still-image matting has a single
+// clean backend. Both LookPath and CmdRunner are injectable for tests; nil
+// values fall back to the stdlib equivalents.
 type RemoveBackgroundProcessor struct {
 	LookPath  func(file string) (string, error)
 	CmdRunner func(ctx context.Context, name string, args ...string) *exec.Cmd
 }
-
-const defaultRembgModel = "isnet-anime"
 
 func (p *RemoveBackgroundProcessor) Run(artifactPath string, cfg map[string]string, state PipelineState, log *slog.Logger) PostProcessResult {
 	lookPath := p.LookPath
@@ -117,28 +198,16 @@ func (p *RemoveBackgroundProcessor) Run(artifactPath string, cfg map[string]stri
 		cmdRunner = exec.CommandContext
 	}
 
-	rembgPath, err := lookPath("rembg")
+	sidecar, err := locateMattePython(lookPath)
 	if err != nil {
 		return PostProcessResult{
 			Op:      "remove_background",
 			Status:  PostProcessSkipped,
-			Message: "rembg not installed",
+			Message: err.Error(),
 		}
 	}
 
-	model := cfg["model"]
-	if model == "" {
-		model = defaultRembgModel
-	}
-
-	if frameDir := state["frame_dir"]; frameDir != "" {
-		return p.runBatch(frameDir, rembgPath, model, cmdRunner, log)
-	}
-	return p.runSingle(artifactPath, rembgPath, model, cmdRunner, log)
-}
-
-func (p *RemoveBackgroundProcessor) runSingle(artifactPath, rembgPath, model string, cmdRunner func(context.Context, string, ...string) *exec.Cmd, log *slog.Logger) PostProcessResult {
-	tmpFile, err := os.CreateTemp("", "rembg-*.png")
+	tmpFile, err := os.CreateTemp("", "birefnet-*.png")
 	if err != nil {
 		return PostProcessResult{
 			Op:      "remove_background",
@@ -150,31 +219,34 @@ func (p *RemoveBackgroundProcessor) runSingle(artifactPath, rembgPath, model str
 	tmpFile.Close()
 	defer os.Remove(tmpPath)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	cmd := cmdRunner(ctx, rembgPath, "i", "-m", model, artifactPath, tmpPath)
+	cmd := cmdRunner(ctx, sidecar.Python, sidecar.Script, "image",
+		"--input", artifactPath,
+		"--output", tmpPath,
+	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return PostProcessResult{
 			Op:      "remove_background",
 			Status:  PostProcessFailed,
-			Message: fmt.Sprintf("rembg failed: %v: %s", err, truncateBytes(output, 200)),
+			Message: fmt.Sprintf("birefnet sidecar failed: %v: %s", err, truncateBytes(output, 500)),
 		}
 	}
 
 	hasAlpha, fullyOpaque := validateAlpha(tmpPath)
 	if !hasAlpha {
-		log.Warn("rembg output is not an RGBA image, keeping original", "path", artifactPath)
+		log.Warn("birefnet output is not an RGBA image, keeping original", "path", artifactPath)
 		return PostProcessResult{
 			Op:      "remove_background",
 			Status:  PostProcessFailed,
-			Message: "rembg output is not an RGBA image",
+			Message: "birefnet output is not an RGBA image",
 		}
 	}
 	if fullyOpaque {
-		log.Warn("rembg output appears fully opaque, background removal may not have been effective",
-			"path", artifactPath, "model", model)
+		log.Warn("birefnet output appears fully opaque, background removal may not have been effective",
+			"path", artifactPath)
 	}
 
 	if err := os.Rename(tmpPath, artifactPath); err != nil {
@@ -185,7 +257,7 @@ func (p *RemoveBackgroundProcessor) runSingle(artifactPath, rembgPath, model str
 		}
 	}
 
-	msg := model
+	msg := "birefnet"
 	if fullyOpaque {
 		msg += "; warning: output appears fully opaque"
 	}
@@ -196,56 +268,277 @@ func (p *RemoveBackgroundProcessor) runSingle(artifactPath, rembgPath, model str
 	}
 }
 
-func (p *RemoveBackgroundProcessor) runBatch(frameDir, rembgPath, model string, cmdRunner func(context.Context, string, ...string) *exec.Cmd, log *slog.Logger) PostProcessResult {
-	frames, err := listPNGs(frameDir)
-	if err != nil {
-		return PostProcessResult{Op: "remove_background", Status: PostProcessFailed, Message: fmt.Sprintf("listing frames: %v", err)}
-	}
-	if len(frames) == 0 {
-		return PostProcessResult{Op: "remove_background", Status: PostProcessSkipped, Message: "no frames in frame_dir"}
+// ---------------------------------------------------------------------------
+// VideoMatteProcessor
+// ---------------------------------------------------------------------------
+
+// VideoMatteProcessor mattes every frame in state["frame_dir"] via the
+// BiRefNet (keyframes) + SAM 2 (propagation) + guided-filter sidecar. On SAM 2
+// failure the sidecar degrades to per-frame BiRefNet and reports the mode in
+// its stdout JSON; the Go side surfaces the mode in the result message.
+//
+// Config keys (all optional):
+//
+//	keyframe_every  int, default "8"      — one BiRefNet seed every N frames
+//	refine          bool, default "true"  — enable guided-filter edge recovery
+//	radius          int, default "8"      — guided-filter radius
+//	no_sam2         bool, default "false" — skip SAM 2, per-frame BiRefNet only
+type VideoMatteProcessor struct {
+	LookPath  func(file string) (string, error)
+	CmdRunner func(ctx context.Context, name string, args ...string) *exec.Cmd
+}
+
+type videoMatteResult struct {
+	Status          string `json:"status"`
+	Mode            string `json:"mode"`
+	Device          string `json:"device"`
+	FramesProcessed int    `json:"frames_processed"`
+	Keyframes       int    `json:"keyframes"`
+	ElapsedMS       int    `json:"elapsed_ms"`
+	Error           string `json:"error,omitempty"`
+}
+
+func (p *VideoMatteProcessor) Run(artifactPath string, cfg map[string]string, state PipelineState, log *slog.Logger) PostProcessResult {
+	frameDir := state["frame_dir"]
+	if frameDir == "" {
+		return PostProcessResult{Op: "video_matte", Status: PostProcessSkipped, Message: "no frame_dir in pipeline state"}
 	}
 
-	outDir, err := os.MkdirTemp("", "rembg-out-*")
+	lookPath := p.LookPath
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	cmdRunner := p.CmdRunner
+	if cmdRunner == nil {
+		cmdRunner = exec.CommandContext
+	}
+
+	sidecar, err := locateMattePython(lookPath)
 	if err != nil {
-		return PostProcessResult{Op: "remove_background", Status: PostProcessFailed, Message: fmt.Sprintf("creating output dir: %v", err)}
+		return PostProcessResult{Op: "video_matte", Status: PostProcessSkipped, Message: err.Error()}
+	}
+
+	frames, err := listPNGs(frameDir)
+	if err != nil || len(frames) == 0 {
+		return PostProcessResult{Op: "video_matte", Status: PostProcessSkipped, Message: "no frames in frame_dir"}
+	}
+
+	outDir, err := os.MkdirTemp("", "video-matte-out-*")
+	if err != nil {
+		return PostProcessResult{Op: "video_matte", Status: PostProcessFailed, Message: fmt.Sprintf("creating output dir: %v", err)}
 	}
 	defer os.RemoveAll(outDir)
 
-	timeout := time.Duration(len(frames)) * 30 * time.Second
-	if timeout < 2*time.Minute {
-		timeout = 2 * time.Minute
+	args := []string{sidecar.Script, "video",
+		"--frames-dir", frameDir,
+		"--output-dir", outDir,
 	}
+	if kfe := cfg["keyframe_every"]; kfe != "" {
+		args = append(args, "--keyframe-every", kfe)
+	} else {
+		args = append(args, "--keyframe-every", "8")
+	}
+	if cfg["refine"] != "false" {
+		args = append(args, "--refine")
+	}
+	if radius := cfg["radius"]; radius != "" {
+		args = append(args, "--radius", radius)
+	}
+	if cfg["no_sam2"] == "true" {
+		args = append(args, "--no-sam2")
+	}
+
+	timeout := time.Duration(len(frames))*10*time.Second + 5*time.Minute
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	log.Info("rembg batch start", "frames", len(frames), "model", model, "timeout", timeout)
-	cmd := cmdRunner(ctx, rembgPath, "p", "-m", model, frameDir, outDir)
-	output, err := cmd.CombinedOutput()
+	log.Info("video_matte start", "frames", len(frames), "timeout", timeout)
+	cmd := cmdRunner(ctx, sidecar.Python, args...)
+	var stdoutBuf, stderrBuf strings.Builder
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+	err = cmd.Run()
 	if err != nil {
-		return PostProcessResult{Op: "remove_background", Status: PostProcessFailed, Message: fmt.Sprintf("rembg batch failed: %v: %s", err, truncateBytes(output, 500))}
+		return PostProcessResult{
+			Op:      "video_matte",
+			Status:  PostProcessFailed,
+			Message: fmt.Sprintf("sidecar failed: %v: %s", err, truncateBytes([]byte(stderrBuf.String()), 500)),
+		}
 	}
 
-	processed := 0
+	var res videoMatteResult
+	if jerr := extractSidecarJSON([]byte(stdoutBuf.String()), &res); jerr != nil {
+		return PostProcessResult{Op: "video_matte", Status: PostProcessFailed, Message: fmt.Sprintf("parsing sidecar stdout: %v", jerr)}
+	}
+	if res.Status != "ok" {
+		errMsg := res.Error
+		if errMsg == "" {
+			errMsg = "sidecar reported non-ok status"
+		}
+		return PostProcessResult{Op: "video_matte", Status: PostProcessFailed, Message: errMsg}
+	}
+
+	replaced := 0
 	for _, framePath := range frames {
-		outPath := filepath.Join(outDir, filepath.Base(framePath))
-		if _, err := os.Stat(outPath); err != nil {
+		srcPath := filepath.Join(outDir, filepath.Base(framePath))
+		if _, err := os.Stat(srcPath); err != nil {
 			continue
 		}
-		if err := copyFile(outPath, framePath); err != nil {
-			return PostProcessResult{Op: "remove_background", Status: PostProcessFailed, Message: fmt.Sprintf("replacing %s: %v", filepath.Base(framePath), err)}
+		if err := copyFile(srcPath, framePath); err != nil {
+			return PostProcessResult{Op: "video_matte", Status: PostProcessFailed, Message: fmt.Sprintf("replacing %s: %v", filepath.Base(framePath), err)}
 		}
-		processed++
+		replaced++
+	}
+	if replaced == 0 {
+		return PostProcessResult{Op: "video_matte", Status: PostProcessFailed, Message: "sidecar produced no matted frames"}
 	}
 
-	if processed == 0 {
-		return PostProcessResult{Op: "remove_background", Status: PostProcessFailed, Message: "rembg produced no output files"}
+	msg := fmt.Sprintf("%s; %d/%d frames matted (%s, %d keyframes, %dms)",
+		res.Mode, replaced, len(frames), res.Device, res.Keyframes, res.ElapsedMS)
+	return PostProcessResult{Op: "video_matte", Status: PostProcessApplied, Message: msg}
+}
+
+// ---------------------------------------------------------------------------
+// CheckFrameConsistencyProcessor
+// ---------------------------------------------------------------------------
+
+// CheckFrameConsistencyProcessor runs a DINOv2-based drift check over the
+// matted frames in state["frame_dir"], comparing each frame against both
+// frame 0 (anchor) and a rolling temporal window. Advisory only: low-similarity
+// frames are reported in the result message and in pipeline state, but never
+// cause the overall pipeline to fail.
+//
+// Config keys (all optional):
+//
+//	anchor_threshold  float, default "0.85"
+//	window_threshold  float, default "0.92"
+//	window_size       int,   default "3"
+type CheckFrameConsistencyProcessor struct {
+	LookPath  func(file string) (string, error)
+	CmdRunner func(ctx context.Context, name string, args ...string) *exec.Cmd
+}
+
+type driftResult struct {
+	Status           string    `json:"status"`
+	Device           string    `json:"device"`
+	FramesProcessed  int       `json:"frames_processed"`
+	AnchorThreshold  float64   `json:"anchor_threshold"`
+	WindowThreshold  float64   `json:"window_threshold"`
+	WindowSize       int       `json:"window_size"`
+	AnchorScores     []float64 `json:"anchor_scores"`
+	WindowScores     []float64 `json:"window_scores"`
+	AnchorOutliers   []int     `json:"anchor_outliers"`
+	WindowOutliers   []int     `json:"window_outliers"`
+	ElapsedMS        int       `json:"elapsed_ms"`
+	Error            string    `json:"error,omitempty"`
+}
+
+func (p *CheckFrameConsistencyProcessor) Run(artifactPath string, cfg map[string]string, state PipelineState, log *slog.Logger) PostProcessResult {
+	frameDir := state["frame_dir"]
+	if frameDir == "" {
+		return PostProcessResult{Op: "check_frame_consistency", Status: PostProcessSkipped, Message: "no frame_dir in pipeline state"}
 	}
 
-	return PostProcessResult{
-		Op:      "remove_background",
-		Status:  PostProcessApplied,
-		Message: fmt.Sprintf("%s; %d frames processed (batch)", model, processed),
+	lookPath := p.LookPath
+	if lookPath == nil {
+		lookPath = exec.LookPath
 	}
+	cmdRunner := p.CmdRunner
+	if cmdRunner == nil {
+		cmdRunner = exec.CommandContext
+	}
+
+	sidecar, err := locateMattePython(lookPath)
+	if err != nil {
+		return PostProcessResult{Op: "check_frame_consistency", Status: PostProcessSkipped, Message: err.Error()}
+	}
+
+	args := []string{sidecar.Script, "drift", "--frames-dir", frameDir}
+	anchor := cfg["anchor_threshold"]
+	if anchor == "" {
+		anchor = "0.85"
+	}
+	window := cfg["window_threshold"]
+	if window == "" {
+		window = "0.92"
+	}
+	size := cfg["window_size"]
+	if size == "" {
+		size = "3"
+	}
+	args = append(args,
+		"--anchor-threshold", anchor,
+		"--window-threshold", window,
+		"--window-size", size,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	cmd := cmdRunner(ctx, sidecar.Python, args...)
+	var stdoutBuf, stderrBuf strings.Builder
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Run(); err != nil {
+		return PostProcessResult{
+			Op:      "check_frame_consistency",
+			Status:  PostProcessFailed,
+			Message: fmt.Sprintf("sidecar failed: %v: %s", err, truncateBytes([]byte(stderrBuf.String()), 500)),
+		}
+	}
+
+	var res driftResult
+	if jerr := extractSidecarJSON([]byte(stdoutBuf.String()), &res); jerr != nil {
+		return PostProcessResult{Op: "check_frame_consistency", Status: PostProcessFailed, Message: fmt.Sprintf("parsing sidecar stdout: %v", jerr)}
+	}
+	if res.Status != "ok" {
+		errMsg := res.Error
+		if errMsg == "" {
+			errMsg = "sidecar reported non-ok status"
+		}
+		return PostProcessResult{Op: "check_frame_consistency", Status: PostProcessFailed, Message: errMsg}
+	}
+
+	anchorSet := make(map[int]struct{}, len(res.AnchorOutliers))
+	for _, i := range res.AnchorOutliers {
+		anchorSet[i] = struct{}{}
+	}
+	windowSet := make(map[int]struct{}, len(res.WindowOutliers))
+	for _, i := range res.WindowOutliers {
+		windowSet[i] = struct{}{}
+	}
+	union := make(map[int]struct{}, len(anchorSet)+len(windowSet))
+	for i := range anchorSet {
+		union[i] = struct{}{}
+	}
+	for i := range windowSet {
+		union[i] = struct{}{}
+	}
+	combined := make([]int, 0, len(union))
+	for i := range union {
+		combined = append(combined, i)
+	}
+	sort.Ints(combined)
+
+	combinedStrs := make([]string, 0, len(combined))
+	for _, i := range combined {
+		combinedStrs = append(combinedStrs, strconv.Itoa(i))
+	}
+	state["drift_frames"] = strings.Join(combinedStrs, ",")
+
+	var msg string
+	switch {
+	case len(combined) == 0:
+		msg = fmt.Sprintf("no drift (%d frames, anchor>=%s, window>=%s, %dms)",
+			res.FramesProcessed, anchor, window, res.ElapsedMS)
+	default:
+		msg = fmt.Sprintf("%d outlier frames [anchor=%d, window=%d] of %d (%dms): %s",
+			len(combined), len(anchorSet), len(windowSet), res.FramesProcessed, res.ElapsedMS,
+			strings.Join(combinedStrs, ","))
+	}
+	state["drift_report"] = msg
+
+	return PostProcessResult{Op: "check_frame_consistency", Status: PostProcessApplied, Message: msg}
 }
 
 // ---------------------------------------------------------------------------
