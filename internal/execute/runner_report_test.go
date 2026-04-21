@@ -10,7 +10,7 @@ import (
 )
 
 // TestBuildPlanContext_IncludesUpstreamReport pins the core forwarding
-// behaviour: once a successful upstream step's context_report has been
+// behavior: once a successful upstream step's context_report has been
 // stashed on the PlanRunner, the plan context rendered for a
 // downstream step carries a Final-Report summary so the downstream
 // LLM sees the chosen slug, artifact ID, and path the upstream agent
