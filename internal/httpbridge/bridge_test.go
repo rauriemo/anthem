@@ -316,10 +316,25 @@ func TestMCPProtocol_ToolsList_OptionalInputs(t *testing.T) {
 
 	resp := parseResponse(t, out.Bytes())
 	result := resultMap(t, resp)
-	toolList := result["tools"].([]any)
-	tool := toolList[0].(map[string]any)
-	schema := tool["inputSchema"].(map[string]any)
-	props := schema["properties"].(map[string]any)
+	toolList, ok := result["tools"].([]any)
+	if !ok {
+		t.Fatalf("tools is not a list: %T", result["tools"])
+	}
+	if len(toolList) == 0 {
+		t.Fatal("tools list is empty")
+	}
+	tool, ok := toolList[0].(map[string]any)
+	if !ok {
+		t.Fatalf("tool[0] is not a map: %T", toolList[0])
+	}
+	schema, ok := tool["inputSchema"].(map[string]any)
+	if !ok {
+		t.Fatalf("inputSchema is not a map: %T", tool["inputSchema"])
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties is not a map: %T", schema["properties"])
+	}
 	required, _ := schema["required"].([]any)
 
 	if _, ok := props["prompt"]; !ok {
