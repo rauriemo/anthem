@@ -136,6 +136,28 @@ type CompletedStepDetail struct {
 	AgentID     string
 	Description string
 	Artifacts   []ArtifactSummary
+	// FinalReport is the upstream agent's parsed context_report (if
+	// any). The renderer surfaces it immediately after the step
+	// description so downstream LLMs see concrete values (chosen
+	// slug, artifact IDs, paths) instead of only the upstream step's
+	// placeholder-laden description copied from the compiled plan.
+	// Nil means the upstream agent didn't emit a parseable report
+	// and no "Final report from <agent>" section is rendered.
+	FinalReport *UpstreamReportSummary
+}
+
+// UpstreamReportSummary is the compact view of an upstream agent's
+// context_report that downstream step prompts render. It is the
+// subset of contextreport.ContextReport that carries the concrete
+// values downstream agents need most (slug, artifact id/path,
+// declared produces) without dragging the prompt package into a
+// dependency on contextreport.
+type UpstreamReportSummary struct {
+	Summary      string
+	Action       string
+	ArtifactID   string
+	ArtifactPath string
+	Produces     []string
 }
 
 // ArtifactSummary is the compact artifact reference used inside
@@ -323,6 +345,9 @@ func renderPlanContext(pc *PlanContextOpts) string {
 				sb.WriteString(d.Description)
 				sb.WriteString("\n")
 			}
+			if d.FinalReport != nil {
+				sb.WriteString(renderUpstreamReport(d.AgentID, d.FinalReport))
+			}
 			if len(d.Artifacts) > 0 {
 				sb.WriteString("Artifacts produced:\n")
 				for _, a := range d.Artifacts {
@@ -352,6 +377,50 @@ func renderPlanContext(pc *PlanContextOpts) string {
 	}
 
 	sb.WriteString("\n")
+	return sb.String()
+}
+
+// renderUpstreamReport emits a "Final report from <agent>" block
+// underneath an upstream step's description so the downstream
+// agent sees the concrete slug, artifact id, and path the upstream
+// agent chose at runtime (instead of the placeholder-laden
+// description copied from the compiled plan). Rendered only when
+// at least one field is populated so an empty report does not
+// create a bare header.
+func renderUpstreamReport(agentID string, r *UpstreamReportSummary) string {
+	if r == nil {
+		return ""
+	}
+	has := r.Summary != "" || r.Action != "" || r.ArtifactID != "" || r.ArtifactPath != "" || len(r.Produces) > 0
+	if !has {
+		return ""
+	}
+
+	var sb strings.Builder
+	label := agentID
+	if label == "" {
+		label = "upstream agent"
+	}
+	fmt.Fprintf(&sb, "\n##### Final report from %s\n", label)
+	if r.Summary != "" {
+		fmt.Fprintf(&sb, "- summary: %s\n", r.Summary)
+	}
+	if r.Action != "" {
+		fmt.Fprintf(&sb, "- action: %s\n", r.Action)
+	}
+	if r.ArtifactID != "" || r.ArtifactPath != "" {
+		sb.WriteString("- produced artifact:")
+		if r.ArtifactID != "" {
+			fmt.Fprintf(&sb, " %s", r.ArtifactID)
+		}
+		if r.ArtifactPath != "" {
+			fmt.Fprintf(&sb, " at %s", r.ArtifactPath)
+		}
+		sb.WriteString("\n")
+	}
+	if len(r.Produces) > 0 {
+		fmt.Fprintf(&sb, "- additional produces: %s\n", strings.Join(r.Produces, ", "))
+	}
 	return sb.String()
 }
 

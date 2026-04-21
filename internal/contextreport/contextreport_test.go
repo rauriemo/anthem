@@ -1,11 +1,11 @@
-package orchestrator
+package contextreport
 
 import (
 	"reflect"
 	"testing"
 )
 
-func TestParseContextReport_FullReport(t *testing.T) {
+func TestParse_FullReport(t *testing.T) {
 	t.Parallel()
 
 	jsonBlock := `{"context_report":{"action":"commit","summary":"Added handler","artifact":{"id":"a-1","type":"text/plain","path":"notes/x.txt","description":"notes","tags":["a","b"],"metadata":{"k":"v"},"depends_on":["p"],"status":"draft"},"progress":"50%","blocked_on":"","produces":["foo.go","bar.go"]}}`
@@ -39,7 +39,7 @@ func TestParseContextReport_FullReport(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := ParseContextReport(tt.raw)
+			got, err := Parse(tt.raw)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -50,7 +50,7 @@ func TestParseContextReport_FullReport(t *testing.T) {
 	}
 }
 
-func TestParseContextReport_MinimalReport(t *testing.T) {
+func TestParse_MinimalReport(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -71,7 +71,7 @@ func TestParseContextReport_MinimalReport(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := ParseContextReport(tt.raw)
+			got, err := Parse(tt.raw)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -82,7 +82,7 @@ func TestParseContextReport_MinimalReport(t *testing.T) {
 	}
 }
 
-func TestParseContextReport_NoReport(t *testing.T) {
+func TestParse_NoReport(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -98,7 +98,7 @@ func TestParseContextReport_NoReport(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := ParseContextReport(tt.in)
+			got, err := Parse(tt.in)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -109,7 +109,7 @@ func TestParseContextReport_NoReport(t *testing.T) {
 	}
 }
 
-func TestParseContextReport_MalformedJSON(t *testing.T) {
+func TestParse_MalformedJSON(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -123,7 +123,7 @@ func TestParseContextReport_MalformedJSON(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := ParseContextReport(tt.raw)
+			_, err := Parse(tt.raw)
 			if err == nil {
 				t.Fatal("want error, got nil")
 			}
@@ -131,7 +131,7 @@ func TestParseContextReport_MalformedJSON(t *testing.T) {
 	}
 }
 
-func TestParseContextReport_NestedJSON(t *testing.T) {
+func TestParse_NestedJSON(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -160,7 +160,7 @@ func TestParseContextReport_NestedJSON(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := ParseContextReport(tt.raw)
+			got, err := Parse(tt.raw)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -171,7 +171,7 @@ func TestParseContextReport_NestedJSON(t *testing.T) {
 	}
 }
 
-func TestParseContextReport_MixedWithConversation(t *testing.T) {
+func TestParse_MixedWithConversation(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -196,7 +196,7 @@ The main risk was duplicate imports; those are resolved.
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := ParseContextReport(tt.raw)
+			got, err := Parse(tt.raw)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -207,7 +207,7 @@ The main risk was duplicate imports; those are resolved.
 	}
 }
 
-func TestParseContextReport_MultipleReports(t *testing.T) {
+func TestParse_MultipleReports(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -229,7 +229,7 @@ func TestParseContextReport_MultipleReports(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := ParseContextReport(tt.raw)
+			got, err := Parse(tt.raw)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -240,7 +240,7 @@ func TestParseContextReport_MultipleReports(t *testing.T) {
 	}
 }
 
-func TestParseContextReport_EmptyArtifact(t *testing.T) {
+func TestParse_EmptyArtifact(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -263,7 +263,7 @@ func TestParseContextReport_EmptyArtifact(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := ParseContextReport(tt.raw)
+			got, err := Parse(tt.raw)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}

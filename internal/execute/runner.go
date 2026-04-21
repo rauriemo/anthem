@@ -12,6 +12,7 @@ import (
 
 	"github.com/rauriemo/anthem/internal/agent"
 	"github.com/rauriemo/anthem/internal/channel"
+	"github.com/rauriemo/anthem/internal/contextreport"
 	"github.com/rauriemo/anthem/internal/guests"
 	"github.com/rauriemo/anthem/internal/harness"
 	"github.com/rauriemo/anthem/internal/prompt"
@@ -135,6 +136,17 @@ type PlanRunner struct {
 	// (plan decision D4). Cleared on successful completion of the
 	// step or on gate approve/abort.
 	revisionState map[string]*prompt.RevisionFeedback
+
+	// stepReports stores the parsed context_report each step's agent
+	// emitted on a successful run, keyed by step ID. Downstream steps
+	// read their upstream entries via buildPlanContext so the prompt
+	// can surface the upstream agent's chosen slug, artifact IDs, and
+	// paths — not just the (possibly placeholder-laden) upstream step
+	// description. A nil map entry (or missing key) means the upstream
+	// agent didn't emit a parseable report; the rendered prompt simply
+	// omits the "Final report from <agent>" section in that case. See
+	// embercoil-serpent incident 2026-04-21 for the motivating bug.
+	stepReports map[string]*contextreport.ContextReport
 }
 
 func NewPlanRunner(opts RunnerOpts) *PlanRunner {
@@ -153,6 +165,7 @@ func NewPlanRunner(opts RunnerOpts) *PlanRunner {
 		preservedArtifacts:        make(map[string][]StepArtifact),
 		consecutivePartialRevises: make(map[string]int),
 		revisionState:             make(map[string]*prompt.RevisionFeedback),
+		stepReports:               make(map[string]*contextreport.ContextReport),
 	}
 }
 
@@ -343,6 +356,27 @@ func (r *PlanRunner) runStep(ctx context.Context, step *PlanStep, threadID strin
 		return r.handleStepFailure(ctx, step, threadID, runErr, result)
 	}
 
+	// Blocked-on trap: an exit-0 agent that writes a context_report
+	// with a non-empty blocked_on field has explicitly told us it
+	// could not complete the step (e.g. an unresolved <slug>
+	// placeholder). Marking that step_completed hides the signal and
+	// lets downstream steps run against non-existent upstream
+	// outputs (see embercoil-serpent incident 2026-04-21: Walt's
+	// prompt contained a literal <slug> path, he reported blocked_on,
+	// and the runner recorded step_completed in 40s). Parse errors
+	// are intentionally swallowed — a malformed report is not a new
+	// failure mode, today's runner ignores it entirely.
+	var stepReport *contextreport.ContextReport
+	if result != nil && result.Output != "" {
+		if rep, _ := contextreport.Parse(result.Output); rep != nil {
+			stepReport = rep
+			if strings.TrimSpace(rep.BlockedOn) != "" {
+				blockedErr := fmt.Errorf("agent reported blocked_on: %s", rep.BlockedOn)
+				return r.handleStepFailure(ctx, step, threadID, blockedErr, result)
+			}
+		}
+	}
+
 	// Success path
 	var collected []StepArtifact
 	if r.opts.Artifacts != nil {
@@ -362,6 +396,7 @@ func (r *PlanRunner) runStep(ctx context.Context, step *PlanStep, threadID strin
 
 	r.mu.Lock()
 	r.artifacts[step.ID] = collected
+	r.stepReports[step.ID] = stepReport
 	r.mu.Unlock()
 
 	r.opts.RunLog.AppendStepCompleted(step.ID, step.AgentID, collected)
@@ -910,6 +945,10 @@ func (r *PlanRunner) buildPlanContext(step *PlanStep, upstream []StepArtifact) *
 					Summary: a.Summary,
 				})
 			}
+			r.mu.Lock()
+			upstreamReport := r.stepReports[upstreamStep.ID]
+			r.mu.Unlock()
+			detail.FinalReport = upstreamReportSummary(upstreamReport)
 			pc.UpstreamDetail = append(pc.UpstreamDetail, detail)
 		}
 	}
@@ -927,6 +966,26 @@ func (r *PlanRunner) buildPlanContext(step *PlanStep, upstream []StepArtifact) *
 	}
 
 	return pc
+}
+
+// upstreamReportSummary projects a stored context_report onto the
+// compact view the prompt package renders. Returns nil when the
+// upstream agent didn't emit a parseable report so the renderer
+// skips the "Final report from <agent>" section cleanly.
+func upstreamReportSummary(r *contextreport.ContextReport) *prompt.UpstreamReportSummary {
+	if r == nil {
+		return nil
+	}
+	sum := &prompt.UpstreamReportSummary{
+		Summary:  r.Summary,
+		Action:   r.Action,
+		Produces: append([]string(nil), r.Produces...),
+	}
+	if r.Artifact != nil {
+		sum.ArtifactID = r.Artifact.ID
+		sum.ArtifactPath = r.Artifact.Path
+	}
+	return sum
 }
 
 // dumpStepPrompt writes the final assembled prompt for step to a
