@@ -1994,6 +1994,75 @@ func TestStitchSpritesheet_OrphanedJSONCleanup(t *testing.T) {
 	}
 }
 
+func TestStitchSpritesheet_RemovesStaleUnityMeta(t *testing.T) {
+	// A prior pipeline run (or a prior Unity import) may have left a .meta
+	// beside the sheet. Unity's internalIDToNameTable is append-only across
+	// re-imports, so the old name-table entries would survive and cause
+	// AnimationClip blinking. The stitcher must remove the stale .meta
+	// before writing the new PNG so Unity re-imports cleanly.
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+	for i := 1; i <= 4; i++ {
+		writePNGToPath(filepath.Join(frameDir, fmt.Sprintf("frame_%04d.png", i)), 16, 16)
+	}
+
+	videoPath := filepath.Join(dir, "anim.mp4")
+	_ = os.WriteFile(videoPath, []byte("fake"), 0644)
+
+	// Seed a stale .meta next to where the stitched PNG will land.
+	stalePNG := filepath.Join(dir, "anim.png")
+	staleMeta := stalePNG + ".meta"
+	if err := os.WriteFile(staleMeta, []byte("stale: true\n"), 0644); err != nil {
+		t.Fatalf("seeding stale meta: %v", err)
+	}
+
+	state := PipelineState{"frame_dir": frameDir, "fps": "8"}
+	proc := &StitchSpritesheetProcessor{}
+	r := proc.Run(videoPath, map[string]string{"columns": "2"}, state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	if _, err := os.Stat(staleMeta); !os.IsNotExist(err) {
+		t.Errorf("stale Unity .meta should have been removed; got err=%v", err)
+	}
+
+	// Sheet and sidecar still produced normally.
+	if _, err := os.Stat(stalePNG); err != nil {
+		t.Errorf("sprite sheet not created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "anim.spritesheet.json")); err != nil {
+		t.Errorf("sidecar not created: %v", err)
+	}
+}
+
+func TestStitchSpritesheet_MissingUnityMetaIsFine(t *testing.T) {
+	// Fresh sheet with no prior .meta on disk must still succeed and must
+	// not log spurious errors about a missing file.
+	dir := t.TempDir()
+	frameDir := filepath.Join(dir, "frames")
+	_ = os.Mkdir(frameDir, 0755)
+	writePNGToPath(filepath.Join(frameDir, "frame_0001.png"), 16, 16)
+
+	videoPath := filepath.Join(dir, "fresh.mp4")
+	_ = os.WriteFile(videoPath, []byte("fake"), 0644)
+
+	state := PipelineState{"frame_dir": frameDir, "fps": "8"}
+	proc := &StitchSpritesheetProcessor{}
+	r := proc.Run(videoPath, nil, state, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "fresh.png")); err != nil {
+		t.Errorf("sprite sheet not created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "fresh.png.meta")); !os.IsNotExist(err) {
+		t.Errorf("no Unity .meta should exist after a fresh run; got err=%v", err)
+	}
+}
+
 func TestStitchSpritesheet_BestSpeedCompression(t *testing.T) {
 	dir := t.TempDir()
 	frameDir := filepath.Join(dir, "frames")

@@ -994,6 +994,23 @@ func (p *StitchSpritesheetProcessor) Run(artifactPath string, cfg map[string]str
 		return PostProcessResult{Op: "stitch_spritesheet", Status: PostProcessFailed, Message: fmt.Sprintf("writing metadata: %v", err)}
 	}
 
+	// Remove any stale Unity .meta for the sheet before overwriting the PNG.
+	// Unity's internalIDToNameTable is append-only across re-imports, so when
+	// a pipeline re-run produces a different frame_count than a prior run,
+	// the old .meta's name-table keeps ghost entries that cause
+	// AnimationClip keyframes to resolve to null sprites -- i.e. blinking
+	// playback. Deleting the .meta forces Unity to import the PNG fresh and
+	// the downstream SpriteSheetPostprocessor (com.anthem.spritesheet Unity
+	// package) slices cleanly without any ghost rows.
+	unityMetaPath := sheetPath + ".meta"
+	if _, err := os.Stat(unityMetaPath); err == nil {
+		if rmErr := os.Remove(unityMetaPath); rmErr != nil {
+			log.Warn("stitch_spritesheet could not remove stale Unity .meta", "path", unityMetaPath, "error", rmErr)
+		} else {
+			log.Info("stitch_spritesheet removed stale Unity .meta for clean reimport", "path", unityMetaPath)
+		}
+	}
+
 	if err := encodePNG(sheetPath, sheet); err != nil {
 		os.Remove(metaPath)
 		return PostProcessResult{Op: "stitch_spritesheet", Status: PostProcessFailed, Message: fmt.Sprintf("writing sprite sheet: %v", err)}
