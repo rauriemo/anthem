@@ -1669,7 +1669,7 @@ func TestMCPProtocol_ToolCall_ArtifactSave_WithPostProcess(t *testing.T) {
 				Type:   "image/png",
 				SaveTo: saveTo,
 				PostProcess: []guests.PostProcessOp{
-					{Op: "remove_background", Config: map[string]string{"model": "u2net"}},
+					{Op: "chroma_key", Config: map[string]string{"tolerance": "0.30"}},
 				},
 			},
 		},
@@ -1694,8 +1694,9 @@ func TestMCPProtocol_ToolCall_ArtifactSave_WithPostProcess(t *testing.T) {
 	if !strings.Contains(text, "goblin.png") {
 		t.Errorf("result should mention filename: %s", text)
 	}
-	// Post-process runs but rembg is not installed in CI, so expect "skipped"
-	if !strings.Contains(text, "remove_background") {
+	// chroma_key runs in-Go, so it will fail to decode the fake-png-data
+	// fixture and report PostProcessFailed — but the op name still appears.
+	if !strings.Contains(text, "chroma_key") {
 		t.Errorf("result should mention post-process op: %s", text)
 	}
 
@@ -1871,7 +1872,7 @@ func TestMCPProtocol_ToolCall_ArtifactSave_VideoPipelineOps(t *testing.T) {
 				SaveTo: saveTo,
 				PostProcess: []guests.PostProcessOp{
 					{Op: "extract_video_frames", Config: map[string]string{"fps": "8"}},
-					{Op: "remove_background", Config: map[string]string{"model": "isnet-anime"}},
+					{Op: "video_matte", Config: map[string]string{"keyframe_every": "8"}},
 					{Op: "normalize_frames", Config: map[string]string{"padding": "4"}},
 					{Op: "stitch_spritesheet", Config: map[string]string{"columns": "4"}},
 				},

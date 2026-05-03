@@ -145,16 +145,24 @@ handled by a separate Python sidecar (see next section). The post-process
 pipeline degrades gracefully: missing tools cause the corresponding step to be
 skipped, not failed.
 
-### Matting pipeline (BiRefNet + SAM 2 + DINOv2)
+### Matting pipeline
 
-Background removal, video matting, and style-drift detection are implemented in
-a standalone Python sidecar at [`tools/matte/`](tools/matte/). The Go
-post-process ops (`remove_background`, `video_matte`, `check_frame_consistency`)
-shell out to `tools/matte/matte.py` via `MATTE_PYTHON`. The sidecar replaces
-the legacy `rembg` backend with a hybrid stack:
+Still-image matting runs **in-Go** via the `chroma_key` post-process op. It
+mattes generated sprites against a uniform `#FF00FF` magenta plate
+deterministically in milliseconds — no Python subprocess, no model load — and
+despills residual magenta cast on subject edges. This replaced the prior
+BiRefNet-sidecar `remove_background` path, which paid a 5–15 s model load per
+sprite and produced visible white halos because Nano Banana cannot return
+real transparent PNGs (it composites onto an opaque off-white plate that
+contaminates anti-aliased silhouettes).
 
-- **BiRefNet** — SOTA dichotomous image segmentation (MIT). Used for still
-  images and as keyframe seeds for video matting.
+Video matting and style-drift detection are still implemented in a standalone
+Python sidecar at [`tools/matte/`](tools/matte/). The Go post-process ops
+(`video_matte`, `check_frame_consistency`) shell out to `tools/matte/matte.py`
+via `MATTE_PYTHON`. The sidecar uses a hybrid stack:
+
+- **BiRefNet** — SOTA dichotomous image segmentation (MIT). Provides
+  keyframe seeds for video matting.
 - **SAM 2** — Meta's video-native segmentation model (Apache 2.0). Propagates
   keyframe masks across the full sequence for temporal coherence.
 - **Guided filter** — edge-aware refinement to recover thin details (hair,

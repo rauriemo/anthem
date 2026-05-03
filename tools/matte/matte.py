@@ -2,12 +2,15 @@
 """Matting sidecar for the Anthem HTTP bridge post-process pipeline.
 
 Subcommands:
-  image - single-image matting via BiRefNet.
   video - video sequence matting via BiRefNet keyframes + SAM 2 propagation
           + guided-filter edge refinement. Degrades to per-frame BiRefNet
           when --no-sam2 is passed or SAM 2 fails at runtime.
   drift - DINOv2 embedding-based style-drift detection per frame, with
           both anchor (vs. frame 0) and rolling-window similarity scores.
+
+Still-image matting is no longer handled here — it now runs in-Go via the
+ChromaKeyProcessor in internal/httpbridge/postprocess.go (deterministic
+magenta-plate keying, no model load, sub-second).
 
 Each subcommand writes a single structured JSON status line to stdout; all
 progress logging goes to stderr so Go-side parsing stays clean.
@@ -135,43 +138,6 @@ def _birefnet_infer(image_path: Path, device: str):
     rgba = src.convert("RGBA")
     rgba.putalpha(mask_img)
     return rgba, np.asarray(mask_img)
-
-
-# ---------------------------------------------------------------------------
-# image subcommand
-# ---------------------------------------------------------------------------
-
-
-def cmd_image(args: argparse.Namespace) -> int:
-    device = _device()
-    started = time.time()
-
-    input_path = Path(args.input)
-    output_path = Path(args.output)
-    if not input_path.exists():
-        _emit({"status": "error", "error": f"input not found: {input_path}"})
-        return 2
-
-    try:
-        rgba, _ = _birefnet_infer(input_path, device)
-    except Exception as e:
-        _log(traceback.format_exc())
-        _emit({"status": "error", "error": f"birefnet inference failed: {e}"})
-        return 1
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    rgba.save(output_path, format="PNG", optimize=False)
-
-    _emit(
-        {
-            "status": "ok",
-            "device": device,
-            "elapsed_ms": int((time.time() - started) * 1000),
-            "input": str(input_path),
-            "output": str(output_path),
-        }
-    )
-    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -515,11 +481,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="matte.py")
     sub = p.add_subparsers(dest="command", required=True)
 
-    pi = sub.add_parser("image", help="single-image BiRefNet matting")
-    pi.add_argument("--input", required=True)
-    pi.add_argument("--output", required=True)
-    pi.add_argument("--threshold", type=float, default=0.5)
-
     pv = sub.add_parser("video", help="video matting via BiRefNet + SAM 2")
     pv.add_argument("--frames-dir", required=True)
     pv.add_argument("--output-dir", required=True)
@@ -544,8 +505,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        if args.command == "image":
-            return cmd_image(args)
         if args.command == "video":
             return cmd_video(args)
         if args.command == "drift":

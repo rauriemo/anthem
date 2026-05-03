@@ -166,37 +166,6 @@ func TestHelperProcess(t *testing.T) {
 	}
 
 	switch os.Getenv("GO_HELPER_MODE") {
-	case "image_transparent":
-		// Write an RGBA PNG with at least one fully transparent edge pixel so
-		// validateAlpha reports hasAlpha=true, fullyOpaque=false.
-		out := parse("--output")
-		img := image.NewNRGBA(image.Rect(0, 0, 8, 8))
-		for y := 0; y < 8; y++ {
-			for x := 0; x < 8; x++ {
-				if x == 0 && y == 0 {
-					img.SetNRGBA(x, y, color.NRGBA{A: 0})
-				} else {
-					img.SetNRGBA(x, y, color.NRGBA{R: 255, A: 255})
-				}
-			}
-		}
-		f, _ := os.Create(out)
-		_ = png.Encode(f, img)
-		f.Close()
-	case "image_opaque":
-		out := parse("--output")
-		img := image.NewNRGBA(image.Rect(0, 0, 8, 8))
-		for y := 0; y < 8; y++ {
-			for x := 0; x < 8; x++ {
-				img.SetNRGBA(x, y, color.NRGBA{R: 255, A: 255})
-			}
-		}
-		f, _ := os.Create(out)
-		_ = png.Encode(f, img)
-		f.Close()
-	case "image_fail":
-		fmt.Fprintln(os.Stderr, "birefnet boom")
-		os.Exit(1)
 	case "video_ok":
 		fd := parse("--frames-dir")
 		od := parse("--output-dir")
@@ -376,115 +345,242 @@ func mustMkdirAll(t *testing.T, path string) {
 }
 
 // ---------------------------------------------------------------------------
-// RemoveBackgroundProcessor (BiRefNet sidecar)
+// ChromaKeyProcessor (in-Go magenta plate keying)
 // ---------------------------------------------------------------------------
 
-func TestRemoveBackground_SidecarMissing(t *testing.T) {
-	isolateSidecarEnv(t)
-	t.Setenv("MATTE_PYTHON", "")
-	t.Setenv("MATTE_SCRIPT", filepath.Join(t.TempDir(), "does-not-exist.py"))
-	proc := &RemoveBackgroundProcessor{
-		LookPath: func(string) (string, error) { return "", fmt.Errorf("not found") },
+// writePlatePNG creates a 20x20 NRGBA PNG with each pixel set to the given
+// color. Used by chroma_key tests to construct uniform plates and uniform
+// subject regions.
+func writePlatePNG(t *testing.T, path string, c color.NRGBA) {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, 20, 20))
+	for y := 0; y < 20; y++ {
+		for x := 0; x < 20; x++ {
+			img.SetNRGBA(x, y, c)
+		}
 	}
-	dir := t.TempDir()
-	artifact := filepath.Join(dir, "test.png")
-	writePNG(t, artifact, false)
-
-	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
-	if r.Status != PostProcessSkipped {
-		t.Errorf("Status = %q, want %q", r.Status, PostProcessSkipped)
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("creating test PNG: %v", err)
 	}
-	if !strings.Contains(r.Message, "matte sidecar") {
-		t.Errorf("Message = %q, want mention of 'matte sidecar'", r.Message)
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatalf("encoding test PNG: %v", err)
 	}
 }
 
-func TestRemoveBackground_Success(t *testing.T) {
-	fakeSidecar(t)
-	dir := t.TempDir()
-	artifact := filepath.Join(dir, "sprite.png")
-	writePNG(t, artifact, false)
-
-	proc := &RemoveBackgroundProcessor{
-		LookPath:  func(string) (string, error) { return "/fake/python", nil },
-		CmdRunner: helperCmd("image_transparent"),
+// readNRGBA decodes a PNG and returns it as *image.NRGBA so tests can
+// assert per-channel values without worrying about premultiplied alpha.
+func readNRGBA(t *testing.T, path string) *image.NRGBA {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("opening %s: %v", path, err)
 	}
+	defer f.Close()
+	src, err := png.Decode(f)
+	if err != nil {
+		t.Fatalf("decoding %s: %v", path, err)
+	}
+	if nrgba, ok := src.(*image.NRGBA); ok {
+		return nrgba
+	}
+	bounds := src.Bounds()
+	dst := image.NewNRGBA(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			dst.Set(x, y, src.At(x, y))
+		}
+	}
+	return dst
+}
+
+func TestChromaKey_PureMagentaBecomesTransparent(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "plate.png")
+	writePlatePNG(t, artifact, color.NRGBA{R: 255, G: 0, B: 255, A: 255})
+
+	proc := &ChromaKeyProcessor{}
 	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
 	if r.Status != PostProcessApplied {
 		t.Fatalf("Status = %q, want %q; Message: %s", r.Status, PostProcessApplied, r.Message)
 	}
-	if !strings.Contains(r.Message, "birefnet") {
-		t.Errorf("Message = %q, should mention birefnet", r.Message)
+
+	out := readNRGBA(t, artifact)
+	for y := out.Bounds().Min.Y; y < out.Bounds().Max.Y; y++ {
+		for x := out.Bounds().Min.X; x < out.Bounds().Max.X; x++ {
+			if out.NRGBAAt(x, y).A != 0 {
+				t.Fatalf("pixel (%d,%d) alpha = %d, want 0", x, y, out.NRGBAAt(x, y).A)
+			}
+		}
+	}
+	if !strings.Contains(r.Message, "400/400 px keyed") {
+		t.Errorf("Message = %q, want '400/400 px keyed'", r.Message)
 	}
 }
 
-func TestRemoveBackground_FullyOpaque(t *testing.T) {
-	fakeSidecar(t)
-	dir := t.TempDir()
-	artifact := filepath.Join(dir, "sprite.png")
-	writePNG(t, artifact, false)
-
-	proc := &RemoveBackgroundProcessor{
-		LookPath:  func(string) (string, error) { return "/fake/python", nil },
-		CmdRunner: helperCmd("image_opaque"),
+func TestChromaKey_PureSubjectStaysOpaque(t *testing.T) {
+	cases := []struct {
+		name string
+		c    color.NRGBA
+	}{
+		{"oxblood_red", color.NRGBA{R: 100, G: 30, B: 30, A: 255}},
+		{"forest_green", color.NRGBA{R: 30, G: 100, B: 30, A: 255}},
+		{"iron_blue", color.NRGBA{R: 30, G: 30, B: 100, A: 255}},
+		{"aged_gold", color.NRGBA{R: 200, G: 160, B: 60, A: 255}},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			artifact := filepath.Join(dir, "subject.png")
+			writePlatePNG(t, artifact, tc.c)
+
+			proc := &ChromaKeyProcessor{}
+			r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+			if r.Status != PostProcessApplied {
+				t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+			}
+
+			out := readNRGBA(t, artifact)
+			got := out.NRGBAAt(10, 10)
+			if got.A != 255 {
+				t.Errorf("alpha = %d, want 255 (subject pixel must stay opaque)", got.A)
+			}
+			if got.R != tc.c.R || got.G != tc.c.G || got.B != tc.c.B {
+				t.Errorf("RGB = (%d,%d,%d), want (%d,%d,%d) (no despill expected for non-magenta subject)",
+					got.R, got.G, got.B, tc.c.R, tc.c.G, tc.c.B)
+			}
+		})
+	}
+}
+
+func TestChromaKey_EdgePixelInSoftBand(t *testing.T) {
+	// Pixel (180, 100, 180): minRB=180, g=100, score=80/255≈0.314.
+	// Defaults: tolerance=0.30, softness=0.10 → band (0.25, 0.35). 0.314
+	// lands inside the smoothstep band, so alpha must be partially keyed.
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "edge.png")
+	writePlatePNG(t, artifact, color.NRGBA{R: 180, G: 100, B: 180, A: 255})
+
+	proc := &ChromaKeyProcessor{}
 	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
 	if r.Status != PostProcessApplied {
 		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
 	}
-	if !strings.Contains(r.Message, "fully opaque") {
-		t.Errorf("Message = %q, should warn about fully opaque output", r.Message)
+
+	got := readNRGBA(t, artifact).NRGBAAt(10, 10)
+	if got.A == 0 || got.A == 255 {
+		t.Errorf("alpha = %d, want a value strictly between 0 and 255 (soft band)", got.A)
 	}
 }
 
-func TestRemoveBackground_CmdFails(t *testing.T) {
-	fakeSidecar(t)
+func TestChromaKey_DespillRemovesMagentaCast(t *testing.T) {
+	// Pixel (200, 150, 200): score = 50/255 ≈ 0.196 < lower=0.25, so
+	// alpha stays 255. Joint magenta excess above G is 50; with
+	// despill_offset=8, suppression = 42, so R,B both drop to 158.
 	dir := t.TempDir()
-	artifact := filepath.Join(dir, "sprite.png")
-	writePNG(t, artifact, false)
-	origData, _ := os.ReadFile(artifact)
+	artifact := filepath.Join(dir, "spill.png")
+	writePlatePNG(t, artifact, color.NRGBA{R: 200, G: 150, B: 200, A: 255})
 
-	proc := &RemoveBackgroundProcessor{
-		LookPath:  func(string) (string, error) { return "/fake/python", nil },
-		CmdRunner: helperCmd("image_fail"),
+	proc := &ChromaKeyProcessor{}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
 	}
+
+	got := readNRGBA(t, artifact).NRGBAAt(10, 10)
+	if got.A != 255 {
+		t.Fatalf("alpha = %d, want 255 (subject pixel should be kept)", got.A)
+	}
+	if got.R >= 200 || got.B >= 200 {
+		t.Errorf("RGB = (%d,%d,%d), want R<200 and B<200 (despill should suppress magenta cast)",
+			got.R, got.G, got.B)
+	}
+	if got.G != 150 {
+		t.Errorf("G = %d, want 150 (despill must not touch G)", got.G)
+	}
+	if !strings.Contains(r.Message, "edge despilled") {
+		t.Errorf("Message = %q, want mention of 'edge despilled'", r.Message)
+	}
+}
+
+func TestChromaKey_ToleranceWidensKey(t *testing.T) {
+	// Pixel (160, 100, 160): score = 60/255 ≈ 0.235.
+	// With defaults (lower=0.25): kept opaque (alpha=255).
+	// With tolerance=0.15 (lower=0.10, upper=0.20): score > upper, keyed.
+	for _, tc := range []struct {
+		name      string
+		tolerance string
+		wantAlpha uint8
+	}{
+		{"default_keeps_opaque", "", 255},
+		{"loose_tolerance_keys_pixel", "0.15", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			artifact := filepath.Join(dir, "borderline.png")
+			writePlatePNG(t, artifact, color.NRGBA{R: 160, G: 100, B: 160, A: 255})
+
+			cfg := map[string]string{}
+			if tc.tolerance != "" {
+				cfg["tolerance"] = tc.tolerance
+			}
+			proc := &ChromaKeyProcessor{}
+			r := proc.Run(artifact, cfg, PipelineState{}, slog.Default())
+			if r.Status != PostProcessApplied {
+				t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+			}
+			got := readNRGBA(t, artifact).NRGBAAt(10, 10)
+			if got.A != tc.wantAlpha {
+				t.Errorf("alpha = %d, want %d (tolerance=%q)", got.A, tc.wantAlpha, tc.tolerance)
+			}
+		})
+	}
+}
+
+func TestChromaKey_NonPNGInputFails(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "not-a-png.png")
+	if err := os.WriteFile(artifact, []byte("this is not a PNG"), 0644); err != nil {
+		t.Fatalf("writing junk file: %v", err)
+	}
+
+	proc := &ChromaKeyProcessor{}
 	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
 	if r.Status != PostProcessFailed {
 		t.Errorf("Status = %q, want %q", r.Status, PostProcessFailed)
 	}
-	afterData, _ := os.ReadFile(artifact)
-	if string(afterData) != string(origData) {
-		t.Error("original artifact should be preserved when sidecar fails")
+	if !strings.Contains(r.Message, "decoding PNG") {
+		t.Errorf("Message = %q, want mention of 'decoding PNG'", r.Message)
+	}
+	// Original junk file must be untouched on decode failure.
+	data, _ := os.ReadFile(artifact)
+	if string(data) != "this is not a PNG" {
+		t.Errorf("artifact mutated on failure; got %q", string(data))
 	}
 }
 
-func TestRemoveBackground_AtomicWrite(t *testing.T) {
-	fakeSidecar(t)
+func TestChromaKey_AtomicWriteLeavesNoOrphans(t *testing.T) {
 	dir := t.TempDir()
 	artifact := filepath.Join(dir, "sprite.png")
-	writePNG(t, artifact, false)
+	writePlatePNG(t, artifact, color.NRGBA{R: 255, G: 0, B: 255, A: 255})
 
-	var tempFilePath string
-	proc := &RemoveBackgroundProcessor{
-		LookPath: func(string) (string, error) { return "/fake/python", nil },
-		CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
-			for i, a := range args {
-				if a == "--output" && i+1 < len(args) {
-					tempFilePath = args[i+1]
-				}
-			}
-			return helperCmd("image_transparent")(ctx, name, args...)
-		},
-	}
+	proc := &ChromaKeyProcessor{}
 	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
 	if r.Status != PostProcessApplied {
 		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
 	}
-	if tempFilePath == "" {
-		t.Fatal("--output temp path not captured")
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading dir: %v", err)
 	}
-	if tempFilePath == artifact {
-		t.Error("sidecar should write to a temp file, not the artifact itself")
+	if len(entries) != 1 || entries[0].Name() != "sprite.png" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("dir contents = %v, want only [sprite.png] (no orphan chroma-* temp files)", names)
 	}
 }
 
@@ -1457,11 +1553,11 @@ func TestRunPostProcess_EmptyOps(t *testing.T) {
 
 func TestFormatResults(t *testing.T) {
 	results := []PostProcessResult{
-		{Op: "remove_background", Status: PostProcessApplied, Message: "birefnet"},
+		{Op: "chroma_key", Status: PostProcessApplied, Message: "chroma_key: 400/400 px keyed, 0 edge despilled"},
 		{Op: "unknown", Status: PostProcessSkipped, Message: "unknown operation"},
 	}
 	msg := FormatResults("Saved image/png to file.png", results)
-	if !strings.Contains(msg, "remove_background: applied (birefnet)") {
+	if !strings.Contains(msg, "chroma_key: applied (chroma_key: 400/400 px keyed, 0 edge despilled)") {
 		t.Errorf("formatted message missing applied line: %s", msg)
 	}
 	if !strings.Contains(msg, "unknown: skipped (unknown operation)") {

@@ -1,12 +1,20 @@
 # Matting sidecar (`tools/matte/`)
 
-Single Python entry point (`matte.py`) that the anthem HTTP bridge shells out to
-for all ML-heavy post-processing: still-image matting (BiRefNet), video
-matting (BiRefNet keyframes + SAM 2 propagation + guided-filter edge refine),
-and DINOv2-based style-drift detection. The Go processors in
-`internal/httpbridge/postprocess.go` invoke this sidecar via `os/exec`; the
-sidecar writes a single JSON status line to stdout and all progress logs to
-stderr.
+Single Python entry point (`matte.py`) that the anthem HTTP bridge shells out
+to for ML-heavy post-processing: video matting (BiRefNet keyframes + SAM 2
+propagation + guided-filter edge refine) and DINOv2-based style-drift
+detection. The Go processors in `internal/httpbridge/postprocess.go` invoke
+this sidecar via `os/exec`; the sidecar writes a single JSON status line to
+stdout and all progress logs to stderr.
+
+Still-image matting is **not** handled here — it runs in-Go via the
+`ChromaKeyProcessor` in `internal/httpbridge/postprocess.go`, which mattes
+generated sprites against a uniform `#FF00FF` magenta plate deterministically
+in milliseconds (no model load, no Python subprocess). That replaced the
+prior BiRefNet-sidecar still-image path because Nano Banana cannot return
+real transparent PNGs and the BiRefNet route both paid a model-load tax per
+sprite and produced visible white halos from the off-white plate
+contamination it had no spill suppression for.
 
 Auto-detects CUDA. Falls back to CPU if torch doesn't see a usable GPU.
 Degrades to per-frame BiRefNet if SAM 2 import or inference fails (same venv,
@@ -15,8 +23,6 @@ no extra install).
 ## Subcommands
 
 ```bash
-python matte.py image --input sprite.png --output sprite.matted.png
-
 python matte.py video \
   --frames-dir /tmp/frames_123 \
   --output-dir /tmp/frames_matted_123 \
@@ -112,11 +118,12 @@ elsewhere:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-python matte.py image --input ..\..\Assets\some-sprite.png --output .\out.png
+# Materialize a few PNG frames in a scratch dir first, then:
+python matte.py video --frames-dir .\test-frames --output-dir .\out --refine
 ```
 
-Successful output is a single JSON line on stdout and a PNG with alpha at
-`out.png`. Progress and model-load diagnostics go to stderr.
+Successful output is a single JSON line on stdout and a directory of RGBA
+PNGs at `out/`. Progress and model-load diagnostics go to stderr.
 
 ## Failure modes
 

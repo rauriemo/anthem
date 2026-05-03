@@ -1138,9 +1138,9 @@ http_tools:
       type: image/png
       save_to: "out/${input.filename}"
       post_process:
-        - op: remove_background
+        - op: chroma_key
           config:
-            model: isnet-anime
+            tolerance: "0.30"
 ---
 
 Body.`
@@ -1156,11 +1156,11 @@ Body.`
 		if len(pp) != 1 {
 			t.Fatalf("PostProcess count = %d, want 1", len(pp))
 		}
-		if pp[0].Op != "remove_background" {
-			t.Errorf("Op = %q, want %q", pp[0].Op, "remove_background")
+		if pp[0].Op != "chroma_key" {
+			t.Errorf("Op = %q, want %q", pp[0].Op, "chroma_key")
 		}
-		if pp[0].Config["model"] != "isnet-anime" {
-			t.Errorf("Config[model] = %q, want %q", pp[0].Config["model"], "isnet-anime")
+		if pp[0].Config["tolerance"] != "0.30" {
+			t.Errorf("Config[tolerance] = %q, want %q", pp[0].Config["tolerance"], "0.30")
 		}
 	})
 
@@ -1203,12 +1203,12 @@ http_tools:
       type: image/png
       save_to: "out/${input.filename}"
       post_process:
-        - op: remove_background
+        - op: extract_video_frames
           config:
-            model: u2net
-        - op: remove_background
+            fps: "8"
+        - op: video_matte
           config:
-            model: isnet-anime
+            keyframe_every: "8"
 ---
 `
 		agent, err := ParseFrontmatter([]byte(input))
@@ -1219,11 +1219,11 @@ http_tools:
 		if len(pp) != 2 {
 			t.Fatalf("PostProcess count = %d, want 2", len(pp))
 		}
-		if pp[0].Config["model"] != "u2net" {
-			t.Errorf("first op model = %q", pp[0].Config["model"])
+		if pp[0].Config["fps"] != "8" {
+			t.Errorf("first op fps = %q", pp[0].Config["fps"])
 		}
-		if pp[1].Config["model"] != "isnet-anime" {
-			t.Errorf("second op model = %q", pp[1].Config["model"])
+		if pp[1].Config["keyframe_every"] != "8" {
+			t.Errorf("second op keyframe_every = %q", pp[1].Config["keyframe_every"])
 		}
 	})
 
@@ -1241,7 +1241,7 @@ http_tools:
       type: image/png
       save_to: "out/${input.filename}"
       post_process:
-        - op: remove_background
+        - op: chroma_key
 ---
 `
 		agent, err := ParseFrontmatter([]byte(input))
@@ -1252,7 +1252,7 @@ http_tools:
 		if len(pp) != 1 {
 			t.Fatalf("PostProcess count = %d, want 1", len(pp))
 		}
-		if pp[0].Op != "remove_background" {
+		if pp[0].Op != "chroma_key" {
 			t.Errorf("Op = %q", pp[0].Op)
 		}
 		if len(pp[0].Config) > 0 {
@@ -1262,9 +1262,9 @@ http_tools:
 }
 
 func TestValidatePostProcess(t *testing.T) {
-	t.Run("known op returns no errors", func(t *testing.T) {
+	t.Run("chroma_key is a known op", func(t *testing.T) {
 		errs := ValidatePostProcess([]PostProcessOp{
-			{Op: "remove_background", Config: map[string]string{"model": "u2net"}},
+			{Op: "chroma_key", Config: map[string]string{"tolerance": "0.30"}},
 		})
 		if len(errs) != 0 {
 			t.Errorf("expected no errors, got %v", errs)
@@ -1274,12 +1274,24 @@ func TestValidatePostProcess(t *testing.T) {
 	t.Run("all video pipeline ops are known", func(t *testing.T) {
 		errs := ValidatePostProcess([]PostProcessOp{
 			{Op: "extract_video_frames", Config: map[string]string{"fps": "8"}},
-			{Op: "remove_background", Config: map[string]string{"model": "isnet-anime"}},
+			{Op: "video_matte", Config: map[string]string{"keyframe_every": "8"}},
 			{Op: "normalize_frames", Config: map[string]string{"padding": "4"}},
 			{Op: "stitch_spritesheet", Config: map[string]string{"columns": "4"}},
 		})
 		if len(errs) != 0 {
 			t.Errorf("expected no errors for full pipeline, got %v", errs)
+		}
+	})
+
+	t.Run("retired remove_background is no longer accepted", func(t *testing.T) {
+		errs := ValidatePostProcess([]PostProcessOp{
+			{Op: "remove_background"},
+		})
+		if len(errs) != 1 {
+			t.Fatalf("expected 1 error for retired op, got %d", len(errs))
+		}
+		if !strings.Contains(errs[0].Error(), "unknown op") {
+			t.Errorf("error = %q, want mention of 'unknown op'", errs[0])
 		}
 	})
 
@@ -1321,7 +1333,7 @@ func TestValidatePostProcess(t *testing.T) {
 
 	t.Run("mixed known and unknown ops", func(t *testing.T) {
 		errs := ValidatePostProcess([]PostProcessOp{
-			{Op: "remove_background"},
+			{Op: "chroma_key"},
 			{Op: "bad_op"},
 			{Op: ""},
 		})

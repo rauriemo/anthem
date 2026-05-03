@@ -57,7 +57,7 @@ type PostProcessor interface {
 }
 
 var processors = map[string]PostProcessor{
-	"remove_background":       &RemoveBackgroundProcessor{},
+	"chroma_key":              &ChromaKeyProcessor{},
 	"extract_video_frames":    &ExtractVideoFramesProcessor{},
 	"video_matte":             &VideoMatteProcessor{},
 	"check_frame_consistency": &CheckFrameConsistencyProcessor{},
@@ -239,98 +239,213 @@ func extractSidecarJSON(stdout []byte, out any) error {
 }
 
 // ---------------------------------------------------------------------------
-// RemoveBackgroundProcessor
+// ChromaKeyProcessor
 // ---------------------------------------------------------------------------
 
-// RemoveBackgroundProcessor removes the background from a PNG image using the
-// BiRefNet-backed matting sidecar. The legacy rembg backend and batch-mode
-// (state["frame_dir"]) entry point have both been removed — video matting is
-// now handled by VideoMatteProcessor, and still-image matting has a single
-// clean backend. Both LookPath and CmdRunner are injectable for tests; nil
-// values fall back to the stdlib equivalents.
-type RemoveBackgroundProcessor struct {
-	LookPath  func(file string) (string, error)
-	CmdRunner func(ctx context.Context, name string, args ...string) *exec.Cmd
-}
+// ChromaKeyProcessor mattes a still-image PNG against a uniform magenta
+// (#FF00FF) background plate. Pure-Go, no Python sidecar, no model load:
+// runs in milliseconds on a few-megapixel sprite. Replaces the legacy
+// BiRefNet-sidecar-backed RemoveBackgroundProcessor which paid a 5–15 s
+// per-call model load tax and produced visible white halos because Nano
+// Banana cannot return real transparent PNGs (it composites the subject
+// onto an opaque off-white background, contaminating silhouette RGB).
+//
+// Algorithm:
+//
+//  1. For each pixel compute a "magenta excess" score in [0, 1]:
+//       score = clamp((min(R,B) - G) / 255, 0, 1)
+//     Score is high when red and blue are both bright AND green is
+//     suppressed — exactly the signature of a magenta chroma plate. This
+//     is the standard channel-difference keyer used by compositing tools
+//     like Nuke's IBK, transposed from green-screen to magenta-screen.
+//  2. Map score → alpha via Hermite smoothstep across (lower, upper):
+//       lower = tolerance - softness/2
+//       upper = tolerance + softness/2
+//     Below `lower` the pixel is treated as opaque subject (alpha=255);
+//     above `upper` it's pure plate (alpha=0); the band between is a
+//     smooth ramp so silhouette anti-aliasing survives.
+//  3. Despill on kept pixels: when both R and B are jointly inflated above
+//     G (the magenta signature), suppress R and B by that shared excess
+//     minus a `despill_offset` deadzone. Pure-red subjects (R high, B low)
+//     have no joint inflation and are untouched; magenta-tinted edges
+//     (R≈B≈high, G low) get pulled toward the green-equalized neutral.
+//     Neutralizes residual magenta cast on subject edges — the actual
+//     cause of the "white halo" with the prior matter; the mask was fine,
+//     the RGB carried plate contamination that nothing was suppressing.
+//
+// Config keys (all optional; values parsed as decimal strings):
+//
+//	tolerance       float, default "0.30" — score threshold center
+//	softness        float, default "0.10" — width of the smoothstep band
+//	despill_offset  int,   default "8"    — channel-clamp slack
+type ChromaKeyProcessor struct{}
 
-func (p *RemoveBackgroundProcessor) Run(artifactPath string, cfg map[string]string, state PipelineState, log *slog.Logger) PostProcessResult {
-	lookPath := p.LookPath
-	if lookPath == nil {
-		lookPath = exec.LookPath
+func (p *ChromaKeyProcessor) Run(artifactPath string, cfg map[string]string, _ PipelineState, log *slog.Logger) PostProcessResult {
+	tolerance := 0.30
+	if s := cfg["tolerance"]; s != "" {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && v >= 0 && v <= 1 {
+			tolerance = v
+		} else {
+			log.Warn("chroma_key: invalid tolerance, using default", "raw", s, "default", tolerance)
+		}
 	}
-	cmdRunner := p.CmdRunner
-	if cmdRunner == nil {
-		cmdRunner = exec.CommandContext
+	softness := 0.10
+	if s := cfg["softness"]; s != "" {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && v >= 0 && v <= 1 {
+			softness = v
+		} else {
+			log.Warn("chroma_key: invalid softness, using default", "raw", s, "default", softness)
+		}
 	}
-
-	sidecar, err := locateMattePython(lookPath)
-	if err != nil {
-		return PostProcessResult{
-			Op:      "remove_background",
-			Status:  PostProcessSkipped,
-			Message: err.Error(),
+	despillOffset := 8
+	if s := cfg["despill_offset"]; s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v >= 0 && v <= 255 {
+			despillOffset = v
+		} else {
+			log.Warn("chroma_key: invalid despill_offset, using default", "raw", s, "default", despillOffset)
 		}
 	}
 
-	tmpFile, err := os.CreateTemp("", "birefnet-*.png")
+	src, err := decodePNG(artifactPath)
 	if err != nil {
 		return PostProcessResult{
-			Op:      "remove_background",
+			Op:      "chroma_key",
+			Status:  PostProcessFailed,
+			Message: fmt.Sprintf("decoding PNG: %v", err),
+		}
+	}
+
+	bounds := src.Bounds()
+	dst := image.NewNRGBA(bounds)
+	totalPx := bounds.Dx() * bounds.Dy()
+
+	lower := tolerance - softness/2
+	upper := tolerance + softness/2
+	if lower < 0 {
+		lower = 0
+	}
+	if upper > 1 {
+		upper = 1
+	}
+	if upper <= lower {
+		// Hard cutoff if softness is zero or thresholds collapsed.
+		upper = lower + 1e-6
+	}
+
+	var keyed, despilled int
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r16, g16, b16, _ := src.At(x, y).RGBA()
+			r := uint8(r16 >> 8)
+			g := uint8(g16 >> 8)
+			b := uint8(b16 >> 8)
+
+			minRB := r
+			if b < minRB {
+				minRB = b
+			}
+			score := 0.0
+			if minRB > g {
+				score = float64(minRB-g) / 255.0
+			}
+
+			var alpha uint8
+			switch {
+			case score >= upper:
+				alpha = 0
+				keyed++
+			case score <= lower:
+				alpha = 255
+			default:
+				t := (score - lower) / (upper - lower)
+				// Hermite smoothstep: 3t^2 - 2t^3.
+				s := t * t * (3 - 2*t)
+				a := math.Round((1 - s) * 255)
+				alpha = uint8(a)
+				if alpha == 0 {
+					keyed++
+				}
+			}
+
+			if alpha == 0 {
+				dst.SetNRGBA(x, y, color.NRGBA{})
+				continue
+			}
+
+			rNew := r
+			bNew := b
+			// Joint magenta excess above G, in raw [0,255] units. Pixels
+			// reaching this branch have score ≤ upper, so spill is small
+			// by construction. The despill_offset deadzone prevents
+			// natural red/blue subject channels (which never carry plate
+			// contamination) from being smudged.
+			spill := int(minRB) - int(g) - despillOffset
+			if spill > 0 {
+				rNew = uint8SubClamp(r, spill)
+				bNew = uint8SubClamp(b, spill)
+				despilled++
+			}
+			dst.SetNRGBA(x, y, color.NRGBA{R: rNew, G: g, B: bNew, A: alpha})
+		}
+	}
+
+	if keyed == 0 {
+		log.Warn("chroma_key keyed no pixels; magenta plate may be missing",
+			"path", artifactPath, "tolerance", tolerance, "softness", softness)
+	}
+	if keyed == totalPx {
+		log.Warn("chroma_key keyed every pixel; output will be fully transparent",
+			"path", artifactPath)
+	}
+
+	tmpFile, err := os.CreateTemp(filepath.Dir(artifactPath), "chroma-*.png")
+	if err != nil {
+		return PostProcessResult{
+			Op:      "chroma_key",
 			Status:  PostProcessFailed,
 			Message: fmt.Sprintf("creating temp file: %v", err),
 		}
 	}
 	tmpPath := tmpFile.Name()
 	tmpFile.Close()
-	defer os.Remove(tmpPath)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	cmd := cmdRunner(ctx, sidecar.Python, sidecar.Script, "image",
-		"--input", artifactPath,
-		"--output", tmpPath,
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
+	if err := encodePNG(tmpPath, dst); err != nil {
+		os.Remove(tmpPath)
 		return PostProcessResult{
-			Op:      "remove_background",
+			Op:      "chroma_key",
 			Status:  PostProcessFailed,
-			Message: fmt.Sprintf("birefnet sidecar failed: %v: %s", err, truncateBytes(output, 500)),
+			Message: fmt.Sprintf("encoding output PNG: %v", err),
 		}
-	}
-
-	hasAlpha, fullyOpaque := validateAlpha(tmpPath)
-	if !hasAlpha {
-		log.Warn("birefnet output is not an RGBA image, keeping original", "path", artifactPath)
-		return PostProcessResult{
-			Op:      "remove_background",
-			Status:  PostProcessFailed,
-			Message: "birefnet output is not an RGBA image",
-		}
-	}
-	if fullyOpaque {
-		log.Warn("birefnet output appears fully opaque, background removal may not have been effective",
-			"path", artifactPath)
 	}
 
 	if err := os.Rename(tmpPath, artifactPath); err != nil {
+		os.Remove(tmpPath)
 		return PostProcessResult{
-			Op:      "remove_background",
+			Op:      "chroma_key",
 			Status:  PostProcessFailed,
 			Message: fmt.Sprintf("replacing artifact: %v", err),
 		}
 	}
 
-	msg := "birefnet"
-	if fullyOpaque {
-		msg += "; warning: output appears fully opaque"
-	}
 	return PostProcessResult{
-		Op:      "remove_background",
-		Status:  PostProcessApplied,
-		Message: msg,
+		Op:     "chroma_key",
+		Status: PostProcessApplied,
+		Message: fmt.Sprintf("chroma_key: %d/%d px keyed, %d edge despilled (tolerance=%.2f softness=%.2f despill_offset=%d)",
+			keyed, totalPx, despilled, tolerance, softness, despillOffset),
 	}
+}
+
+// uint8SubClamp returns base-delta saturated to [0, 255]. Used by the
+// chroma_key despill to suppress R/B channels by the magenta excess.
+func uint8SubClamp(base uint8, delta int) uint8 {
+	v := int(base) - delta
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return uint8(v)
 }
 
 // ---------------------------------------------------------------------------

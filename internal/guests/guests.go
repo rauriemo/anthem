@@ -35,7 +35,7 @@ type ArtifactTemplate struct {
 
 // knownPostProcessOps is the closed set of operations the bridge implements.
 var knownPostProcessOps = map[string]bool{
-	"remove_background":       true,
+	"chroma_key":              true,
 	"extract_video_frames":    true,
 	"video_matte":             true,
 	"check_frame_consistency": true,
