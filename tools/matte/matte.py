@@ -5,12 +5,19 @@ Subcommands:
   video - video sequence matting via BiRefNet keyframes + SAM 2 propagation
           + guided-filter edge refinement. Degrades to per-frame BiRefNet
           when --no-sam2 is passed or SAM 2 fails at runtime.
+  still - single-image matting via BiRefNet + optional guided-filter edge
+          refinement. Used as a recovery path for stills whose source plate
+          is not pure magenta (subject-palette bleed) so the in-Go
+          ChromaKeyProcessor can't key them. BiRefNet segments the subject
+          semantically so the source background color is irrelevant.
   drift - DINOv2 embedding-based style-drift detection per frame, with
           both anchor (vs. frame 0) and rolling-window similarity scores.
 
-Still-image matting is no longer handled here — it now runs in-Go via the
-ChromaKeyProcessor in internal/httpbridge/postprocess.go (deterministic
-magenta-plate keying, no model load, sub-second).
+The default still-image matting path remains the in-Go ChromaKeyProcessor
+in internal/httpbridge/postprocess.go (deterministic magenta-plate keying,
+no model load, sub-second). The `still` subcommand here exists so the
+BiRefNetMatteProcessor can offer an opt-in recovery for non-magenta sources
+without re-implementing BiRefNet inference twice.
 
 Each subcommand writes a single structured JSON status line to stdout; all
 progress logging goes to stderr so Go-side parsing stays clean.
@@ -369,6 +376,57 @@ def cmd_video(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# still subcommand
+# ---------------------------------------------------------------------------
+
+
+def cmd_still(args: argparse.Namespace) -> int:
+    """Single-image BiRefNet matte. Replaces the input file when --output
+    points at it; otherwise writes RGBA PNG to --output and leaves the
+    source untouched."""
+    from PIL import Image  # type: ignore
+    import numpy as np  # type: ignore
+
+    device = _device()
+    started = time.time()
+
+    src = Path(args.input)
+    dst = Path(args.output)
+    if not src.is_file():
+        _emit({"status": "error", "error": f"input not found: {src}"})
+        return 2
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        rgba, mask = _birefnet_infer(src, device)
+        if args.refine:
+            rgb = np.asarray(rgba.convert("RGB"))
+            mask = _guided_filter_refine(rgb, mask, args.radius)
+            rgba = Image.fromarray(rgb, "RGB").convert("RGBA")
+            rgba.putalpha(Image.fromarray(mask, "L"))
+        rgba.save(dst, format="PNG", optimize=False)
+    except Exception as e:
+        _log(traceback.format_exc())
+        _emit({"status": "error", "error": f"birefnet still failed: {e}"})
+        return 1
+
+    _emit(
+        {
+            "status": "ok",
+            "mode": "birefnet_still",
+            "device": device,
+            "refined": bool(args.refine),
+            "radius": int(args.radius) if args.refine else 0,
+            "elapsed_ms": int((time.time() - started) * 1000),
+            "input": str(src),
+            "output": str(dst),
+        }
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # drift subcommand
 # ---------------------------------------------------------------------------
 
@@ -493,6 +551,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip SAM 2 propagation and do per-frame BiRefNet only",
     )
 
+    ps = sub.add_parser("still", help="single-image matting via BiRefNet")
+    ps.add_argument("--input", required=True)
+    ps.add_argument("--output", required=True)
+    ps.add_argument("--refine", action="store_true")
+    ps.add_argument("--radius", type=int, default=8)
+
     pd = sub.add_parser("drift", help="DINOv2 style-drift check")
     pd.add_argument("--frames-dir", required=True)
     pd.add_argument("--anchor-threshold", type=float, default=0.85)
@@ -507,6 +571,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "video":
             return cmd_video(args)
+        if args.command == "still":
+            return cmd_still(args)
         if args.command == "drift":
             return cmd_drift(args)
     except Exception as e:

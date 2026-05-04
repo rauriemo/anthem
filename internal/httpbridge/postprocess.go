@@ -59,6 +59,8 @@ type PostProcessor interface {
 
 var processors = map[string]PostProcessor{
 	"chroma_key":              &ChromaKeyProcessor{},
+	"birefnet_matte":          &BiRefNetMatteProcessor{},
+	"binarize_alpha":          &BinarizeAlphaProcessor{},
 	"extract_video_frames":    &ExtractVideoFramesProcessor{},
 	"video_matte":             &VideoMatteProcessor{},
 	"check_frame_consistency": &CheckFrameConsistencyProcessor{},
@@ -354,11 +356,38 @@ func extractSidecarJSON(stdout []byte, out any) error {
 //     cause of the "white halo" with the prior matter; the mask was fine,
 //     the RGB carried plate contamination that nothing was suppressing.
 //
+//  4. Optional shadow-kill pass (kill_shadow=true): the score-based keyer
+//     above misses *darkened* magenta — generator-painted ground shadows
+//     under the subject that come back as e.g. RGB(110,80,110). Their
+//     absolute (min(R,B)-G) score sits well below `tolerance` so they
+//     survive the primary pass as opaque "shadow blobs" attached to the
+//     subject after matting. The shadow-kill pass converts each surviving
+//     pixel to HSV and keys it if its hue is in the magenta family
+//     (300° ± shadow_hue_tol) AND its saturation exceeds shadow_min_sat.
+//     This catches shadows at any brightness because hue is invariant to
+//     value. Safe to enable when the subject's palette has no
+//     magenta/violet/pink design elements (e.g. RebelTower's earth-tone
+//     painterly-pixel preset). DO NOT enable for sprites with intentional
+//     magenta in the design (arcane wizards, magical effects, etc.) — it
+//     will eat the subject's purple pixels along with the shadow.
+//
 // Config keys (all optional; values parsed as decimal strings):
 //
-//	tolerance       float, default "0.30" — score threshold center
-//	softness        float, default "0.10" — width of the smoothstep band
-//	despill_offset  int,   default "8"    — channel-clamp slack
+//	tolerance       float, default "0.30"  — score threshold center
+//	softness        float, default "0.10"  — width of the smoothstep band
+//	despill_offset  int,   default "8"     — channel-clamp slack
+//	kill_shadow     bool,  default "false" — enable HSV magenta-family
+//	                                          second pass for darkened plate
+//	shadow_hue_tol  float, default "30"    — half-width (degrees) of the
+//	                                          magenta hue window centered
+//	                                          on 300°; ignored unless
+//	                                          kill_shadow=true
+//	shadow_min_sat  float, default "0.10"  — minimum HSV saturation a
+//	                                          magenta-hued pixel must reach
+//	                                          to be classified as shadow;
+//	                                          rejects gray pixels whose hue
+//	                                          is undefined / noise-driven;
+//	                                          ignored unless kill_shadow=true
 type ChromaKeyProcessor struct{}
 
 func (p *ChromaKeyProcessor) Run(artifactPath string, cfg map[string]string, _ PipelineState, log *slog.Logger) PostProcessResult {
@@ -384,6 +413,30 @@ func (p *ChromaKeyProcessor) Run(artifactPath string, cfg map[string]string, _ P
 			despillOffset = v
 		} else {
 			log.Warn("chroma_key: invalid despill_offset, using default", "raw", s, "default", despillOffset)
+		}
+	}
+	killShadow := false
+	if s := cfg["kill_shadow"]; s != "" {
+		if v, err := strconv.ParseBool(s); err == nil {
+			killShadow = v
+		} else {
+			log.Warn("chroma_key: invalid kill_shadow, using default", "raw", s, "default", killShadow)
+		}
+	}
+	shadowHueTol := 30.0
+	if s := cfg["shadow_hue_tol"]; s != "" {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && v >= 0 && v <= 180 {
+			shadowHueTol = v
+		} else {
+			log.Warn("chroma_key: invalid shadow_hue_tol, using default", "raw", s, "default", shadowHueTol)
+		}
+	}
+	shadowMinSat := 0.10
+	if s := cfg["shadow_min_sat"]; s != "" {
+		if v, err := strconv.ParseFloat(s, 64); err == nil && v >= 0 && v <= 1 {
+			shadowMinSat = v
+		} else {
+			log.Warn("chroma_key: invalid shadow_min_sat, using default", "raw", s, "default", shadowMinSat)
 		}
 	}
 
@@ -413,7 +466,7 @@ func (p *ChromaKeyProcessor) Run(artifactPath string, cfg map[string]string, _ P
 		upper = lower + 1e-6
 	}
 
-	var keyed, despilled int
+	var keyed, despilled, shadowKilled int
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			r16, g16, b16, _ := src.At(x, y).RGBA()
@@ -445,6 +498,24 @@ func (p *ChromaKeyProcessor) Run(artifactPath string, cfg map[string]string, _ P
 				alpha = uint8(a)
 				if alpha == 0 {
 					keyed++
+				}
+			}
+
+			// Optional shadow-kill: HSV magenta-family second pass over
+			// pixels that survived the score-based keyer. Catches darkened
+			// plate (R≈B, G<R, low brightness) that the absolute-score
+			// keyer treats as subject. Hue is invariant to brightness, so
+			// the same hue+sat test catches bright plate, mid shadow, and
+			// deep shadow uniformly.
+			if killShadow && alpha > 0 {
+				hue, sat, _ := rgbToHSV(r, g, b)
+				hueDelta := math.Abs(hue - 300.0)
+				if hueDelta > 180 {
+					hueDelta = 360 - hueDelta
+				}
+				if hueDelta <= shadowHueTol && sat >= shadowMinSat {
+					alpha = 0
+					shadowKilled++
 				}
 			}
 
@@ -511,8 +582,8 @@ func (p *ChromaKeyProcessor) Run(artifactPath string, cfg map[string]string, _ P
 	return PostProcessResult{
 		Op:     "chroma_key",
 		Status: PostProcessApplied,
-		Message: fmt.Sprintf("chroma_key: %d/%d px keyed, %d edge despilled (tolerance=%.2f softness=%.2f despill_offset=%d)",
-			keyed, totalPx, despilled, tolerance, softness, despillOffset),
+		Message: fmt.Sprintf("chroma_key: %d/%d px keyed, %d edge despilled, %d shadow killed (tolerance=%.2f softness=%.2f despill_offset=%d kill_shadow=%t hue_tol=%.0f min_sat=%.2f)",
+			keyed, totalPx, despilled, shadowKilled, tolerance, softness, despillOffset, killShadow, shadowHueTol, shadowMinSat),
 	}
 }
 
@@ -527,6 +598,345 @@ func uint8SubClamp(base uint8, delta int) uint8 {
 		return 255
 	}
 	return uint8(v)
+}
+
+// rgbToHSV converts an 8-bit RGB triple to (hue°, saturation, value).
+// Hue is in [0, 360); saturation and value are in [0, 1]. Used by the
+// chroma_key shadow-kill pass to detect magenta-family pixels regardless
+// of brightness. For pure gray (delta == 0) hue is undefined and returned
+// as 0; callers must gate hue-based decisions on saturation.
+func rgbToHSV(r, g, b uint8) (hue, sat, val float64) {
+	rf := float64(r) / 255.0
+	gf := float64(g) / 255.0
+	bf := float64(b) / 255.0
+	maxC := math.Max(rf, math.Max(gf, bf))
+	minC := math.Min(rf, math.Min(gf, bf))
+	val = maxC
+	delta := maxC - minC
+	if maxC == 0 {
+		return 0, 0, 0
+	}
+	sat = delta / maxC
+	if delta == 0 {
+		return 0, sat, val
+	}
+	switch {
+	case rf >= gf && rf >= bf:
+		hue = 60 * ((gf - bf) / delta)
+	case gf >= bf:
+		hue = 60 * ((bf-rf)/delta + 2)
+	default:
+		hue = 60 * ((rf-gf)/delta + 4)
+	}
+	if hue < 0 {
+		hue += 360
+	}
+	return hue, sat, val
+}
+
+// ---------------------------------------------------------------------------
+// BiRefNetMatteProcessor
+// ---------------------------------------------------------------------------
+
+// BiRefNetMatteProcessor mattes a still-image PNG by shelling out to the
+// matte.py `still` subcommand, which runs BiRefNet semantic segmentation
+// (optionally followed by guided-filter edge refinement). Used as the
+// recovery path for stills whose source plate is NOT pure magenta —
+// "subject-palette bleed" cases where Nano Banana paints the matte in a
+// non-magenta hue (e.g. maroon/oxblood for a fire wizard, dusty-rose for
+// a pink-themed sprite). ChromaKeyProcessor produces a no-op result on
+// those because its score-based keyer keys on the magenta signature; this
+// op segments the subject semantically so the source background color is
+// irrelevant.
+//
+// Trade-offs vs. ChromaKeyProcessor (the default still-image matter):
+//
+//   - Cost: 5–15 seconds per still (Python startup + BiRefNet model load
+//     + inference) vs. milliseconds for the in-Go chroma key. Acceptable
+//     for a recovery tool but unsuitable as a default.
+//   - Despill: BiRefNet outputs a binary subject mask with no
+//     understanding of plate-color contamination. If the source has a
+//     magenta cast bleeding into subject edges, that cast survives in
+//     the kept pixels (the chroma key's despill pass is what makes
+//     magenta-plate stills come back without halos). Mitigation: when
+//     the source plate IS magenta, prefer ChromaKeyProcessor; reach for
+//     this op only when the plate is non-magenta and chroma key has
+//     already failed.
+//   - Sidecar dependency: skips with PostProcessSkipped (not failed)
+//     when matte.py / Python / model checkpoints aren't installed,
+//     matching the same skip-friendly contract as VideoMatteProcessor.
+//
+// Config keys (all optional):
+//
+//	refine  bool, default "true"  — guided-filter edge recovery on the mask
+//	radius  int,  default "8"     — guided-filter radius
+type BiRefNetMatteProcessor struct {
+	LookPath  func(file string) (string, error)
+	CmdRunner func(ctx context.Context, name string, args ...string) *exec.Cmd
+}
+
+type birefnetStillResult struct {
+	Status    string `json:"status"`
+	Mode      string `json:"mode"`
+	Device    string `json:"device"`
+	Refined   bool   `json:"refined"`
+	Radius    int    `json:"radius"`
+	ElapsedMS int    `json:"elapsed_ms"`
+	Input     string `json:"input"`
+	Output    string `json:"output"`
+	Error     string `json:"error,omitempty"`
+}
+
+func (p *BiRefNetMatteProcessor) Run(artifactPath string, cfg map[string]string, _ PipelineState, log *slog.Logger) PostProcessResult {
+	lookPath := p.LookPath
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	cmdRunner := p.CmdRunner
+	if cmdRunner == nil {
+		cmdRunner = exec.CommandContext
+	}
+
+	sidecar, err := locateMattePython(lookPath)
+	if err != nil {
+		return PostProcessResult{Op: "birefnet_matte", Status: PostProcessSkipped, Message: err.Error()}
+	}
+
+	if _, err := os.Stat(artifactPath); err != nil {
+		return PostProcessResult{Op: "birefnet_matte", Status: PostProcessFailed, Message: fmt.Sprintf("artifact not readable: %v", err)}
+	}
+
+	tmpFile, err := os.CreateTemp(filepath.Dir(artifactPath), "birefnet-*.png")
+	if err != nil {
+		return PostProcessResult{Op: "birefnet_matte", Status: PostProcessFailed, Message: fmt.Sprintf("creating temp file: %v", err)}
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	// CreateTemp reserves a unique filename and creates an empty placeholder.
+	// Delete the placeholder before invoking the sidecar so the post-call
+	// os.Stat is a meaningful "did the sidecar write the output?" check
+	// rather than "did the placeholder still exist?".
+	_ = os.Remove(tmpPath)
+	defer os.Remove(tmpPath)
+
+	args := []string{sidecar.Script, "still",
+		"--input", artifactPath,
+		"--output", tmpPath,
+	}
+	if cfg["refine"] != "false" {
+		args = append(args, "--refine")
+		if radius := cfg["radius"]; radius != "" {
+			args = append(args, "--radius", radius)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	log.Info("birefnet_matte start", "artifact", artifactPath)
+	startedAt := time.Now()
+	cmd := cmdRunner(ctx, sidecar.Python, args...)
+	stdoutBytes, stderrBytes, runErr := runSidecarCmd(ctx, cmd)
+	log.Info("birefnet_matte sidecar exited", "elapsed", time.Since(startedAt).Round(time.Millisecond), "err", runErr)
+	if runErr != nil {
+		return PostProcessResult{
+			Op:      "birefnet_matte",
+			Status:  PostProcessFailed,
+			Message: fmt.Sprintf("sidecar failed: %v: %s", runErr, truncateBytes(stderrBytes, 500)),
+		}
+	}
+
+	var res birefnetStillResult
+	if jerr := extractSidecarJSON(stdoutBytes, &res); jerr != nil {
+		return PostProcessResult{Op: "birefnet_matte", Status: PostProcessFailed, Message: fmt.Sprintf("parsing sidecar stdout: %v", jerr)}
+	}
+	if res.Status != "ok" {
+		errMsg := res.Error
+		if errMsg == "" {
+			errMsg = "sidecar reported non-ok status"
+		}
+		return PostProcessResult{Op: "birefnet_matte", Status: PostProcessFailed, Message: errMsg}
+	}
+
+	if _, err := os.Stat(tmpPath); err != nil {
+		return PostProcessResult{Op: "birefnet_matte", Status: PostProcessFailed, Message: fmt.Sprintf("sidecar produced no output: %v", err)}
+	}
+
+	if err := os.Rename(tmpPath, artifactPath); err != nil {
+		return PostProcessResult{Op: "birefnet_matte", Status: PostProcessFailed, Message: fmt.Sprintf("replacing artifact: %v", err)}
+	}
+
+	return PostProcessResult{
+		Op:     "birefnet_matte",
+		Status: PostProcessApplied,
+		Message: fmt.Sprintf("birefnet still matte applied (%s, refined=%t, radius=%d, %dms)",
+			res.Device, res.Refined, res.Radius, res.ElapsedMS),
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BinarizeAlphaProcessor
+// ---------------------------------------------------------------------------
+
+// BinarizeAlphaProcessor strips soft-alpha edge halos from a still PNG by
+// flooring near-zero alpha pixels to fully transparent and snapping the
+// remaining pixels to fully opaque or fully transparent at a configurable
+// midpoint. Pure-Go pixel math, no sidecar, runs in milliseconds.
+//
+// Algorithmically identical to the floorAlpha + binarizeAlpha passes that
+// NormalizeFramesProcessor (Walt's pipeline) applies inside its bbox/scale
+// loop. Extracted as a standalone op so still-image matters (notably the
+// BiRefNetMatteProcessor recovery path) can apply the same halo-killer
+// without dragging in NormalizeFramesProcessor's frame-set machinery.
+//
+// Why it matters: BiRefNet returns a soft probability mask, so silhouette
+// edges come back as semi-transparent pixels (alpha 80–200 range) whose RGB
+// is a blend of the subject and the original background plate. When those
+// semi-transparent edges composite against a light surface they show the
+// underlying plate-tinted RGB as a faint halo around the subject. Snapping
+// alpha to {0, 255} at the 50% midpoint nukes the soft band entirely:
+// edges that were "half plate, half subject" either disappear (alpha → 0)
+// or become fully opaque (alpha → 255). The visual cost is slightly more
+// aliased silhouette outlines, which at sprite-sheet display scale is
+// invisible.
+//
+// Config keys (all optional):
+//
+//	alpha_threshold  uint, default "0"      — pixels with alpha in
+//	                                          (0, threshold] are floored
+//	                                          to 0. Use to kill faint
+//	                                          BiRefNet "ghost" residue
+//	                                          well below the snap midpoint.
+//	                                          Threshold scale is uint32
+//	                                          (0–0xFFFF); Walt's pipeline
+//	                                          uses 4096 (~6% opacity) as
+//	                                          its default floor.
+//	alpha_snap       uint, default "0"      — pixels above the threshold
+//	                                          become 255; pixels at or
+//	                                          below become 0. uint32 scale.
+//	                                          Walt's pipeline uses 32768
+//	                                          (50% midpoint). A value of 0
+//	                                          disables snapping (op acts
+//	                                          purely as a floor pass).
+//	                                          When snap > 0 it dominates
+//	                                          floor: any pixel above
+//	                                          alpha_snap is forced to 255
+//	                                          regardless of alpha_threshold.
+//
+// Both defaults are 0 so the op is a no-op out of the box; callers must
+// opt in via config. The Miyazaki rematte chain enables both with Walt's
+// production values (4096 / 32768) so the recovery path matches Walt's
+// halo-killing behavior end-to-end.
+type BinarizeAlphaProcessor struct{}
+
+func (p *BinarizeAlphaProcessor) Run(artifactPath string, cfg map[string]string, _ PipelineState, log *slog.Logger) PostProcessResult {
+	var alphaThreshold uint32
+	if s := cfg["alpha_threshold"]; s != "" {
+		if v, err := strconv.ParseUint(s, 10, 32); err == nil && v <= 0xFFFF {
+			alphaThreshold = uint32(v)
+		} else {
+			log.Warn("binarize_alpha: invalid alpha_threshold, using default 0", "raw", s)
+		}
+	}
+	var alphaSnap uint32
+	if s := cfg["alpha_snap"]; s != "" {
+		if v, err := strconv.ParseUint(s, 10, 32); err == nil && v <= 0xFFFF {
+			alphaSnap = uint32(v)
+		} else {
+			log.Warn("binarize_alpha: invalid alpha_snap, using default 0", "raw", s)
+		}
+	}
+
+	if alphaThreshold == 0 && alphaSnap == 0 {
+		return PostProcessResult{
+			Op:      "binarize_alpha",
+			Status:  PostProcessSkipped,
+			Message: "alpha_threshold=0 and alpha_snap=0; both passes disabled",
+		}
+	}
+
+	src, err := decodePNG(artifactPath)
+	if err != nil {
+		return PostProcessResult{
+			Op:      "binarize_alpha",
+			Status:  PostProcessFailed,
+			Message: fmt.Sprintf("decoding PNG: %v", err),
+		}
+	}
+
+	// Force NRGBA so the existing floorAlpha / binarizeAlpha helpers (which
+	// operate directly on the .Pix backing slice) can be reused without
+	// branching on color model. PNG decode usually returns NRGBA already
+	// for alpha-bearing PNGs, but image.Image color-model fallbacks (e.g.
+	// paletted PNGs that the encoder upgraded to RGBA64) would skip the
+	// helper. Always normalizing avoids the silent skip.
+	bounds := src.Bounds()
+	nrgba, ok := src.(*image.NRGBA)
+	if !ok {
+		nrgba = image.NewNRGBA(bounds)
+		draw.Draw(nrgba, bounds, src, bounds.Min, draw.Src)
+	}
+
+	floored := 0
+	snappedOpaque := 0
+	snappedTransparent := 0
+	pix := nrgba.Pix
+	for i := 3; i < len(pix); i += 4 {
+		a8 := pix[i]
+		if a8 == 0 {
+			continue
+		}
+		a16 := uint32(a8) * 0x101
+		if alphaThreshold > 0 && a16 <= alphaThreshold {
+			pix[i] = 0
+			floored++
+			continue
+		}
+		if alphaSnap > 0 {
+			if a16 > alphaSnap {
+				pix[i] = 255
+				snappedOpaque++
+			} else {
+				pix[i] = 0
+				snappedTransparent++
+			}
+		}
+	}
+
+	tmpFile, err := os.CreateTemp(filepath.Dir(artifactPath), "binarize-*.png")
+	if err != nil {
+		return PostProcessResult{
+			Op:      "binarize_alpha",
+			Status:  PostProcessFailed,
+			Message: fmt.Sprintf("creating temp file: %v", err),
+		}
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+
+	if err := encodePNG(tmpPath, nrgba); err != nil {
+		os.Remove(tmpPath)
+		return PostProcessResult{
+			Op:      "binarize_alpha",
+			Status:  PostProcessFailed,
+			Message: fmt.Sprintf("encoding output PNG: %v", err),
+		}
+	}
+	if err := os.Rename(tmpPath, artifactPath); err != nil {
+		os.Remove(tmpPath)
+		return PostProcessResult{
+			Op:      "binarize_alpha",
+			Status:  PostProcessFailed,
+			Message: fmt.Sprintf("replacing artifact: %v", err),
+		}
+	}
+
+	return PostProcessResult{
+		Op:     "binarize_alpha",
+		Status: PostProcessApplied,
+		Message: fmt.Sprintf("floored=%d snapped_opaque=%d snapped_transparent=%d (alpha_threshold=%d alpha_snap=%d)",
+			floored, snappedOpaque, snappedTransparent, alphaThreshold, alphaSnap),
+	}
 }
 
 // ---------------------------------------------------------------------------

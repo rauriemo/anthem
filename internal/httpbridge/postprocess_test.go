@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -198,6 +199,42 @@ func TestHelperProcess(t *testing.T) {
 		fmt.Println(`{"status":"error","error":"sam2 exploded"}`)
 	case "video_fail":
 		fmt.Fprintln(os.Stderr, "sidecar crashed")
+		os.Exit(2)
+	case "still_ok":
+		in := parse("--input")
+		out := parse("--output")
+		// Helper-side fake: copy the input to the output so the
+		// post-process op's "did the sidecar produce output?" check passes.
+		if in != "" && out != "" {
+			if data, err := os.ReadFile(in); err == nil {
+				_ = os.WriteFile(out, data, 0644)
+			}
+		}
+		// Surface --refine / --radius into the JSON so ConfigForwarded can
+		// assert they round-tripped (lightweight alternative to capturing
+		// argv via the CmdRunner closure).
+		refined := false
+		radius := 0
+		for i, a := range args {
+			if a == "--refine" {
+				refined = true
+			}
+			if a == "--radius" && i+1 < len(args) {
+				if v, err := strconv.Atoi(args[i+1]); err == nil {
+					radius = v
+				}
+			}
+		}
+		fmt.Printf(`{"status":"ok","mode":"birefnet_still","device":"cpu","refined":%t,"radius":%d,"elapsed_ms":42,"input":%q,"output":%q}`+"\n",
+			refined, radius, in, out)
+	case "still_no_output":
+		// Emit ok JSON but never write the output file -- exercises the
+		// post-Stat failure path.
+		fmt.Println(`{"status":"ok","mode":"birefnet_still","device":"cpu","refined":true,"radius":8,"elapsed_ms":12,"input":"x","output":"y"}`)
+	case "still_json_error":
+		fmt.Println(`{"status":"error","error":"birefnet checkpoint missing"}`)
+	case "still_fail":
+		fmt.Fprintln(os.Stderr, "still sidecar crashed")
 		os.Exit(2)
 	case "drift_clean":
 		fmt.Println(`{"status":"ok","device":"cpu","frames_processed":3,"anchor_threshold":0.85,"window_threshold":0.92,"window_size":3,"anchor_scores":[1.0,0.95,0.93],"window_scores":[1.0,0.95,0.95],"anchor_outliers":[],"window_outliers":[],"elapsed_ms":20}`)
@@ -581,6 +618,515 @@ func TestChromaKey_AtomicWriteLeavesNoOrphans(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		t.Errorf("dir contents = %v, want only [sprite.png] (no orphan chroma-* temp files)", names)
+	}
+}
+
+// rancherShadow is the empirical color of the magenta-tinted ground splotch
+// the Nano Banana generator paints under chibi sprites despite explicit
+// anti-shadow prompt language. The score-based primary keyer leaves it
+// opaque (score=(110-80)/255≈0.12, well below default lower=0.25); only the
+// HSV magenta-family shadow-kill pass removes it.
+var rancherShadow = color.NRGBA{R: 110, G: 80, B: 110, A: 255}
+
+func TestChromaKey_KillShadowDefaultOffPreservesShadow(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "shadow.png")
+	writePlatePNG(t, artifact, rancherShadow)
+
+	proc := &ChromaKeyProcessor{}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	got := readNRGBA(t, artifact).NRGBAAt(10, 10)
+	if got.A != 255 {
+		t.Errorf("alpha = %d, want 255 (default kill_shadow=false must preserve baked-shadow pixels for backward compat)", got.A)
+	}
+	if !strings.Contains(r.Message, "0 shadow killed") {
+		t.Errorf("Message = %q, want '0 shadow killed' when kill_shadow defaults off", r.Message)
+	}
+	if !strings.Contains(r.Message, "kill_shadow=false") {
+		t.Errorf("Message = %q, want 'kill_shadow=false' diagnostics", r.Message)
+	}
+}
+
+func TestChromaKey_KillShadowKeysDarkenedMagenta(t *testing.T) {
+	cases := []struct {
+		name string
+		c    color.NRGBA
+	}{
+		{"rancher_shadow", rancherShadow},
+		{"deep_shadow", color.NRGBA{R: 80, G: 60, B: 80, A: 255}},
+		{"pinkish_remnant", color.NRGBA{R: 200, G: 150, B: 180, A: 255}},
+		{"violet_haze", color.NRGBA{R: 140, G: 90, B: 160, A: 255}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			artifact := filepath.Join(dir, "shadow.png")
+			writePlatePNG(t, artifact, tc.c)
+
+			proc := &ChromaKeyProcessor{}
+			r := proc.Run(artifact, map[string]string{"kill_shadow": "true"}, PipelineState{}, slog.Default())
+			if r.Status != PostProcessApplied {
+				t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+			}
+
+			got := readNRGBA(t, artifact).NRGBAAt(10, 10)
+			if got.A != 0 {
+				t.Errorf("alpha = %d, want 0 (kill_shadow=true must remove magenta-family pixels at any brightness)", got.A)
+			}
+		})
+	}
+}
+
+func TestChromaKey_KillShadowSparesEarthTones(t *testing.T) {
+	// Painterly-pixel preset palette: aged gold, oxblood red, forest green,
+	// iron blue, stone grey. None of these live in the 270°-330° magenta
+	// hue family, so the shadow-kill pass must leave them untouched even
+	// when enabled.
+	cases := []struct {
+		name string
+		c    color.NRGBA
+	}{
+		{"oxblood_red", color.NRGBA{R: 100, G: 30, B: 30, A: 255}},
+		{"forest_green", color.NRGBA{R: 30, G: 100, B: 30, A: 255}},
+		{"iron_blue", color.NRGBA{R: 30, G: 30, B: 100, A: 255}},
+		{"aged_gold", color.NRGBA{R: 200, G: 160, B: 60, A: 255}},
+		{"chibi_skin", color.NRGBA{R: 240, G: 200, B: 170, A: 255}},
+		{"mustache_orange", color.NRGBA{R: 180, G: 110, B: 50, A: 255}},
+		{"boot_brown", color.NRGBA{R: 90, G: 60, B: 40, A: 255}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			artifact := filepath.Join(dir, "subject.png")
+			writePlatePNG(t, artifact, tc.c)
+
+			proc := &ChromaKeyProcessor{}
+			r := proc.Run(artifact, map[string]string{"kill_shadow": "true"}, PipelineState{}, slog.Default())
+			if r.Status != PostProcessApplied {
+				t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+			}
+
+			got := readNRGBA(t, artifact).NRGBAAt(10, 10)
+			if got.A != 255 {
+				t.Errorf("alpha = %d, want 255 (earth-tone subject %s must survive shadow-kill)", got.A, tc.name)
+			}
+		})
+	}
+}
+
+func TestChromaKey_KillShadowSparesGrayPixels(t *testing.T) {
+	// Pure gray has saturation 0; its hue is undefined and the rgbToHSV
+	// helper returns 0°. Without the saturation gate the shadow-kill pass
+	// would either eat every gray pixel (if it treated hue=0 as
+	// in-family) or eat none (if it treated hue=0 as out-of-family). The
+	// shadow_min_sat=0.10 gate makes the answer unambiguous: gray is
+	// never shadow.
+	cases := []struct {
+		name string
+		c    color.NRGBA
+	}{
+		{"stone_grey_mid", color.NRGBA{R: 120, G: 120, B: 120, A: 255}},
+		{"stone_grey_dark", color.NRGBA{R: 60, G: 60, B: 60, A: 255}},
+		{"near_black", color.NRGBA{R: 20, G: 20, B: 20, A: 255}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			artifact := filepath.Join(dir, "gray.png")
+			writePlatePNG(t, artifact, tc.c)
+
+			proc := &ChromaKeyProcessor{}
+			r := proc.Run(artifact, map[string]string{"kill_shadow": "true"}, PipelineState{}, slog.Default())
+			if r.Status != PostProcessApplied {
+				t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+			}
+
+			got := readNRGBA(t, artifact).NRGBAAt(10, 10)
+			if got.A != 255 {
+				t.Errorf("alpha = %d, want 255 (gray pixel below shadow_min_sat must not be classified as shadow)", got.A)
+			}
+		})
+	}
+}
+
+func TestChromaKey_KillShadowReportsCount(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "shadow.png")
+	writePlatePNG(t, artifact, rancherShadow)
+
+	proc := &ChromaKeyProcessor{}
+	r := proc.Run(artifact, map[string]string{"kill_shadow": "true"}, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "400 shadow killed") {
+		t.Errorf("Message = %q, want '400 shadow killed'", r.Message)
+	}
+	if !strings.Contains(r.Message, "kill_shadow=true") {
+		t.Errorf("Message = %q, want 'kill_shadow=true' diagnostics", r.Message)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BiRefNetMatteProcessor
+// ---------------------------------------------------------------------------
+
+func TestBiRefNetMatte_SidecarMissing(t *testing.T) {
+	isolateSidecarEnv(t)
+	t.Setenv("MATTE_PYTHON", "")
+	t.Setenv("MATTE_SCRIPT", filepath.Join(t.TempDir(), "nope.py"))
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "wizard.png")
+	writePNG(t, artifact, false)
+
+	proc := &BiRefNetMatteProcessor{
+		LookPath: func(string) (string, error) { return "", fmt.Errorf("not found") },
+	}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessSkipped {
+		t.Errorf("Status = %q, want %q (sidecar absence must be skip-friendly, not failure)", r.Status, PostProcessSkipped)
+	}
+}
+
+func TestBiRefNetMatte_ArtifactMissing(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "ghost.png")
+
+	proc := &BiRefNetMatteProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("still_ok"),
+	}
+	r := proc.Run(missing, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Errorf("Status = %q, want %q (missing artifact is a real failure, not a skip)", r.Status, PostProcessFailed)
+	}
+}
+
+func TestBiRefNetMatte_Success(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "wizard.png")
+	writePNG(t, artifact, false)
+
+	origInfo, err := os.Stat(artifact)
+	if err != nil {
+		t.Fatalf("stat original: %v", err)
+	}
+
+	proc := &BiRefNetMatteProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("still_ok"),
+	}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	for _, needle := range []string{"birefnet still matte applied", "cpu"} {
+		if !strings.Contains(r.Message, needle) {
+			t.Errorf("Message = %q, should contain %q", r.Message, needle)
+		}
+	}
+	// Artifact must still exist after the rename. The helper sidecar copies
+	// input -> output verbatim, so size should match the original.
+	finalInfo, err := os.Stat(artifact)
+	if err != nil {
+		t.Fatalf("stat final: %v", err)
+	}
+	if finalInfo.Size() != origInfo.Size() {
+		t.Errorf("artifact size changed: %d -> %d (helper should be a verbatim copy)", origInfo.Size(), finalInfo.Size())
+	}
+}
+
+func TestBiRefNetMatte_NoOutput(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "wizard.png")
+	writePNG(t, artifact, false)
+
+	proc := &BiRefNetMatteProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("still_no_output"),
+	}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Errorf("Status = %q, want %q", r.Status, PostProcessFailed)
+	}
+	if !strings.Contains(r.Message, "no output") {
+		t.Errorf("Message = %q, should mention missing output", r.Message)
+	}
+}
+
+func TestBiRefNetMatte_JSONReportsError(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "wizard.png")
+	writePNG(t, artifact, false)
+
+	proc := &BiRefNetMatteProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("still_json_error"),
+	}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Errorf("Status = %q, want %q", r.Status, PostProcessFailed)
+	}
+	if !strings.Contains(r.Message, "birefnet checkpoint missing") {
+		t.Errorf("Message = %q, should surface sidecar error", r.Message)
+	}
+}
+
+func TestBiRefNetMatte_CmdFails(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "wizard.png")
+	writePNG(t, artifact, false)
+
+	proc := &BiRefNetMatteProcessor{
+		LookPath:  func(string) (string, error) { return "/fake/python", nil },
+		CmdRunner: helperCmd("still_fail"),
+	}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Errorf("Status = %q, want %q", r.Status, PostProcessFailed)
+	}
+}
+
+func TestBiRefNetMatte_ConfigForwarded(t *testing.T) {
+	fakeSidecar(t)
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "wizard.png")
+	writePNG(t, artifact, false)
+
+	cases := []struct {
+		name        string
+		cfg         map[string]string
+		wantArgs    []string
+		notWantArgs []string
+	}{
+		{
+			name:        "default refines with default radius",
+			cfg:         nil,
+			wantArgs:    []string{"--refine"},
+			notWantArgs: []string{"--radius"},
+		},
+		{
+			name:        "explicit radius is forwarded only with refine",
+			cfg:         map[string]string{"radius": "12"},
+			wantArgs:    []string{"--refine", "--radius", "12"},
+			notWantArgs: nil,
+		},
+		{
+			name:        "refine=false suppresses both flags",
+			cfg:         map[string]string{"refine": "false", "radius": "12"},
+			wantArgs:    nil,
+			notWantArgs: []string{"--refine", "--radius"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedArgs []string
+			proc := &BiRefNetMatteProcessor{
+				LookPath: func(string) (string, error) { return "/fake/python", nil },
+				CmdRunner: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+					capturedArgs = append([]string(nil), args...)
+					return helperCmd("still_ok")(ctx, name, args...)
+				},
+			}
+			r := proc.Run(artifact, tc.cfg, PipelineState{}, slog.Default())
+			if r.Status != PostProcessApplied {
+				t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+			}
+			joined := strings.Join(capturedArgs, " ")
+			for _, want := range tc.wantArgs {
+				if !strings.Contains(joined, want) {
+					t.Errorf("expected %q in args: %v", want, capturedArgs)
+				}
+			}
+			for _, notWant := range tc.notWantArgs {
+				if strings.Contains(joined, notWant) {
+					t.Errorf("did not expect %q in args: %v", notWant, capturedArgs)
+				}
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BinarizeAlphaProcessor
+// ---------------------------------------------------------------------------
+
+// writeAlphaGradientPNG creates a 6-pixel-wide PNG with a known alpha
+// gradient: pixel 0 fully transparent (alpha=0), pixel 1 just above the
+// floor band (alpha=8 ≈ 0x808 on the uint32 scale), pixel 2 just below the
+// snap midpoint (alpha=120 ≈ 0x7878), pixel 3 just above the snap midpoint
+// (alpha=140 ≈ 0x8C8C), pixel 4 fully opaque (alpha=255). Pixel 5 is also
+// fully transparent so we can confirm the op never touches alpha=0 pixels.
+func writeAlphaGradientPNG(t *testing.T, path string) {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, 6, 1))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 200, G: 50, B: 50, A: 0})
+	img.SetNRGBA(1, 0, color.NRGBA{R: 200, G: 50, B: 50, A: 8})
+	img.SetNRGBA(2, 0, color.NRGBA{R: 200, G: 50, B: 50, A: 120})
+	img.SetNRGBA(3, 0, color.NRGBA{R: 200, G: 50, B: 50, A: 140})
+	img.SetNRGBA(4, 0, color.NRGBA{R: 200, G: 50, B: 50, A: 255})
+	img.SetNRGBA(5, 0, color.NRGBA{R: 200, G: 50, B: 50, A: 0})
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("creating gradient PNG: %v", err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatalf("encoding gradient PNG: %v", err)
+	}
+}
+
+func decodeAlphaRow(t *testing.T, path string) []uint8 {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("opening result PNG: %v", err)
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		t.Fatalf("decoding result PNG: %v", err)
+	}
+	bounds := img.Bounds()
+	out := make([]uint8, 0, bounds.Dx())
+	for x := bounds.Min.X; x < bounds.Max.X; x++ {
+		_, _, _, a := img.At(x, bounds.Min.Y).RGBA()
+		out = append(out, uint8(a>>8))
+	}
+	return out
+}
+
+func TestBinarizeAlpha_Defaults_NoOp(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "wizard.png")
+	writeAlphaGradientPNG(t, artifact)
+
+	proc := &BinarizeAlphaProcessor{}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessSkipped {
+		t.Fatalf("Status = %q (msg %q), want skipped when both knobs are 0", r.Status, r.Message)
+	}
+}
+
+func TestBinarizeAlpha_FloorOnly(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "wizard.png")
+	writeAlphaGradientPNG(t, artifact)
+
+	proc := &BinarizeAlphaProcessor{}
+	// Threshold 4096 (~6%) corresponds to a 0–255 alpha cutoff of ~16.
+	// Floors pixel 1 (alpha 8); leaves 120/140/255 untouched.
+	r := proc.Run(artifact, map[string]string{"alpha_threshold": "4096"}, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	got := decodeAlphaRow(t, artifact)
+	want := []uint8{0, 0, 120, 140, 255, 0}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("pixel %d alpha = %d, want %d (full row %v)", i, got[i], want[i], got)
+		}
+	}
+	if !strings.Contains(r.Message, "floored=1") {
+		t.Errorf("Message = %q, should report floored=1", r.Message)
+	}
+}
+
+func TestBinarizeAlpha_SnapOnly(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "wizard.png")
+	writeAlphaGradientPNG(t, artifact)
+
+	proc := &BinarizeAlphaProcessor{}
+	// Snap 32768 (50%) corresponds to a 0–255 alpha cutoff of 128.
+	// Pixels 1 (8) and 2 (120) snap to 0; pixels 3 (140) and 4 (255) snap to 255.
+	r := proc.Run(artifact, map[string]string{"alpha_snap": "32768"}, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	got := decodeAlphaRow(t, artifact)
+	want := []uint8{0, 0, 0, 255, 255, 0}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("pixel %d alpha = %d, want %d (full row %v)", i, got[i], want[i], got)
+		}
+	}
+	if !strings.Contains(r.Message, "snapped_opaque=2") || !strings.Contains(r.Message, "snapped_transparent=2") {
+		t.Errorf("Message = %q, should report 2 opaque + 2 transparent snaps", r.Message)
+	}
+}
+
+func TestBinarizeAlpha_FloorPlusSnap_WaltDefaults(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "wizard.png")
+	writeAlphaGradientPNG(t, artifact)
+
+	proc := &BinarizeAlphaProcessor{}
+	// Walt's normalize_frames defaults: floor at 4096, snap at 32768.
+	// Pixel 1 (alpha 8) is floored; pixel 2 (120) is below midpoint, snapped to 0;
+	// pixel 3 (140) is above midpoint, snapped to 255; pixel 4 (255) untouched
+	// by snap (already > midpoint, becomes 255).
+	r := proc.Run(artifact, map[string]string{
+		"alpha_threshold": "4096",
+		"alpha_snap":      "32768",
+	}, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	got := decodeAlphaRow(t, artifact)
+	want := []uint8{0, 0, 0, 255, 255, 0}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("pixel %d alpha = %d, want %d (full row %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestBinarizeAlpha_InvalidPNG(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "not-a-png.png")
+	if err := os.WriteFile(artifact, []byte("not actually a png"), 0644); err != nil {
+		t.Fatalf("writing junk file: %v", err)
+	}
+
+	proc := &BinarizeAlphaProcessor{}
+	r := proc.Run(artifact, map[string]string{"alpha_snap": "32768"}, PipelineState{}, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Errorf("Status = %q, want %q (corrupt PNG should fail, not skip)", r.Status, PostProcessFailed)
+	}
+}
+
+func TestBinarizeAlpha_InvalidConfig_FallsBackToDefault(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "wizard.png")
+	writeAlphaGradientPNG(t, artifact)
+
+	proc := &BinarizeAlphaProcessor{}
+	// Garbage threshold + valid snap -> threshold falls back to 0, snap engages.
+	r := proc.Run(artifact, map[string]string{
+		"alpha_threshold": "not-a-number",
+		"alpha_snap":      "32768",
+	}, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	got := decodeAlphaRow(t, artifact)
+	// alpha_threshold defaulted to 0 -> no floor pass; snap-only behavior expected.
+	want := []uint8{0, 0, 0, 255, 255, 0}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("pixel %d alpha = %d, want %d (full row %v)", i, got[i], want[i], got)
+		}
 	}
 }
 
