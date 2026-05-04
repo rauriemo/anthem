@@ -1131,6 +1131,306 @@ func TestBinarizeAlpha_InvalidConfig_FallsBackToDefault(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// PlateSpeckCleanupProcessor
+// ---------------------------------------------------------------------------
+
+// writePlateSpeckPNG creates a 64x64 NRGBA PNG with a controlled set of
+// magenta-family blobs against an opaque solid-green background. The blobs
+// are placed so that their 8-connectivity components have the listed sizes:
+//
+//	tiny:  3x3 = 9 px   (one blob, intended to be killed)
+//	small: 5x5 = 25 px  (one blob, intended to be killed at any usable threshold)
+//	mid:   8x8 = 64 px  (one blob, killed at T=150, preserved at T=50)
+//	large: 13x13 = 169 px (one blob, intended to be preserved at T=150)
+//
+// Background pixels are RGB(50,200,50) opaque (a non-magenta-family color
+// the keyer formula scores at 0). Blob pixels are pure magenta RGB(255,0,255)
+// opaque.
+func writePlateSpeckPNG(t *testing.T, path string) {
+	t.Helper()
+	const W, H = 64, 64
+	img := image.NewNRGBA(image.Rect(0, 0, W, H))
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 50, G: 200, B: 50, A: 255})
+		}
+	}
+	paint := func(rect image.Rectangle) {
+		for y := rect.Min.Y; y < rect.Max.Y; y++ {
+			for x := rect.Min.X; x < rect.Max.X; x++ {
+				img.SetNRGBA(x, y, color.NRGBA{R: 255, G: 0, B: 255, A: 255})
+			}
+		}
+	}
+	paint(image.Rect(2, 2, 5, 5))     // 3x3 = 9 px
+	paint(image.Rect(10, 2, 15, 7))   // 5x5 = 25 px
+	paint(image.Rect(20, 2, 28, 10))  // 8x8 = 64 px
+	paint(image.Rect(35, 35, 48, 48)) // 13x13 = 169 px
+
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("creating plate-speck PNG: %v", err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatalf("encoding plate-speck PNG: %v", err)
+	}
+}
+
+func decodeAlphaAt(t *testing.T, path string, x, y int) uint8 {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("opening result PNG: %v", err)
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		t.Fatalf("decoding result PNG: %v", err)
+	}
+	_, _, _, a := img.At(x, y).RGBA()
+	return uint8(a >> 8)
+}
+
+func TestPlateSpeckCleanup_Defaults_KillsSmallPreservesLarge(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "speck.png")
+	writePlateSpeckPNG(t, artifact)
+
+	proc := &PlateSpeckCleanupProcessor{}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q, want applied; Message: %s", r.Status, r.Message)
+	}
+
+	tests := []struct {
+		name      string
+		x, y      int
+		wantAlpha uint8
+	}{
+		{"tiny blob center killed", 3, 3, 0},
+		{"small blob center killed", 12, 4, 0},
+		{"mid blob center killed at T=150", 24, 6, 0},
+		{"large blob center preserved at T=150", 41, 41, 255},
+		{"opaque green background untouched", 60, 60, 255},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := decodeAlphaAt(t, artifact, tt.x, tt.y)
+			if got != tt.wantAlpha {
+				t.Errorf("alpha at (%d,%d) = %d, want %d (msg: %s)", tt.x, tt.y, got, tt.wantAlpha, r.Message)
+			}
+		})
+	}
+
+	if !strings.Contains(r.Message, "killed 3 components") {
+		t.Errorf("Message should report 3 killed components, got: %s", r.Message)
+	}
+	if !strings.Contains(r.Message, "preserved 1 components") {
+		t.Errorf("Message should report 1 preserved component, got: %s", r.Message)
+	}
+}
+
+func TestPlateSpeckCleanup_AggressiveThresholdKillsAll(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "speck.png")
+	writePlateSpeckPNG(t, artifact)
+
+	proc := &PlateSpeckCleanupProcessor{}
+	r := proc.Run(artifact, map[string]string{"size_threshold": "200"}, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	if got := decodeAlphaAt(t, artifact, 41, 41); got != 0 {
+		t.Errorf("large blob center alpha = %d at T=200, want 0", got)
+	}
+	if !strings.Contains(r.Message, "killed 4 components") {
+		t.Errorf("Message should report 4 killed components, got: %s", r.Message)
+	}
+}
+
+func TestPlateSpeckCleanup_PermissiveThresholdPreservesAll(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "speck.png")
+	writePlateSpeckPNG(t, artifact)
+
+	proc := &PlateSpeckCleanupProcessor{}
+	r := proc.Run(artifact, map[string]string{"size_threshold": "5"}, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	for _, p := range []struct{ x, y int }{{3, 3}, {12, 4}, {24, 6}, {41, 41}} {
+		if got := decodeAlphaAt(t, artifact, p.x, p.y); got != 255 {
+			t.Errorf("blob at (%d,%d) alpha = %d at T=5, want 255 (all blobs > 5 px should survive)", p.x, p.y, got)
+		}
+	}
+}
+
+func TestPlateSpeckCleanup_NoMagentaIsNoOp(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "clean.png")
+
+	img := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 50, G: 200, B: 50, A: 255})
+		}
+	}
+	f, err := os.Create(artifact)
+	if err != nil {
+		t.Fatalf("creating clean PNG: %v", err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		t.Fatalf("encoding clean PNG: %v", err)
+	}
+	f.Close()
+
+	proc := &PlateSpeckCleanupProcessor{}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "no flagged pixels") {
+		t.Errorf("Message should report no-op, got: %s", r.Message)
+	}
+}
+
+func TestPlateSpeckCleanup_TransparentPlateNotFlagged(t *testing.T) {
+	// Pixels with alpha=0 must not contribute to component flagging even if
+	// their RGB scores high on the magenta keyer (BiRefNet output frequently
+	// has alpha=0 transparent pixels with residual magenta RGB underneath).
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "transparent-plate.png")
+	img := image.NewNRGBA(image.Rect(0, 0, 32, 32))
+	for y := 0; y < 32; y++ {
+		for x := 0; x < 32; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 255, G: 0, B: 255, A: 0})
+		}
+	}
+	for y := 10; y < 20; y++ {
+		for x := 10; x < 20; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 50, G: 200, B: 50, A: 255})
+		}
+	}
+	f, err := os.Create(artifact)
+	if err != nil {
+		t.Fatalf("creating transparent-plate PNG: %v", err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		t.Fatalf("encoding transparent-plate PNG: %v", err)
+	}
+	f.Close()
+
+	proc := &PlateSpeckCleanupProcessor{}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "no flagged pixels") {
+		t.Errorf("Transparent magenta should not flag, got: %s", r.Message)
+	}
+}
+
+func TestPlateSpeckCleanup_InvalidConfigFallsBackToDefault(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "speck.png")
+	writePlateSpeckPNG(t, artifact)
+
+	proc := &PlateSpeckCleanupProcessor{}
+	r := proc.Run(artifact, map[string]string{
+		"score_threshold": "garbage",
+		"size_threshold":  "also-garbage",
+		"connectivity":    "5",
+	}, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "killed 3 components") || !strings.Contains(r.Message, "preserved 1 components") {
+		t.Errorf("Message should reflect default-discriminator behavior (3 killed, 1 preserved), got: %s", r.Message)
+	}
+}
+
+func TestPlateSpeckCleanup_InvalidPNGFails(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "junk.png")
+	if err := os.WriteFile(artifact, []byte("not actually a png"), 0644); err != nil {
+		t.Fatalf("writing junk file: %v", err)
+	}
+	proc := &PlateSpeckCleanupProcessor{}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessFailed {
+		t.Errorf("Status = %q, want failed (corrupt PNG)", r.Status)
+	}
+}
+
+func TestPlateSpeckCleanup_4ConnectivitySplitsDiagonals(t *testing.T) {
+	// Two single magenta pixels touching only diagonally should be ONE
+	// component under 8-connectivity (default) and TWO components under
+	// 4-connectivity. Verifies the connectivity knob actually changes
+	// labeling behavior.
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "diagonal.png")
+	img := image.NewNRGBA(image.Rect(0, 0, 8, 8))
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 50, G: 200, B: 50, A: 255})
+		}
+	}
+	img.SetNRGBA(2, 2, color.NRGBA{R: 255, G: 0, B: 255, A: 255})
+	img.SetNRGBA(3, 3, color.NRGBA{R: 255, G: 0, B: 255, A: 255})
+	f, err := os.Create(artifact)
+	if err != nil {
+		t.Fatalf("creating diagonal PNG: %v", err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		t.Fatalf("encoding diagonal PNG: %v", err)
+	}
+	f.Close()
+
+	proc := &PlateSpeckCleanupProcessor{}
+
+	r8 := proc.Run(artifact, map[string]string{"connectivity": "8"}, PipelineState{}, slog.Default())
+	if r8.Status != PostProcessApplied {
+		t.Fatalf("conn=8 Status = %q; Message: %s", r8.Status, r8.Message)
+	}
+	if !strings.Contains(r8.Message, "in 1 components") {
+		t.Errorf("conn=8 should label 1 component (diagonal touch), got: %s", r8.Message)
+	}
+
+	writePlateSpeckPNG(t, artifact)
+	img2 := image.NewNRGBA(image.Rect(0, 0, 8, 8))
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			img2.SetNRGBA(x, y, color.NRGBA{R: 50, G: 200, B: 50, A: 255})
+		}
+	}
+	img2.SetNRGBA(2, 2, color.NRGBA{R: 255, G: 0, B: 255, A: 255})
+	img2.SetNRGBA(3, 3, color.NRGBA{R: 255, G: 0, B: 255, A: 255})
+	f2, err := os.Create(artifact)
+	if err != nil {
+		t.Fatalf("rewriting diagonal PNG: %v", err)
+	}
+	if err := png.Encode(f2, img2); err != nil {
+		f2.Close()
+		t.Fatalf("encoding rewritten diagonal PNG: %v", err)
+	}
+	f2.Close()
+
+	r4 := proc.Run(artifact, map[string]string{"connectivity": "4"}, PipelineState{}, slog.Default())
+	if r4.Status != PostProcessApplied {
+		t.Fatalf("conn=4 Status = %q; Message: %s", r4.Status, r4.Message)
+	}
+	if !strings.Contains(r4.Message, "in 2 components") {
+		t.Errorf("conn=4 should label 2 components (diagonal split), got: %s", r4.Message)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // VideoMatteProcessor
 // ---------------------------------------------------------------------------
 
