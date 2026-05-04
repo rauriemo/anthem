@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -100,6 +101,86 @@ func FormatResults(msg string, results []PostProcessResult) string {
 		msg += fmt.Sprintf("\n  -> %s: %s (%s)", r.Op, r.Status, r.Message)
 	}
 	return msg
+}
+
+// runSidecarCmd starts a sidecar process, waits for OS-level exit, and returns
+// captured stdout/stderr.
+//
+// Background: exec.Cmd.Run() / Cmd.Wait() block until both the child exits AND
+// the stdout/stderr pipes hit EOF. On Windows, Python sidecars that load
+// PyTorch + CUDA (e.g. SAM 2 in matte.py) routinely spawn worker processes
+// that inherit the parent's stdio handles and outlive the parent. Those
+// inherited handles keep our pipes open even after the sidecar process is
+// gone, so Cmd.Wait() blocks indefinitely. The hang is intermittent because
+// Python's `multiprocessing` "spawn" start method on Windows sometimes leaks
+// handles and sometimes doesn't, depending on whether worker pools are
+// reused, GPU memory state, etc.
+//
+// Workaround: redirect stdio to OS-owned temp files (so Go owns no pipes
+// itself) and wait via cmd.Process.Wait() rather than cmd.Wait(). The former
+// returns as soon as the OS reports the child has exited and is independent
+// of any descriptor still being held by orphaned grandchildren. The temp
+// files capture everything the sidecar wrote up to its exit point.
+//
+// The caller-supplied ctx still bounds total wall time. On context expiry
+// the process is killed and ctx.Err() is returned.
+func runSidecarCmd(ctx context.Context, cmd *exec.Cmd) (stdout, stderr []byte, err error) {
+	stdoutFile, ferr := os.CreateTemp("", "sidecar-stdout-*.log")
+	if ferr != nil {
+		return nil, nil, fmt.Errorf("creating stdout temp: %w", ferr)
+	}
+	defer func() {
+		_ = stdoutFile.Close()
+		_ = os.Remove(stdoutFile.Name())
+	}()
+
+	stderrFile, ferr := os.CreateTemp("", "sidecar-stderr-*.log")
+	if ferr != nil {
+		return nil, nil, fmt.Errorf("creating stderr temp: %w", ferr)
+	}
+	defer func() {
+		_ = stderrFile.Close()
+		_ = os.Remove(stderrFile.Name())
+	}()
+
+	cmd.Stdout = stdoutFile
+	cmd.Stderr = stderrFile
+
+	if serr := cmd.Start(); serr != nil {
+		return nil, nil, fmt.Errorf("starting sidecar: %w", serr)
+	}
+
+	type waitResult struct {
+		state *os.ProcessState
+		err   error
+	}
+	done := make(chan waitResult, 1)
+	go func() {
+		state, werr := cmd.Process.Wait()
+		done <- waitResult{state: state, err: werr}
+	}()
+
+	select {
+	case res := <-done:
+		switch {
+		case res.err != nil:
+			err = res.err
+		case res.state != nil && !res.state.Success():
+			err = fmt.Errorf("exit code %d", res.state.ExitCode())
+		}
+	case <-ctx.Done():
+		_ = cmd.Process.Kill()
+		<-done
+		err = ctx.Err()
+	}
+
+	if _, serr := stdoutFile.Seek(0, 0); serr == nil {
+		stdout, _ = io.ReadAll(stdoutFile)
+	}
+	if _, serr := stderrFile.Seek(0, 0); serr == nil {
+		stderr, _ = io.ReadAll(stderrFile)
+	}
+	return stdout, stderr, err
 }
 
 // ---------------------------------------------------------------------------
@@ -533,21 +614,20 @@ func (p *VideoMatteProcessor) Run(artifactPath string, cfg map[string]string, st
 	defer cancel()
 
 	log.Info("video_matte start", "frames", len(frames), "timeout", timeout)
+	startedAt := time.Now()
 	cmd := cmdRunner(ctx, sidecar.Python, args...)
-	var stdoutBuf, stderrBuf strings.Builder
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
-	err = cmd.Run()
-	if err != nil {
+	stdoutBytes, stderrBytes, runErr := runSidecarCmd(ctx, cmd)
+	log.Info("video_matte sidecar exited", "elapsed", time.Since(startedAt).Round(time.Millisecond), "err", runErr)
+	if runErr != nil {
 		return PostProcessResult{
 			Op:      "video_matte",
 			Status:  PostProcessFailed,
-			Message: fmt.Sprintf("sidecar failed: %v: %s", err, truncateBytes([]byte(stderrBuf.String()), 500)),
+			Message: fmt.Sprintf("sidecar failed: %v: %s", runErr, truncateBytes(stderrBytes, 500)),
 		}
 	}
 
 	var res videoMatteResult
-	if jerr := extractSidecarJSON([]byte(stdoutBuf.String()), &res); jerr != nil {
+	if jerr := extractSidecarJSON(stdoutBytes, &res); jerr != nil {
 		return PostProcessResult{Op: "video_matte", Status: PostProcessFailed, Message: fmt.Sprintf("parsing sidecar stdout: %v", jerr)}
 	}
 	if res.Status != "ok" {
@@ -656,19 +736,17 @@ func (p *CheckFrameConsistencyProcessor) Run(artifactPath string, cfg map[string
 	defer cancel()
 
 	cmd := cmdRunner(ctx, sidecar.Python, args...)
-	var stdoutBuf, stderrBuf strings.Builder
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
-	if err := cmd.Run(); err != nil {
+	stdoutBytes, stderrBytes, runErr := runSidecarCmd(ctx, cmd)
+	if runErr != nil {
 		return PostProcessResult{
 			Op:      "check_frame_consistency",
 			Status:  PostProcessFailed,
-			Message: fmt.Sprintf("sidecar failed: %v: %s", err, truncateBytes([]byte(stderrBuf.String()), 500)),
+			Message: fmt.Sprintf("sidecar failed: %v: %s", runErr, truncateBytes(stderrBytes, 500)),
 		}
 	}
 
 	var res driftResult
-	if jerr := extractSidecarJSON([]byte(stdoutBuf.String()), &res); jerr != nil {
+	if jerr := extractSidecarJSON(stdoutBytes, &res); jerr != nil {
 		return PostProcessResult{Op: "check_frame_consistency", Status: PostProcessFailed, Message: fmt.Sprintf("parsing sidecar stdout: %v", jerr)}
 	}
 	if res.Status != "ok" {
