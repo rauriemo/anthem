@@ -341,12 +341,14 @@ func extractSidecarJSON(stdout []byte, out any) error {
 //     suppressed — exactly the signature of a magenta chroma plate. This
 //     is the standard channel-difference keyer used by compositing tools
 //     like Nuke's IBK, transposed from green-screen to magenta-screen.
+//
 //  2. Map score → alpha via Hermite smoothstep across (lower, upper):
 //     lower = tolerance - softness/2
 //     upper = tolerance + softness/2
 //     Below `lower` the pixel is treated as opaque subject (alpha=255);
 //     above `upper` it's pure plate (alpha=0); the band between is a
 //     smooth ramp so silhouette anti-aliasing survives.
+//
 //  3. Despill on kept pixels: when both R and B are jointly inflated above
 //     G (the magenta signature), suppress R and B by that shared excess
 //     minus a `despill_offset` deadzone. Pure-red subjects (R high, B low)
@@ -651,8 +653,8 @@ func rgbToHSV(r, g, b uint8) (hue, sat, val float64) {
 //
 // Trade-offs vs. ChromaKeyProcessor (the default still-image matter):
 //
-//   - Cost: 5–15 seconds per still (Python startup + BiRefNet model load
-//     + inference) vs. milliseconds for the in-Go chroma key. Acceptable
+//   - Cost: 5–15 seconds per still (Python startup, BiRefNet model load,
+//     and inference) vs. milliseconds for the in-Go chroma key. Acceptable
 //     for a recovery tool but unsuitable as a default.
 //   - Despill: BiRefNet outputs a binary subject mask with no
 //     understanding of plate-color contamination. If the source has a
