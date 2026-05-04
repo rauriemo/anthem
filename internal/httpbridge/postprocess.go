@@ -334,14 +334,14 @@ func extractSidecarJSON(stdout []byte, out any) error {
 // Algorithm:
 //
 //  1. For each pixel compute a "magenta excess" score in [0, 1]:
-//       score = clamp((min(R,B) - G) / 255, 0, 1)
+//     score = clamp((min(R,B) - G) / 255, 0, 1)
 //     Score is high when red and blue are both bright AND green is
 //     suppressed — exactly the signature of a magenta chroma plate. This
 //     is the standard channel-difference keyer used by compositing tools
 //     like Nuke's IBK, transposed from green-screen to magenta-screen.
 //  2. Map score → alpha via Hermite smoothstep across (lower, upper):
-//       lower = tolerance - softness/2
-//       upper = tolerance + softness/2
+//     lower = tolerance - softness/2
+//     upper = tolerance + softness/2
 //     Below `lower` the pixel is treated as opaque subject (alpha=255);
 //     above `upper` it's pure plate (alpha=0); the band between is a
 //     smooth ramp so silhouette anti-aliasing survives.
