@@ -5,17 +5,19 @@
 // is faithful.
 //
 // Color encoding (rendered on top of a dimmed grayscale of the original):
-//   RED tint     = pixels in components <= size_threshold (would be KILLED)
-//   GREEN tint   = pixels in components >  size_threshold (would be PRESERVED)
-//   White boxes  = bounding boxes around the N largest preserved components,
-//                  labeled "#i(N px)" so you can tell what's being kept.
+//
+//	RED tint     = pixels in components <= size_threshold (would be KILLED)
+//	GREEN tint   = pixels in components >  size_threshold (would be PRESERVED)
+//	White boxes  = bounding boxes around the N largest preserved components,
+//	               labeled "#i(N px)" so you can tell what's being kept.
 //
 // Output: <input-stem>.triage-s<NNN>-t<NNNN>.png next to the input PNG.
 //
 // Usage:
-//   triagevis <png> <score_threshold> <size_threshold>
 //
-//   triagevis foo.png 0.10 1000
+//	triagevis <png> <score_threshold> <size_threshold>
+//
+//	triagevis foo.png 0.10 1000
 package main
 
 import (
@@ -207,8 +209,8 @@ func main() {
 }
 
 type comp struct {
-	size                       int
-	minX, minY, maxX, maxY     int
+	size                   int
+	minX, minY, maxX, maxY int
 }
 
 // labelComponents performs an iterative 8-connectivity BFS to label every

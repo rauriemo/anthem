@@ -6,7 +6,8 @@
 // score_threshold * 100 (e.g. s010 = 0.10) and NNNN is the size_threshold.
 //
 // Usage:
-//   specksweep <png-path>
+//
+//	specksweep <png-path>
 package main
 
 import (
@@ -27,7 +28,7 @@ type cleanupRun struct {
 }
 
 var sweeps = []cleanupRun{
-	{0.25, 150},   // current production
+	{0.25, 150}, // current production
 	{0.20, 300},
 	{0.15, 500},
 	{0.12, 1000},
@@ -124,18 +125,19 @@ func opaqueScoreHistogram(path string, thresholds []float64) []int {
 
 // parseSpeckTotals returns (flagged_px, killed_px, preserved_px) from
 // PlateSpeckCleanupProcessor's status message:
-//   "flagged=X in Y components; killed Kc components (Kp px); preserved Pc components (Pp px) ..."
+//
+//	"flagged=X in Y components; killed Kc components (Kp px); preserved Pc components (Pp px) ..."
 func parseSpeckTotals(msg string) (flagged, killed, preserved int) {
 	if i := strings.Index(msg, "flagged="); i >= 0 {
-		fmt.Sscanf(msg[i+len("flagged="):], "%d", &flagged)
+		_, _ = fmt.Sscanf(msg[i+len("flagged="):], "%d", &flagged)
 	}
 	if i := strings.Index(msg, "killed "); i >= 0 {
 		var kc int
-		fmt.Sscanf(msg[i+len("killed "):], "%d components (%d px)", &kc, &killed)
+		_, _ = fmt.Sscanf(msg[i+len("killed "):], "%d components (%d px)", &kc, &killed)
 	}
 	if i := strings.Index(msg, "preserved "); i >= 0 {
 		var pc int
-		fmt.Sscanf(msg[i+len("preserved "):], "%d components (%d px)", &pc, &preserved)
+		_, _ = fmt.Sscanf(msg[i+len("preserved "):], "%d components (%d px)", &pc, &preserved)
 	}
 	return
 }

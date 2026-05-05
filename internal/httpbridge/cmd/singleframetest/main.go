@@ -157,7 +157,7 @@ func main() {
 			{tag: "scoresweep-0.03-" + *sweepSize, binarize: true, score: "0.03", size: *sweepSize},
 			{tag: "scoresweep-0.05-" + *sweepSize, binarize: true, score: "0.05", size: *sweepSize},
 		}
-	} else 	if *sweep {
+	} else if *sweep {
 		// Focused sweep: hold score fixed at --sweep-score (default 0.05,
 		// which is where we landed for trinket-salesman), bisect size to
 		// find the largest threshold that still preserves legitimate

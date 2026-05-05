@@ -14,7 +14,7 @@
 //   - <stem>.test-strategy2.png        (cleanup applied AFTER stitch
 //     against the baseline output, single pass over the whole grid)
 //   - <stem>.test-fixed-with-sam2.png  (NEW: SAM 2 matte + binarize_alpha
-//     + plate_speck_cleanup at 0.25/150, all per-frame at full
+//   - plate_speck_cleanup at 0.25/150, all per-frame at full
 //     resolution, then normalize + stitch -- this is the chain that
 //     should pass once PlateSpeckCleanupProcessor zeros RGB on killed
 //     pixels)
@@ -28,7 +28,8 @@
 // branches run in <30s each.
 //
 // Usage:
-//   walttest <mp4-path>
+//
+//	walttest <mp4-path>
 //
 // The driver expects ffmpeg on PATH and the matte sidecar configured per
 // CLAUDE.md (MATTE_PYTHON / MATTE_SCRIPT env vars or default discovery).
@@ -141,7 +142,7 @@ func main() {
 			//     legitimate subject feature on this character (the
 			//     dangling sash at ~653 px). T=450 and T=600 produce
 			//     byte-identical output on frame 100; T=600 takes the
-			//     upper end of that gap to maximise headroom against
+			//     upper end of that gap to maximize headroom against
 			//     cross-frame size variation.
 			tag:               "tuned-0.05-600",
 			mattedSrc:         mattedSAM2,
@@ -439,15 +440,16 @@ func countFiles(dir string) int {
 
 // parseSpeckTotals extracts (killedComponents, killedPx, preservedComponents,
 // preservedPx) from PlateSpeckCleanupProcessor's status message:
-//   "flagged=X in Y components; killed Kc components (Kp px); preserved Pc components (Pp px) ..."
+//
+//	"flagged=X in Y components; killed Kc components (Kp px); preserved Pc components (Pp px) ..."
 func parseSpeckTotals(msg string) (kc, kp, pc, pp int) {
 	if i := strings.Index(msg, "killed "); i >= 0 {
 		s := msg[i+len("killed "):]
-		fmt.Sscanf(s, "%d components (%d px)", &kc, &kp)
+		_, _ = fmt.Sscanf(s, "%d components (%d px)", &kc, &kp)
 	}
 	if i := strings.Index(msg, "preserved "); i >= 0 {
 		s := msg[i+len("preserved "):]
-		fmt.Sscanf(s, "%d components (%d px)", &pc, &pp)
+		_, _ = fmt.Sscanf(s, "%d components (%d px)", &pc, &pp)
 	}
 	return
 }
