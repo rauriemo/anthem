@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"image/png"
 	"log/slog"
 	"os"
@@ -1192,6 +1193,38 @@ func decodeAlphaAt(t *testing.T, path string, x, y int) uint8 {
 	return uint8(a >> 8)
 }
 
+// decodeNRGBAAt returns the straight (non-premultiplied) RGBA of the pixel
+// at (x,y). Reading via image.NRGBA's pixel buffer is required because
+// `color.Color.RGBA()` returns alpha-premultiplied values — when alpha=0,
+// premultiplied RGB collapses to zero regardless of the underlying NRGBA
+// channels, which would make a "did we zero RGB on killed pixels?" test
+// trivially pass even if RGB was untouched.
+func decodeNRGBAAt(t *testing.T, path string, x, y int) color.NRGBA {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("opening result PNG: %v", err)
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		t.Fatalf("decoding result PNG: %v", err)
+	}
+	bounds := img.Bounds()
+	nrgba, ok := img.(*image.NRGBA)
+	if !ok {
+		nrgba = image.NewNRGBA(bounds)
+		draw.Draw(nrgba, bounds, img, bounds.Min, draw.Src)
+	}
+	off := nrgba.PixOffset(x, y)
+	return color.NRGBA{
+		R: nrgba.Pix[off],
+		G: nrgba.Pix[off+1],
+		B: nrgba.Pix[off+2],
+		A: nrgba.Pix[off+3],
+	}
+}
+
 func TestPlateSpeckCleanup_Defaults_KillsSmallPreservesLarge(t *testing.T) {
 	dir := t.TempDir()
 	artifact := filepath.Join(dir, "speck.png")
@@ -1225,6 +1258,221 @@ func TestPlateSpeckCleanup_Defaults_KillsSmallPreservesLarge(t *testing.T) {
 
 	if !strings.Contains(r.Message, "killed 3 components") {
 		t.Errorf("Message should report 3 killed components, got: %s", r.Message)
+	}
+	if !strings.Contains(r.Message, "preserved 1 components") {
+		t.Errorf("Message should report 1 preserved component, got: %s", r.Message)
+	}
+}
+
+// TestPlateSpeckCleanup_KilledPixelsZeroRGB pins the contract that killed
+// pixels have RGB=0 in addition to alpha=0. This matters for downstream
+// downscalers (Walt's normalize_frames runs Lanczos-class CatmullRom on the
+// NRGBA pixel buffer, which averages RGB across neighbors regardless of
+// alpha). If killed pixels retained their original magenta RGB, the
+// downscaled output would re-acquire a magenta cast at the boundary even
+// though every contributing pixel was alpha=0. Asserting RGB=0 on killed
+// pixels guarantees the cleanup is honored end-to-end through the pipeline.
+func TestPlateSpeckCleanup_KilledPixelsZeroRGB(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "speck.png")
+	writePlateSpeckPNG(t, artifact)
+
+	proc := &PlateSpeckCleanupProcessor{}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	tests := []struct {
+		name string
+		x, y int
+		want color.NRGBA
+	}{
+		{"tiny blob center killed -> RGBA all zero", 3, 3, color.NRGBA{0, 0, 0, 0}},
+		{"small blob center killed -> RGBA all zero", 12, 4, color.NRGBA{0, 0, 0, 0}},
+		{"mid blob center killed -> RGBA all zero", 24, 6, color.NRGBA{0, 0, 0, 0}},
+		{"large blob center preserved -> magenta untouched", 41, 41, color.NRGBA{255, 0, 255, 255}},
+		{"opaque green background untouched", 60, 60, color.NRGBA{50, 200, 50, 255}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := decodeNRGBAAt(t, artifact, tt.x, tt.y)
+			if got != tt.want {
+				t.Errorf("NRGBA at (%d,%d) = %+v, want %+v", tt.x, tt.y, got, tt.want)
+			}
+		})
+	}
+}
+
+// writeEdgeAwarePNG creates a 96x96 NRGBA PNG with three controlled
+// magenta-family components and one alpha=0 corridor:
+//
+//   - "interior bottle" at (60..73 x 30..43): 14x14 = 196 px, all
+//     8-neighbors are opaque green background. Should be PRESERVED at
+//     T=150 because it's > 150 AND not edge-adjacent.
+//   - "edge plate" at (8..27 x 10..29): 20x20 = 400 px, with a 3-px-wide
+//     alpha=0 strip at x in [5, 8) running the full height. The plate's
+//     leftmost column at x=8 is 4-adjacent to the alpha=0 column at x=7.
+//     The component is > 150 (would be preserved by size alone) but
+//     should be KILLED under edge_aware because it touches the matted-out
+//     corridor.
+//   - "border-touching plate" running along the top edge at (40..89 x
+//     0..15): 50x16 = 800 px straddling y=0. Its top row is
+//     out-of-bounds, which counts as edge-adjacent. Should be KILLED
+//     under edge_aware regardless of size.
+func writeEdgeAwarePNG(t *testing.T, path string) {
+	t.Helper()
+	const W, H = 96, 96
+	img := image.NewNRGBA(image.Rect(0, 0, W, H))
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 50, G: 200, B: 50, A: 255})
+		}
+	}
+	// Carve a vertical alpha=0 corridor at x in [5, 8) running the full
+	// height. This becomes the "exterior" the edge-plate component
+	// touches at its leftmost column (x=8).
+	for y := 0; y < H; y++ {
+		for x := 5; x < 8; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 0, G: 0, B: 0, A: 0})
+		}
+	}
+	paint := func(rect image.Rectangle) {
+		for y := rect.Min.Y; y < rect.Max.Y; y++ {
+			for x := rect.Min.X; x < rect.Max.X; x++ {
+				img.SetNRGBA(x, y, color.NRGBA{R: 255, G: 0, B: 255, A: 255})
+			}
+		}
+	}
+	paint(image.Rect(60, 30, 74, 44)) // interior bottle 14x14 = 196
+	paint(image.Rect(8, 10, 28, 30))  // edge plate 20x20 = 400, leftmost x=8 is 4-adjacent to alpha=0 column at x=7
+	paint(image.Rect(40, 0, 90, 16))  // border plate 50x16 = 800, y=0 row sits on image border
+
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("creating edge-aware PNG: %v", err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatalf("encoding edge-aware PNG: %v", err)
+	}
+}
+
+// TestPlateSpeckCleanup_EdgeAwareDefaultOff confirms that without the
+// edge_aware flag, large components are preserved regardless of whether
+// they touch alpha=0 or the image border. This pins backward compat: the
+// existing Miyazaki chain (which doesn't pass edge_aware) keeps its
+// historical behavior.
+func TestPlateSpeckCleanup_EdgeAwareDefaultOff(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "edge.png")
+	writeEdgeAwarePNG(t, artifact)
+
+	proc := &PlateSpeckCleanupProcessor{}
+	r := proc.Run(artifact, nil, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	for _, tt := range []struct {
+		name      string
+		x, y      int
+		wantAlpha uint8
+	}{
+		{"interior bottle preserved", 66, 36, 255},
+		{"edge plate preserved (default off, size-only rule)", 18, 18, 255},
+		{"border plate preserved (default off, size-only rule)", 65, 7, 255},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := decodeAlphaAt(t, artifact, tt.x, tt.y); got != tt.wantAlpha {
+				t.Errorf("alpha at (%d,%d) = %d, want %d (msg: %s)", tt.x, tt.y, got, tt.wantAlpha, r.Message)
+			}
+		})
+	}
+	if !strings.Contains(r.Message, "edge_aware=false") {
+		t.Errorf("Message should report edge_aware=false, got: %s", r.Message)
+	}
+}
+
+// TestPlateSpeckCleanup_EdgeAwareKillsLargeAdjacent verifies the new
+// behavior: with edge_aware=true, large components touching alpha=0
+// (under-arm BiRefNet plate analog) or the image border (border-running
+// plate) are killed, while large interior components (bottles) are
+// preserved. This is the mechanism that should solve trinket-salesman's
+// surviving 8029 magenta pixels.
+func TestPlateSpeckCleanup_EdgeAwareKillsLargeAdjacent(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "edge.png")
+	writeEdgeAwarePNG(t, artifact)
+
+	proc := &PlateSpeckCleanupProcessor{}
+	r := proc.Run(artifact, map[string]string{"edge_aware": "true"}, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+
+	for _, tt := range []struct {
+		name      string
+		x, y      int
+		wantAlpha uint8
+	}{
+		{"interior bottle preserved (large + interior)", 66, 36, 255},
+		{"edge plate killed (large + alpha=0 adjacent)", 18, 18, 0},
+		{"border plate killed (large + image border)", 65, 7, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := decodeAlphaAt(t, artifact, tt.x, tt.y); got != tt.wantAlpha {
+				t.Errorf("alpha at (%d,%d) = %d, want %d (msg: %s)", tt.x, tt.y, got, tt.wantAlpha, r.Message)
+			}
+		})
+	}
+	if !strings.Contains(r.Message, "edge_aware=true") {
+		t.Errorf("Message should report edge_aware=true, got: %s", r.Message)
+	}
+	if !strings.Contains(r.Message, "killed by edge=2") {
+		t.Errorf("Message should report 2 components killed by edge (edge plate + border plate), got: %s", r.Message)
+	}
+}
+
+// TestPlateSpeckCleanup_EdgeAwareInteriorBottleSurvives is a tighter focus
+// on the exact bug we're trying to fix: with a configuration that would
+// otherwise kill bottles by size alone, edge_aware does not introduce
+// additional false positives on truly interior magenta features.
+func TestPlateSpeckCleanup_EdgeAwareInteriorBottleSurvives(t *testing.T) {
+	dir := t.TempDir()
+	artifact := filepath.Join(dir, "interior-only.png")
+
+	const W, H = 64, 64
+	img := image.NewNRGBA(image.Rect(0, 0, W, H))
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 50, G: 200, B: 50, A: 255})
+		}
+	}
+	// 18x18 = 324 px magenta bottle in the dead center, fully surrounded
+	// by opaque non-magenta pixels. No alpha=0 anywhere in the image.
+	for y := 23; y < 41; y++ {
+		for x := 23; x < 41; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 255, G: 0, B: 255, A: 255})
+		}
+	}
+	f, err := os.Create(artifact)
+	if err != nil {
+		t.Fatalf("creating PNG: %v", err)
+	}
+	if err := png.Encode(f, img); err != nil {
+		f.Close()
+		t.Fatalf("encoding PNG: %v", err)
+	}
+	f.Close()
+
+	proc := &PlateSpeckCleanupProcessor{}
+	r := proc.Run(artifact, map[string]string{"edge_aware": "true"}, PipelineState{}, slog.Default())
+	if r.Status != PostProcessApplied {
+		t.Fatalf("Status = %q; Message: %s", r.Status, r.Message)
+	}
+	if got := decodeAlphaAt(t, artifact, 32, 32); got != 255 {
+		t.Errorf("interior bottle center alpha = %d, want 255 (edge_aware should NOT kill interior components)", got)
 	}
 	if !strings.Contains(r.Message, "preserved 1 components") {
 		t.Errorf("Message should report 1 preserved component, got: %s", r.Message)

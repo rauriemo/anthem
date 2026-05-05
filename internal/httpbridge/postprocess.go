@@ -1018,6 +1018,23 @@ func (p *BinarizeAlphaProcessor) Run(artifactPath string, cfg map[string]string,
 //	                                          can mis-classify a single
 //	                                          diagonal hole as several
 //	                                          tiny blobs.
+//	edge_aware       bool,  default "false" — when true, components are
+//	                                          ALSO killed if any of their
+//	                                          pixels is adjacent (under the
+//	                                          chosen connectivity) to an
+//	                                          alpha=0 pixel OR to the image
+//	                                          border. This catches large
+//	                                          BiRefNet blob-completion
+//	                                          artifacts (unmatted plate
+//	                                          patches under arms / between
+//	                                          legs) that touch the matted
+//	                                          background while preserving
+//	                                          legitimate magenta-family
+//	                                          subject features (potion
+//	                                          bottles, painted highlights)
+//	                                          that are fully interior to
+//	                                          the silhouette. Default off
+//	                                          for backward compatibility.
 type PlateSpeckCleanupProcessor struct{}
 
 func (p *PlateSpeckCleanupProcessor) Run(artifactPath string, cfg map[string]string, _ PipelineState, log *slog.Logger) PostProcessResult {
@@ -1043,6 +1060,17 @@ func (p *PlateSpeckCleanupProcessor) Run(artifactPath string, cfg map[string]str
 			connectivity = v
 		} else {
 			log.Warn("plate_speck_cleanup: invalid connectivity (want 4 or 8), using default", "raw", s, "default", connectivity)
+		}
+	}
+	edgeAware := false
+	if s := cfg["edge_aware"]; s != "" {
+		switch strings.ToLower(s) {
+		case "true", "1", "yes":
+			edgeAware = true
+		case "false", "0", "no":
+			edgeAware = false
+		default:
+			log.Warn("plate_speck_cleanup: invalid edge_aware (want true/false), using default", "raw", s, "default", edgeAware)
 		}
 	}
 
@@ -1122,6 +1150,8 @@ func (p *PlateSpeckCleanupProcessor) Run(artifactPath string, cfg map[string]str
 	componentCount := 0
 	killedComponents := 0
 	killedPixels := 0
+	killedComponentsBySize := 0
+	killedComponentsByEdge := 0
 	preservedComponents := 0
 	preservedPixels := 0
 
@@ -1136,6 +1166,12 @@ func (p *PlateSpeckCleanupProcessor) Run(artifactPath string, cfg map[string]str
 			component = component[:0]
 			queue = append(queue[:0], startIdx)
 			visited[startIdx] = true
+			// edgeAdjacent is set if any pixel in this component has a
+			// neighbor (under the chosen connectivity) that's either
+			// alpha=0 or off the image. We track it during BFS so the
+			// kill decision below has the answer in O(component) work
+			// instead of a second pass.
+			edgeAdjacent := false
 			for len(queue) > 0 {
 				idx := queue[len(queue)-1]
 				queue = queue[:len(queue)-1]
@@ -1145,23 +1181,54 @@ func (p *PlateSpeckCleanupProcessor) Run(artifactPath string, cfg map[string]str
 				for k := range dxs {
 					nx, ny := cx+dxs[k], cy+dys[k]
 					if nx < 0 || nx >= W || ny < 0 || ny >= H {
+						// Out-of-bounds neighbor: treat the image
+						// border as exterior alpha=0 so a magenta
+						// component that runs to the edge of the
+						// frame counts as edge-adjacent.
+						edgeAdjacent = true
 						continue
 					}
 					nIdx := ny*W + nx
 					if flagged[nIdx] && !visited[nIdx] {
 						visited[nIdx] = true
 						queue = append(queue, nIdx)
+						continue
+					}
+					if !flagged[nIdx] {
+						// Non-flagged neighbor: check whether it's a
+						// transparent (matted-out) pixel, which would
+						// make the component sit on the silhouette
+						// edge. We don't add it to the component.
+						nOff := ny*stride + nx*4
+						if pix[nOff+3] == 0 {
+							edgeAdjacent = true
+						}
 					}
 				}
 			}
 
-			if len(component) <= sizeThreshold {
+			killBySize := len(component) <= sizeThreshold
+			killByEdge := edgeAware && edgeAdjacent && !killBySize
+			if killBySize || killByEdge {
 				killedComponents++
 				killedPixels += len(component)
+				if killBySize {
+					killedComponentsBySize++
+				}
+				if killByEdge {
+					killedComponentsByEdge++
+				}
 				for _, idx := range component {
 					yy := idx / W
 					xx := idx - yy*W
 					off := yy*stride + xx*4
+					// Zero RGB alongside alpha so downstream Lanczos
+					// downscalers (which average RGB across neighbors
+					// regardless of alpha) cannot reintroduce magenta
+					// contamination from killed pixels.
+					pix[off] = 0
+					pix[off+1] = 0
+					pix[off+2] = 0
 					pix[off+3] = 0
 				}
 			} else {
@@ -1200,11 +1267,15 @@ func (p *PlateSpeckCleanupProcessor) Run(artifactPath string, cfg map[string]str
 		}
 	}
 
+	msg := fmt.Sprintf("flagged=%d in %d components; killed %d components (%d px); preserved %d components (%d px) (score_threshold=%.2f size_threshold=%d connectivity=%d edge_aware=%t)",
+		flaggedCount, componentCount, killedComponents, killedPixels, preservedComponents, preservedPixels, scoreThreshold, sizeThreshold, connectivity, edgeAware)
+	if edgeAware {
+		msg += fmt.Sprintf(" [killed by size=%d, killed by edge=%d]", killedComponentsBySize, killedComponentsByEdge)
+	}
 	return PostProcessResult{
-		Op:     "plate_speck_cleanup",
-		Status: PostProcessApplied,
-		Message: fmt.Sprintf("flagged=%d in %d components; killed %d components (%d px); preserved %d components (%d px) (score_threshold=%.2f size_threshold=%d connectivity=%d)",
-			flaggedCount, componentCount, killedComponents, killedPixels, preservedComponents, preservedPixels, scoreThreshold, sizeThreshold, connectivity),
+		Op:      "plate_speck_cleanup",
+		Status:  PostProcessApplied,
+		Message: msg,
 	}
 }
 
