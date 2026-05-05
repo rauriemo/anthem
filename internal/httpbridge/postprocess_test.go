@@ -2659,6 +2659,21 @@ func TestFormatResults(t *testing.T) {
 	}
 }
 
+// TestKnownPostProcessOps_MirrorsRegistry pins guests.knownPostProcessOps as
+// the closed-set mirror of httpbridge.processors. Drift between the two means
+// a guest using a registered processor (e.g. birefnet_matte) gets a noisy
+// "unknown op" WARN at every load even though the runtime handles the op
+// fine — historical bug surfaced during the gnome-tinkerer postmortem on
+// 2026-05-05.
+func TestKnownPostProcessOps_MirrorsRegistry(t *testing.T) {
+	for op := range processors {
+		errs := guests.ValidatePostProcess([]guests.PostProcessOp{{Op: op}})
+		if len(errs) != 0 {
+			t.Errorf("registered processor %q is missing from guests.knownPostProcessOps: %v", op, errs)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // validateAlpha
 // ---------------------------------------------------------------------------
